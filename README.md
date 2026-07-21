@@ -13,6 +13,7 @@
 - [Agent Roster](#agent-roster)
 - [Run Modes](#run-modes)
 - [Bug-Fix Loop](#bug-fix-loop)
+- [Git Branching & PR Workflow](#git-branching--pr-workflow)
 - [Project Structure](#project-structure)
 - [Prerequisites](#prerequisites)
 - [Installation & Setup](#installation--setup)
@@ -326,6 +327,60 @@ flowchart TD
 
 ---
 
+## Git Branching & PR Workflow
+
+All developer code changes go through a structured **Git branching + GitHub PR + code review** workflow:
+
+```mermaid
+flowchart LR
+    TL[Team Leader<br/>assigns branch + reviewers] --> BRANCH[Create Feature<br/>Branch]
+    BRANCH --> DEV[Developer Agent<br/>TDD: tests first]
+    DEV --> COMMIT[Commit & Push<br/>conventional commits]
+    COMMIT --> PR[Create GitHub PR<br/>title + description]
+    PR --> REVIEW[Reviewer Agents<br/>code review]
+    REVIEW -->|Approved| MERGE[Squash Merge<br/>to main]
+    REVIEW -->|Changes Requested| FIX[Fix & Push]
+    FIX --> REVIEW
+
+    style BRANCH fill:#22c55e,color:#fff
+    style MERGE fill:#3b82f6,color:#fff
+    style FIX fill:#ef4444,color:#fff
+```
+
+### Key Features
+
+- **No direct commits to main/master** — all changes go through feature branches
+- **Meaningful commits** — conventional commit format (`feat:`, `fix:`, `test:`, `refactor:`)
+- **PR descriptions** — auto-generated with task summary, changes made, and current state (for bugs/fixes)
+- **Rank-based reviewers** — Junior → 2 Seniors review; Senior → 2 Principals; Principal → 2 other Principals
+- **Iterative review** — reviewers can request changes, developers fix, re-review up to `MAX_REVIEW_ITERATIONS`
+- **Shared branches** — multiple agents on the same feature share one branch
+- **TDD enforcement** — developers write tests first (red), implement (green), then refactor
+
+### Review Rules
+
+| Developer Rank | Reviewed By |
+|---------------|-------------|
+| Junior | 2 Senior developers |
+| Senior | 2 Principal developers |
+| Principal | 2 other Principal developers |
+
+### Required Configuration
+
+Set these environment variables in `.env` to enable the PR workflow:
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `GITHUB_TOKEN` | Yes | GitHub PAT with `repo` scope |
+| `GITHUB_OWNER` | Yes | Repository owner (org or user) |
+| `GITHUB_REPO` | Yes | Repository name |
+| `GIT_DEFAULT_BRANCH` | No | Default branch (default: `main`) |
+| `MAX_REVIEW_ITERATIONS` | No | Max review rounds (default: `5`) |
+
+> **Note:** The workspace must be an initialized Git repository with a GitHub remote.
+
+---
+
 ## Project Structure
 
 ```
@@ -339,6 +394,7 @@ AgenticDevTeam/
 │   │   ├── state.ts                        # ProjectState (Annotation + reducers)
 │   │   ├── nodes.ts                        # 10 phase node functions
 │   │   ├── graph.ts                        # StateGraph wiring + HITL interrupts
+│   │   ├── pr-workflow.ts                  # PR lifecycle orchestrator (branch → review → merge)
 │   │   └── run.ts                          # Autonomous & HITL run helpers
 │   │
 │   ├── agents/
@@ -355,13 +411,19 @@ AgenticDevTeam/
 │   │   ├── team-leader/                    # TL agent
 │   │   ├── developers/
 │   │   │   ├── registry.ts                 # 11 developer agent definitions
-│   │   │   ├── dev-agent.builder.ts        # Dev agent constructor
-│   │   │   └── dispatcher.ts               # Fan-out with topo-sort + concurrency
+│   │   │   ├── dev-agent.builder.ts        # Dev agent constructor (+ git tools)
+│   │   │   ├── reviewer-agent.builder.ts   # Code reviewer agent constructor
+│   │   │   ├── dispatcher.ts               # Branch-grouped fan-out with PR workflow
+│   │   │   └── schemas/
+│   │   │       ├── dev-output.schema.ts    # Developer agent output schema
+│   │   │       └── review-output.schema.ts # Reviewer agent output schema
 │   │   ├── qa/                             # QA Lead, Unit, E2E agents
 │   │   └── devops/                         # DevOps agent
 │   │
 │   ├── tools/
 │   │   ├── fs/workspace-tools.ts           # Sandboxed read/write/edit/list/search
+│   │   ├── git/git-tools.ts               # Git CLI tools (branch, commit, push, diff)
+│   │   ├── git/github-tools.ts            # GitHub API tools (PR, review, merge)
 │   │   ├── shell/shell-tools.ts            # Command execution in workspace
 │   │   ├── diagram/diagram-tools.ts        # Mermaid diagram emission
 │   │   ├── requirements/parse-requirements.ts  # .md/.txt/.pdf/.docx parser
@@ -500,6 +562,7 @@ Starts the orchestrator and Playwright MCP server in containers.
 | `GET` | `/api/agents` | List all 20 agents with metadata |
 | `POST` | `/api/run` | Start a new run (body: see below) |
 | `GET` | `/api/run/:id` | Get current state of a run |
+| `GET` | `/api/run/:id/prs` | List all pull requests for a run |
 | `POST` | `/api/run/:id/approve` | Approve/deny a HITL phase (body: `{ approved, feedback? }`) |
 
 #### `POST /api/run` Body
@@ -580,6 +643,11 @@ npm run build
 | `DOCKER_HOST` | — | Docker daemon URL (default: local socket) |
 | `PLAYWRIGHT_MCP_CMD` | `npx` | Playwright MCP server command |
 | `PLAYWRIGHT_MCP_ARGS` | `@playwright/mcp@latest` | Playwright MCP server arguments |
+| `GITHUB_TOKEN` | — | GitHub PAT for PR operations (requires `repo` scope) |
+| `GITHUB_OWNER` | — | GitHub repository owner (org or user) |
+| `GITHUB_REPO` | — | GitHub repository name |
+| `GIT_DEFAULT_BRANCH` | `main` | Default branch name for merging PRs |
+| `MAX_REVIEW_ITERATIONS` | `5` | Max PR review rounds before escalation |
 | `DASHBOARD_PORT` | `3000` | HTTP/WS server port |
 
 See [`.env.example`](.env.example) for the full template.
@@ -640,6 +708,7 @@ Every agent writes a detailed Markdown mission report including:
 |-------|-----------|
 | **Orchestration** | LangGraph (StateGraph, Annotations, conditional edges, HITL interrupts) |
 | **Agent Framework** | LangChain (`createReactAgent`, `ChatOpenAI`, structured output) |
+| **GitHub Integration** | Octokit REST (PR creation, code reviews, merge) |
 | **Schema Validation** | Zod (20+ schemas for all domain entities) |
 | **Runtime** | Node.js 20+ with TypeScript (tsx) |
 | **Container Management** | Dockerode + Docker Compose |

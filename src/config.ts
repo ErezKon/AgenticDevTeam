@@ -66,6 +66,24 @@ export const PLAYWRIGHT_MCP_CMD =
 export const PLAYWRIGHT_MCP_ARGS =
     (process.env.PLAYWRIGHT_MCP_ARGS ?? '@playwright/mcp@latest --headless').split(' ');
 
+// ─── GitHub ──────────────────────────────────────────────────────────────────
+
+/** GitHub Personal Access Token (or app token) for PR operations. */
+export const GITHUB_TOKEN = process.env.GITHUB_TOKEN ?? '';
+
+/** GitHub repository owner (org or user). */
+export const GITHUB_OWNER = process.env.GITHUB_OWNER ?? '';
+
+/** GitHub repository name. */
+export const GITHUB_REPO = process.env.GITHUB_REPO ?? '';
+
+/** The main/master branch name to merge PRs into. */
+export const GIT_DEFAULT_BRANCH = process.env.GIT_DEFAULT_BRANCH ?? 'main';
+
+/** Max PR review iterations before force-merging or escalating. */
+export const MAX_REVIEW_ITERATIONS =
+    parseInt(process.env.MAX_REVIEW_ITERATIONS ?? '5', 10);
+
 // ─── Dashboard ──────────────────────────────────────────────────────────────
 
 /** Port for the Express + WebSocket server. */

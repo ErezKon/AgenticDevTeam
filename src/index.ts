@@ -175,6 +175,23 @@ app.post('/api/run/:id/approve', async (req, res) => {
     }
 });
 
+// ─── PR endpoints ────────────────────────────────────────────────────────────
+
+app.get('/api/run/:id/prs', async (req, res) => {
+    const session = sessions.get(req.params.id);
+    if (session) {
+        const state = await session.getState();
+        res.json(state.pullRequests ?? []);
+        return;
+    }
+    const cached = states.get(req.params.id);
+    if (cached) {
+        res.json(cached.pullRequests ?? []);
+        return;
+    }
+    res.status(404).json({ error: 'Run not found' });
+});
+
 // ─── Serve Angular dashboard (static build) ─────────────────────────────────
 
 const dashboardPath = path.join(__dirname, '..', 'dashboard', 'dist', 'dashboard', 'browser');

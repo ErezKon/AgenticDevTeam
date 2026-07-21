@@ -7,6 +7,7 @@ import { buildAgent } from '../_shared/agent-factory';
 import { buildDevPersona } from '../_shared/persona';
 import { DeveloperOutputSchema } from './schemas/dev-output.schema';
 import { createWorkspaceTools } from '../../tools/fs/workspace-tools';
+import { createGitTools } from '../../tools/git/git-tools';
 import { createShellTool } from '../../tools/shell/shell-tools';
 import { emitMermaidTool } from '../../tools/diagram/diagram-tools';
 import type { DevAgentEntry } from './registry';
@@ -28,6 +29,7 @@ export function buildDevAgent(apiKey: string, entry: DevAgentEntry, workspaceRoo
 
     const tools = [
         ...createWorkspaceTools(workspaceRoot),
+        ...createGitTools(workspaceRoot),
         createShellTool(workspaceRoot),
         emitMermaidTool,
     ];

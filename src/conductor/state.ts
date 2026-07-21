@@ -24,6 +24,8 @@ import type {
     ArtifactRef,
     TranscriptMessage,
     CodebaseAnalysis,
+    PullRequest,
+    BranchAssignment,
 } from '../agents/_shared/base-schemas';
 
 // ─── Reducers ───────────────────────────────────────────────────────────────
@@ -128,6 +130,16 @@ export const ProjectState = Annotation.Root({
     devops: Annotation<DevOpsPlan | null>({
         reducer: replaceReducer,
         default: () => null,
+    }),
+
+    // ── PR & branching ────────────────────────────────────────────────────
+    pullRequests: Annotation<PullRequest[]>({
+        reducer: appendReducer,
+        default: () => [],
+    }),
+    branchAssignments: Annotation<BranchAssignment[]>({
+        reducer: appendReducer,
+        default: () => [],
     }),
 
     // ── Orchestration metadata ───────────────────────────────────────────

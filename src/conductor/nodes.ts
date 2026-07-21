@@ -19,7 +19,8 @@ import { dispatchDevelopers } from '../agents/developers/dispatcher';
 import { createQaLeadAgent, createQaUnitAgent, createQaE2eAgent } from '../agents/qa/qa.agents';
 import { createDevOpsAgent } from '../agents/devops/devops.agent';
 import { getPlaywrightMcpTools, closePlaywrightMcp } from '../tools/mcp/playwright-mcp';
-import { MAX_BUGFIX_ITERATIONS } from '../config';
+import { MAX_BUGFIX_ITERATIONS, GIT_DEFAULT_BRANCH } from '../config';
+import { execSync } from 'child_process';
 import type { ProjectStateType } from './state';
 import type { PhaseName, TranscriptMessage, Bug, CodebaseAnalysis } from '../agents/_shared/base-schemas';
 import * as path from 'path';
@@ -28,6 +29,30 @@ import * as fs from 'fs';
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 function ts(): string { return new Date().toISOString(); }
+
+/**
+ * Detect the default branch name for a git repo.
+ * Tries symbolic-ref, then checks for common branch names, then falls back to config.
+ */
+function detectDefaultBranch(workspacePath: string): string {
+    try {
+        const ref = execSync('git symbolic-ref refs/remotes/origin/HEAD', {
+            cwd: workspacePath, encoding: 'utf-8', timeout: 5000,
+        }).trim();
+        // refs/remotes/origin/main → main
+        return ref.replace('refs/remotes/origin/', '');
+    } catch {
+        // Fallback: check if main or master branch exists
+        try {
+            const branches = execSync('git branch --list', {
+                cwd: workspacePath, encoding: 'utf-8', timeout: 5000,
+            }).trim();
+            if (branches.includes('main')) return 'main';
+            if (branches.includes('master')) return 'master';
+        } catch { /* ignore */ }
+    }
+    return GIT_DEFAULT_BRANCH;
+}
 
 function msg(agentId: string, phase: PhaseName, message: string): TranscriptMessage {
     return { timestamp: ts(), agentId, phase, message };
@@ -74,6 +99,17 @@ export async function intakeNode(state: ProjectStateType): Promise<Partial<Proje
 
     const outputPath = createRunOutputDir(state.input.systemName);
     setRunLogPath(path.join(outputPath, 'run.log'));
+
+    // Validate workspace is a git repo (required for PR workflow)
+    const gitDir = path.join(workspacePath, '.git');
+    if (!fs.existsSync(gitDir)) {
+        throw new Error(
+            `Workspace is not a Git repository: ${workspacePath}. ` +
+            `Initialize with 'git init' and configure a GitHub remote before running.`
+        );
+    }
+    const defaultBranch = detectDefaultBranch(workspacePath);
+    intakeLog.info(`Git repo validated. Default branch: ${defaultBranch}`);
 
     intakeLog.info(`Workspace: ${workspacePath}`);
     intakeLog.info(`Output: ${outputPath}`);
@@ -349,14 +385,15 @@ export async function developmentNode(state: ProjectStateType): Promise<Partial<
 
     const result = await dispatchDevelopers(apiKey, state.assignments, state.workspacePath, contextPrompt);
 
-    devLog.info(`Development complete: ${result.fileChanges.length} file changes`);
+    devLog.info(`Development complete: ${result.fileChanges.length} file changes, ${result.pullRequests.length} PRs`);
 
     return {
         fileChanges: result.fileChanges,
         artifacts: result.artifacts,
+        pullRequests: result.pullRequests,
         transcript: [
             ...result.transcript,
-            msg('conductor', 'development', `Development phase complete: ${result.fileChanges.length} files changed`),
+            msg('conductor', 'development', `Development phase complete: ${result.fileChanges.length} files changed, ${result.pullRequests.length} PRs merged`),
         ],
         phase: 'qa' as PhaseName,
     };

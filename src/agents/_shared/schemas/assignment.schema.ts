@@ -12,5 +12,8 @@ export const AssignmentSchema = z.object({
     estimate: z.string().describe('Rough effort estimate'),
     description: z.string().describe('What the developer should do'),
     dependsOn: z.array(z.string()).describe('Assignment IDs this depends on'),
+    branchName: z.string().optional().describe('Feature branch for this assignment (set by Team Leader for shared branches)'),
+    reviewerAgentIds: z.array(z.string()).optional().describe('Assigned reviewer agent IDs'),
+    taskType: z.enum(['feature', 'bug', 'fix', 'refactor', 'chore']).default('feature').describe('Type of work'),
 });
 export type Assignment = z.infer<typeof AssignmentSchema>;

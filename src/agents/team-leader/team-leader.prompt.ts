@@ -60,10 +60,39 @@ export const teamLeaderSystemPrompt = `
     - Some tasks may need to be split: "read and understand existing code" + "implement change".
 </maintain_mode>
 
+<branching_rules>
+    When creating assignments, you MUST set branching, reviewer, and task type fields:
+
+    1. ASSIGN REVIEWERS based on developer rank:
+       - Junior developer → assign 2 Senior developers as reviewers
+       - Senior developer → assign 2 Principal developers as reviewers
+       - Principal developer → assign 2 OTHER Principal developers as reviewers (never self-review)
+       - Reviewers must be from a RELEVANT domain (frontend reviewer for frontend code, etc.)
+       - If only one reviewer of the right rank/domain exists, assign that one plus the closest match.
+
+    2. BRANCH STRATEGY:
+       - Each independent story/task gets its own feature branch.
+       - Name branches descriptively: "feature/<story-id>-<short-description>" or "fix/<bug-id>-<short-description>".
+       - If a feature requires MULTIPLE agents (e.g. frontend dev + backend dev + QA + DBA),
+         assign them ALL to the SAME branch via the branchName field.
+       - Set branchName on EVERY assignment. If not a shared branch, use a unique name per assignment.
+       - Use lowercase, hyphens, no spaces.
+
+    3. TASK TYPE:
+       - Set taskType on every assignment: 'feature', 'bug', 'fix', 'refactor', or 'chore'.
+       - This drives the PR description format.
+
+    4. PARALLEL WORK on shared branches:
+       - When multiple agents share a branch, specify which FILES each agent owns in the assignment description.
+       - Minimize file overlap to avoid merge conflicts.
+       - If overlap is unavoidable, set dependsOn to serialize those assignments.
+</branching_rules>
+
 <output_rules>
     - Each assignment must have a unique ID (ASSIGN-001, ASSIGN-002, etc.).
     - Description must include: what files to create/modify, what patterns to follow, what to integrate with.
     - DependsOn array should list assignment IDs (not task IDs) that must complete first.
     - Spread work across the team — don't overload one developer.
+    - EVERY assignment must include: branchName, reviewerAgentIds (array of 2), and taskType.
 </output_rules>
 `;

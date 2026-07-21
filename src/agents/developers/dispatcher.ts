@@ -6,11 +6,8 @@
  */
 import { MAX_CONCURRENT_DEVS } from '../../config';
 import { getLogger } from '../../utils/logger';
-import { writeArtifact } from '../_shared/artifact';
-import { buildDevAgent } from './dev-agent.builder';
-import { getDevAgent, type DevAgentEntry } from './registry';
-import type { Assignment, FileChange, ArtifactRef, TranscriptMessage, PhaseName } from '../_shared/base-schemas';
-import type { DeveloperOutput } from './schemas/dev-output.schema';
+import { executePRWorkflow } from '../../conductor/pr-workflow';
+import type { Assignment, FileChange, ArtifactRef, TranscriptMessage, PhaseName, PullRequest } from '../_shared/base-schemas';
 
 const log = getLogger('[Dispatcher]', 226);
 
@@ -18,6 +15,7 @@ export interface DispatchResult {
     fileChanges: FileChange[];
     artifacts: ArtifactRef[];
     transcript: TranscriptMessage[];
+    pullRequests: PullRequest[];
 }
 
 /**
@@ -49,42 +47,60 @@ function topoSort(assignments: Assignment[]): Assignment[][] {
 }
 
 /**
- * Run a single developer agent on its batch of assignments.
+ * Group assignments by branch name.
+ * Assignments without a branchName get their own auto-generated branch.
  */
-async function runDevAgent(
-    apiKey: string,
-    entry: DevAgentEntry,
-    myAssignments: Assignment[],
-    workspacePath: string,
-    context: string,
-): Promise<{ output: DeveloperOutput; entry: DevAgentEntry }> {
-    const devLog = getLogger(entry.tag, entry.colorCode);
-    devLog.info(`Starting work on ${myAssignments.length} assignment(s)...`);
+function groupByBranch(assignments: Assignment[]): Map<string, Assignment[]> {
+    const groups = new Map<string, Assignment[]>();
+    for (const a of assignments) {
+        const branch = a.branchName ?? `feature/${a.id}-${slugify(a.description)}`;
+        const existing = groups.get(branch) ?? [];
+        existing.push(a);
+        groups.set(branch, existing);
+    }
+    return groups;
+}
 
-    const agent = buildDevAgent(apiKey, entry, workspacePath);
-
-    const assignmentText = myAssignments.map(a =>
-        `Assignment ${a.id} [${a.priority}/${a.complexity}]: ${a.description}`
-    ).join('\n\n');
-
-    const message = `${context}\n\n## Your Assignments\n\n${assignmentText}`;
-
-    const result = await agent.invoke(
-        { messages: [{ role: 'user', content: message }] },
-        { configurable: { thread_id: `dev-${entry.id}-${Date.now()}` } },
-    );
-
-    const lastMsg = result.messages[result.messages.length - 1];
-    const parsed = typeof lastMsg.content === 'string'
-        ? JSON.parse(lastMsg.content) as DeveloperOutput
-        : lastMsg.content as DeveloperOutput;
-
-    devLog.info(`Completed: ${parsed.fileChanges?.length ?? 0} file changes`);
-    return { output: parsed, entry };
+function slugify(text: string): string {
+    return text
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-|-$/g, '')
+        .slice(0, 50);
 }
 
 /**
- * Dispatch all assignments to developer agents.
+ * Determine the primary task type for a branch group of assignments.
+ */
+function primaryTaskType(assignments: Assignment[]): 'feature' | 'bug' | 'fix' | 'refactor' | 'chore' {
+    const types = assignments.map(a => a.taskType ?? 'feature');
+    // Priority: bug > fix > refactor > feature > chore
+    const priority = ['bug', 'fix', 'refactor', 'feature', 'chore'] as const;
+    for (const t of priority) {
+        if (types.includes(t)) return t;
+    }
+    return 'feature';
+}
+
+/**
+ * Collect reviewer IDs from all assignments in a branch group.
+ * Returns a deduplicated array.
+ */
+function collectReviewers(assignments: Assignment[]): string[] {
+    const reviewers = new Set<string>();
+    for (const a of assignments) {
+        if (a.reviewerAgentIds) {
+            for (const r of a.reviewerAgentIds) reviewers.add(r);
+        }
+    }
+    return [...reviewers];
+}
+
+/**
+ * Dispatch all assignments to developer agents via the PR workflow.
+ *
+ * Assignments are grouped by branch. Each branch group goes through:
+ * branch creation → dev work → PR creation → code review → merge.
  *
  * @param apiKey       LLM token
  * @param assignments  All assignments from the Team Leader
@@ -100,77 +116,84 @@ export async function dispatchDevelopers(
     const fileChanges: FileChange[] = [];
     const artifacts: ArtifactRef[] = [];
     const transcript: TranscriptMessage[] = [];
+    const pullRequests: PullRequest[] = [];
 
-    const layers = topoSort(assignments);
-    log.info(`Dispatch plan: ${layers.length} layer(s), ${assignments.length} total assignments`);
+    // ── Group by branch ──────────────────────────────────────────────────
+    const branchGroups = groupByBranch(assignments);
+    log.info(`Dispatch plan: ${branchGroups.size} branch(es), ${assignments.length} total assignments`);
 
-    for (let i = 0; i < layers.length; i++) {
-        const layer = layers[i];
-        log.info(`Layer ${i + 1}/${layers.length}: ${layer.length} assignments`);
+    // ── Topological sort within each branch, then process branches ────────
+    // Branches with cross-branch dependencies are serialized via topoSort on assignments
+    const allAssignmentsSorted = topoSort(assignments);
 
-        // Group by developer
-        const byDev = new Map<string, Assignment[]>();
+    // Track which branches have been processed
+    const processedBranches = new Set<string>();
+
+    for (const layer of allAssignmentsSorted) {
+        // Identify which branches appear in this layer
+        const layerBranches = new Map<string, Assignment[]>();
         for (const a of layer) {
-            const existing = byDev.get(a.devAgentId) ?? [];
+            const branch = a.branchName ?? `feature/${a.id}-${slugify(a.description)}`;
+            const existing = layerBranches.get(branch) ?? [];
             existing.push(a);
-            byDev.set(a.devAgentId, existing);
+            layerBranches.set(branch, existing);
         }
 
-        // Fan out with concurrency limit
-        const devEntries = Array.from(byDev.entries());
-        for (let j = 0; j < devEntries.length; j += MAX_CONCURRENT_DEVS) {
-            const batch = devEntries.slice(j, j + MAX_CONCURRENT_DEVS);
-            const promises = batch.map(([devId, devAssignments]) => {
-                const entry = getDevAgent(devId);
-                if (!entry) {
-                    log.warn(`Unknown dev agent: ${devId}, skipping ${devAssignments.length} assignments`);
-                    return Promise.resolve(null);
-                }
-                return runDevAgent(apiKey, entry, devAssignments, workspacePath, contextPrompt);
+        // For each unprocessed branch in this layer, gather ALL its assignments
+        // (including from other layers) and run the PR workflow
+        const branchesToProcess: string[] = [];
+        for (const branch of layerBranches.keys()) {
+            if (!processedBranches.has(branch)) {
+                branchesToProcess.push(branch);
+                processedBranches.add(branch);
+            }
+        }
+
+        if (branchesToProcess.length === 0) continue;
+
+        // Fan out branch PR workflows with concurrency limit
+        for (let j = 0; j < branchesToProcess.length; j += MAX_CONCURRENT_DEVS) {
+            const batch = branchesToProcess.slice(j, j + MAX_CONCURRENT_DEVS);
+            const promises = batch.map(branchName => {
+                const branchAssignments = branchGroups.get(branchName) ?? [];
+                const reviewerIds = collectReviewers(branchAssignments);
+                const taskType = primaryTaskType(branchAssignments);
+
+                log.info(`Branch "${branchName}": ${branchAssignments.length} assignment(s), ` +
+                    `${reviewerIds.length} reviewer(s), type=${taskType}`);
+
+                return executePRWorkflow({
+                    branchName,
+                    assignments: branchAssignments,
+                    reviewerAgentIds: reviewerIds,
+                    taskType,
+                    workspacePath,
+                    apiKey,
+                    contextPrompt,
+                });
             });
 
             const results = await Promise.allSettled(promises);
             for (const r of results) {
-                if (r.status === 'fulfilled' && r.value) {
-                    const { output, entry } = r.value;
-                    if (output.fileChanges) fileChanges.push(...output.fileChanges);
-
-                    // Write mission report
-                    const artifact = writeArtifact({
-                        agentId: entry.id,
-                        colorCode: entry.colorCode,
-                        workspacePath,
-                        title: `${entry.name} Mission Report`,
-                        content: [
-                            `## Files Changed\n`,
-                            ...(output.fileChanges ?? []).map(fc =>
-                                `- **${fc.action}** \`${fc.path}\` — ${fc.summary}`
-                            ),
-                            output.notes ? `\n## Notes\n\n${output.notes}` : '',
-                            output.mermaidDiagram ? `\n## Diagram\n\n\`\`\`mermaid\n${output.mermaidDiagram}\n\`\`\`` : '',
-                        ].join('\n'),
-                    });
-                    artifacts.push(artifact);
-
-                    transcript.push({
-                        timestamp: new Date().toISOString(),
-                        agentId: entry.id,
-                        phase: 'development' as PhaseName,
-                        message: `Completed ${output.fileChanges?.length ?? 0} file changes`,
-                    });
-                } else if (r.status === 'rejected') {
-                    log.error(`Dev agent failed: ${r.reason}`);
+                if (r.status === 'fulfilled') {
+                    const prResult = r.value;
+                    fileChanges.push(...prResult.fileChanges);
+                    artifacts.push(...prResult.artifacts);
+                    transcript.push(...prResult.transcript);
+                    pullRequests.push(prResult.pullRequest);
+                } else {
+                    log.error(`PR workflow failed: ${r.reason}`);
                     transcript.push({
                         timestamp: new Date().toISOString(),
                         agentId: 'dispatcher',
                         phase: 'development' as PhaseName,
-                        message: `Agent failed: ${r.reason}`,
+                        message: `PR workflow failed: ${r.reason}`,
                     });
                 }
             }
         }
     }
 
-    log.info(`Dispatch complete: ${fileChanges.length} total file changes, ${artifacts.length} artifacts`);
-    return { fileChanges, artifacts, transcript };
+    log.info(`Dispatch complete: ${fileChanges.length} total file changes, ${pullRequests.length} PRs, ${artifacts.length} artifacts`);
+    return { fileChanges, artifacts, transcript, pullRequests };
 }

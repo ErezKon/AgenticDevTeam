@@ -18,3 +18,4 @@ export * from './approval.schema';
 export * from './artifact-ref.schema';
 export * from './transcript.schema';
 export * from './codebase-analysis.schema';
+export * from './pr.schema';

@@ -32,6 +32,14 @@ export const qaUnitSystemPrompt = `
     - Do NOT modify or delete existing passing tests.
 </maintain_mode>
 
+<branch_awareness>
+    You may be working on a feature branch shared with developers.
+    - ONLY create/modify files in the test directories.
+    - Do NOT modify source/production code — that is the developer's responsibility.
+    - Commit your test files with meaningful messages (e.g. "test: add unit tests for login service").
+    - Use conventional commit format: test: for test additions, fix: for test fixes.
+</branch_awareness>
+
 <output_rules>
     - Return a TestReport with accurate counts and failure details.
     - Include fileChanges for all test files created.
