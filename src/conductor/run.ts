@@ -17,6 +17,10 @@ export interface RunOptions {
     requirementsDocPath?: string;
     /** Run mode override. */
     mode?: 'autonomous' | 'human';
+    /** Run type: 'greenfield' (new project) or 'maintain' (existing project). */
+    runType?: 'greenfield' | 'maintain';
+    /** Absolute path to the existing project root (required for maintain mode). */
+    existingProjectPath?: string;
 }
 
 /**
@@ -35,6 +39,8 @@ export async function runAutonomous(opts: RunOptions): Promise<ProjectStateType>
             requirementsText: opts.requirementsText ?? '',
             requirementsDocPath: opts.requirementsDocPath,
             mode: 'autonomous',
+            runType: opts.runType ?? 'greenfield',
+            existingProjectPath: opts.existingProjectPath,
         },
     };
 
@@ -73,6 +79,8 @@ export async function runHumanInTheLoop(opts: RunOptions): Promise<RunSession> {
             requirementsText: opts.requirementsText ?? '',
             requirementsDocPath: opts.requirementsDocPath,
             mode: 'human',
+            runType: opts.runType ?? 'greenfield',
+            existingProjectPath: opts.existingProjectPath,
         },
     };
 

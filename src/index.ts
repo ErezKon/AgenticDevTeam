@@ -66,7 +66,7 @@ app.get('/api/agents', (_req, res) => {
 
 app.post('/api/run', async (req, res) => {
     try {
-        const { systemName, requirementsText, requirementsDocPath, mode } = req.body;
+        const { systemName, requirementsText, requirementsDocPath, mode, runType, existingProjectPath } = req.body;
 
         if (!systemName) {
             res.status(400).json({ error: 'systemName is required' });
@@ -83,13 +83,26 @@ app.post('/api/run', async (req, res) => {
             return;
         }
 
+        // Validate maintain mode
+        const resolvedRunType = runType === 'maintain' ? 'maintain' : 'greenfield';
+        if (resolvedRunType === 'maintain') {
+            if (!existingProjectPath) {
+                res.status(400).json({ error: 'existingProjectPath is required for maintain mode' });
+                return;
+            }
+            if (!fs.existsSync(existingProjectPath)) {
+                res.status(400).json({ error: `existingProjectPath not found: ${existingProjectPath}` });
+                return;
+            }
+        }
+
         const runMode = mode === 'autonomous' ? 'autonomous' : 'human';
 
         if (runMode === 'autonomous') {
             broadcast('run:started', { systemName, mode: 'autonomous' });
 
             // Fire and forget — results come via WebSocket
-            runAutonomous({ systemName, requirementsText: text, mode: 'autonomous' })
+            runAutonomous({ systemName, requirementsText: text, mode: 'autonomous', runType: resolvedRunType, existingProjectPath })
                 .then((state) => {
                     states.set(systemName, state);
                     broadcast('run:complete', { systemName, state });
@@ -104,6 +117,8 @@ app.post('/api/run', async (req, res) => {
                 systemName,
                 requirementsText: text,
                 mode: 'human',
+                runType: resolvedRunType,
+                existingProjectPath,
             });
 
             sessions.set(session.threadId, session);

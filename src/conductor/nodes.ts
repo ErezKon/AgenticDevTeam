@@ -9,6 +9,8 @@ import { getLogger, setRunLogPath } from '../utils/logger';
 import { writeArtifact } from '../agents/_shared/artifact';
 import { createProjectWorkspace, createRunOutputDir } from '../utils/workspace';
 import { parseRequirementsFile } from '../tools/requirements/parse-requirements';
+import { createCodebaseAnalyzerAgent } from '../agents/codebase-analyzer/codebase-analyzer.agent';
+import { writeCodebaseAnalysis, readExistingAnalysis } from '../utils/codebase-analysis-writer';
 import { createArchitectAgent } from '../agents/architect/architect.agent';
 import { createProductManagerAgent } from '../agents/product-manager/product-manager.agent';
 import { createDbaAgent } from '../agents/dba/dba.agent';
@@ -19,8 +21,9 @@ import { createDevOpsAgent } from '../agents/devops/devops.agent';
 import { getPlaywrightMcpTools, closePlaywrightMcp } from '../tools/mcp/playwright-mcp';
 import { MAX_BUGFIX_ITERATIONS } from '../config';
 import type { ProjectStateType } from './state';
-import type { PhaseName, TranscriptMessage, Bug } from '../agents/_shared/base-schemas';
+import type { PhaseName, TranscriptMessage, Bug, CodebaseAnalysis } from '../agents/_shared/base-schemas';
 import * as path from 'path';
+import * as fs from 'fs';
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -53,19 +56,91 @@ export async function intakeNode(state: ProjectStateType): Promise<Partial<Proje
         intakeLog.info(`Extracted ${requirementsText.length} characters`);
     }
 
-    const workspacePath = createProjectWorkspace(state.input.systemName);
+    let workspacePath: string;
+    if (state.input.runType === 'maintain') {
+        // Maintain mode: use existing project directory as workspace
+        const existingPath = state.input.existingProjectPath;
+        if (!existingPath || !fs.existsSync(existingPath)) {
+            throw new Error(`Existing project path not found: ${existingPath}`);
+        }
+        workspacePath = path.resolve(existingPath);
+        intakeLog.info(`Maintain mode: using existing project at ${workspacePath}`);
+        // Ensure docs/ subdir exists for artifacts
+        fs.mkdirSync(path.join(workspacePath, 'docs', 'agents'), { recursive: true });
+    } else {
+        // Greenfield mode: create a new project workspace
+        workspacePath = createProjectWorkspace(state.input.systemName);
+    }
+
     const outputPath = createRunOutputDir(state.input.systemName);
     setRunLogPath(path.join(outputPath, 'run.log'));
 
     intakeLog.info(`Workspace: ${workspacePath}`);
     intakeLog.info(`Output: ${outputPath}`);
+    intakeLog.info(`Run type: ${state.input.runType ?? 'greenfield'}`);
+
+    const nextPhase = state.input.runType === 'maintain' ? 'codebase-analyzer' : 'architect';
 
     return {
         input: { ...state.input, requirementsText },
         workspacePath,
         outputPath,
+        phase: nextPhase as PhaseName,
+        transcript: [msg('conductor', 'intake', `Intake complete (${state.input.runType ?? 'greenfield'}). Requirements: ${requirementsText.length} chars`)],
+    };
+}
+
+// ─── 1b. Codebase Analyzer (maintain mode only) ─────────────────────────────
+
+const analyzerLog = getLogger('[Analyzer]', 147);
+
+export async function codebaseAnalyzerNode(state: ProjectStateType): Promise<Partial<ProjectStateType>> {
+    analyzerLog.info('Starting codebase analysis...');
+    const apiKey = await getAccessToken();
+    const agent = createCodebaseAnalyzerAgent(apiKey, state.workspacePath);
+
+    // Check for existing analysis to use as baseline
+    const existingAnalysis = readExistingAnalysis(state.workspacePath);
+    const contextParts: string[] = [];
+    if (existingAnalysis) {
+        analyzerLog.info('Found existing codebase-analysis.md — using as baseline');
+        contextParts.push(`## Previous Codebase Analysis (use as baseline, update what changed)\n\n${existingAnalysis}`);
+    }
+    contextParts.push(`## Task\n\nAnalyze the codebase at the workspace root and produce a comprehensive CodebaseAnalysis.`);
+
+    const userMsg = contextParts.join('\n\n');
+    const output = await invokeAgent(agent, userMsg, 'codebase-analyzer');
+
+    analyzerLog.info(`Analysis complete: ${output.modules?.length ?? 0} modules, ${output.primaryLanguages?.length ?? 0} languages`);
+    analyzerLog.info(`Architecture: ${output.architecture?.style ?? 'unknown'}`);
+
+    // Write analysis to both locations
+    writeCodebaseAnalysis(output, state.workspacePath, state.outputPath);
+
+    const artifact = writeArtifact({
+        agentId: 'codebase-analyzer',
+        colorCode: 147,
+        workspacePath: state.workspacePath,
+        title: 'Codebase Analyzer Mission Report',
+        content: [
+            `## Project: ${output.projectName} (${output.projectType})`,
+            `\n## Languages: ${(output.primaryLanguages ?? []).join(', ')}`,
+            `\n## Frameworks: ${(output.frameworks ?? []).join(', ')}`,
+            `\n## Architecture: ${output.architecture?.style}`,
+            `\n${output.architecture?.description ?? ''}`,
+            output.architecture?.mermaidDiagram ? `\n\`\`\`mermaid\n${output.architecture.mermaidDiagram}\n\`\`\`` : '',
+            `\n## Modules (${(output.modules ?? []).length})`,
+            ...(output.modules ?? []).map((m: any) => `- **${m.name}** (\`${m.path}\`): ${m.responsibility}`),
+            `\n## Known Issues (${(output.knownIssues ?? []).length})`,
+            ...(output.knownIssues ?? []).map((i: string) => `- ${i}`),
+        ].join('\n'),
+    });
+
+    return {
+        codebaseAnalysis: output as CodebaseAnalysis,
         phase: 'architect' as PhaseName,
-        transcript: [msg('conductor', 'intake', `Intake complete. Requirements: ${requirementsText.length} chars`)],
+        artifacts: [artifact],
+        transcript: [msg('codebase-analyzer', 'codebase-analyzer', `Analyzed ${output.modules?.length ?? 0} modules across ${output.primaryLanguages?.length ?? 0} languages`)],
     };
 }
 
@@ -78,7 +153,12 @@ export async function architectNode(state: ProjectStateType): Promise<Partial<Pr
     const apiKey = await getAccessToken();
     const agent = createArchitectAgent(apiKey);
 
-    const userMsg = `## System Requirements\n\n${state.input.requirementsText}`;
+    const userMsgParts = [`## System Requirements\n\n${state.input.requirementsText}`];
+    if (state.codebaseAnalysis) {
+        userMsgParts.unshift(`## Existing Codebase Analysis\n\n${JSON.stringify(state.codebaseAnalysis, null, 2)}`);
+        userMsgParts.push(`\n## NOTE: This is MAINTAIN mode. Design CHANGES to the existing system, not a new system from scratch.`);
+    }
+    const userMsg = userMsgParts.join('\n');
     const output = await invokeAgent(agent, userMsg, 'architect');
 
     archLog.info(`Architecture: ${output.architecture?.components?.length ?? 0} components`);
@@ -118,12 +198,17 @@ export async function productManagerNode(state: ProjectStateType): Promise<Parti
     const apiKey = await getAccessToken();
     const agent = createProductManagerAgent(apiKey);
 
-    const userMsg = [
+    const pmParts = [
         `## Architecture\n\n${JSON.stringify(state.architecture, null, 2)}`,
         `\n## Tech Stack\n\n${JSON.stringify(state.techStack, null, 2)}`,
         `\n## Epics\n\n${JSON.stringify(state.epics, null, 2)}`,
         `\n## Original Requirements\n\n${state.input.requirementsText}`,
-    ].join('\n');
+    ];
+    if (state.codebaseAnalysis) {
+        pmParts.unshift(`## Existing Codebase Analysis\n\n${JSON.stringify(state.codebaseAnalysis, null, 2)}`);
+        pmParts.push(`\n## NOTE: This is MAINTAIN mode. Create stories/tasks for CHANGES to the existing system.`);
+    }
+    const userMsg = pmParts.join('\n');
 
     const output = await invokeAgent(agent, userMsg, 'pm');
     pmLog.info(`Stories: ${output.userStories?.length ?? 0}, Tasks: ${output.tasks?.length ?? 0}`);
@@ -159,12 +244,17 @@ export async function dbaNode(state: ProjectStateType): Promise<Partial<ProjectS
     const apiKey = await getAccessToken();
     const agent = createDbaAgent(apiKey);
 
-    const userMsg = [
+    const dbaParts = [
         `## Architecture\n\n${JSON.stringify(state.architecture, null, 2)}`,
         `\n## Tech Stack\n\n${JSON.stringify(state.techStack, null, 2)}`,
         `\n## User Stories\n\n${JSON.stringify(state.userStories, null, 2)}`,
         `\n## Tasks\n\n${JSON.stringify(state.tasks, null, 2)}`,
-    ].join('\n');
+    ];
+    if (state.codebaseAnalysis) {
+        dbaParts.unshift(`## Existing Codebase Analysis\n\n${JSON.stringify(state.codebaseAnalysis, null, 2)}`);
+        dbaParts.push(`\n## NOTE: This is MAINTAIN mode. Design only the DB CHANGES needed, not the full schema from scratch.`);
+    }
+    const userMsg = dbaParts.join('\n');
 
     const output = await invokeAgent(agent, userMsg, 'dba');
     dbaLog.info(`DB engine: ${output.dbDesign?.engine}, Entities: ${output.dbDesign?.entities?.length ?? 0}`);
@@ -199,13 +289,18 @@ export async function teamLeaderNode(state: ProjectStateType): Promise<Partial<P
     const apiKey = await getAccessToken();
     const agent = createTeamLeaderAgent(apiKey);
 
-    const userMsg = [
+    const tlParts = [
         `## Architecture\n\n${JSON.stringify(state.architecture, null, 2)}`,
         `\n## Tech Stack\n\n${JSON.stringify(state.techStack, null, 2)}`,
         `\n## DB Design\n\n${JSON.stringify(state.dbDesign, null, 2)}`,
         `\n## User Stories\n\n${JSON.stringify(state.userStories, null, 2)}`,
         `\n## Tasks\n\n${JSON.stringify(state.tasks, null, 2)}`,
-    ].join('\n');
+    ];
+    if (state.codebaseAnalysis) {
+        tlParts.unshift(`## Existing Codebase Analysis\n\n${JSON.stringify(state.codebaseAnalysis, null, 2)}`);
+        tlParts.push(`\n## NOTE: This is MAINTAIN mode. Assignments may involve modifying existing files.`);
+    }
+    const userMsg = tlParts.join('\n');
 
     const output = await invokeAgent(agent, userMsg, 'tl');
     tlLog.info(`Assignments: ${output.assignments?.length ?? 0}`);
@@ -239,13 +334,18 @@ export async function developmentNode(state: ProjectStateType): Promise<Partial<
     devLog.info(`Starting development with ${state.assignments.length} assignments...`);
     const apiKey = await getAccessToken();
 
-    const contextPrompt = [
+    const devParts = [
         `## Architecture\n\n${JSON.stringify(state.architecture, null, 2)}`,
         `\n## Tech Stack\n\n${JSON.stringify(state.techStack, null, 2)}`,
         `\n## DB Design\n\n${JSON.stringify(state.dbDesign, null, 2)}`,
         `\n## User Stories\n\n${JSON.stringify(state.userStories, null, 2)}`,
         `\n## Existing File Changes\n\n${JSON.stringify(state.fileChanges, null, 2)}`,
-    ].join('\n');
+    ];
+    if (state.codebaseAnalysis) {
+        devParts.unshift(`## Existing Codebase Analysis\n\n${JSON.stringify(state.codebaseAnalysis, null, 2)}`);
+        devParts.push(`\n## NOTE: This is MAINTAIN mode. Modify existing files where appropriate rather than creating new ones.`);
+    }
+    const contextPrompt = devParts.join('\n');
 
     const result = await dispatchDevelopers(apiKey, state.assignments, state.workspacePath, contextPrompt);
 
@@ -407,12 +507,17 @@ export async function devopsNode(state: ProjectStateType): Promise<Partial<Proje
     const apiKey = await getAccessToken();
     const agent = createDevOpsAgent(apiKey, state.workspacePath);
 
-    const userMsg = [
+    const devopsParts = [
         `## Architecture\n\n${JSON.stringify(state.architecture, null, 2)}`,
         `\n## Tech Stack\n\n${JSON.stringify(state.techStack, null, 2)}`,
         `\n## DB Design\n\n${JSON.stringify(state.dbDesign, null, 2)}`,
         `\n## File Changes\n\n${JSON.stringify(state.fileChanges, null, 2)}`,
-    ].join('\n');
+    ];
+    if (state.codebaseAnalysis) {
+        devopsParts.unshift(`## Existing Codebase Analysis\n\n${JSON.stringify(state.codebaseAnalysis, null, 2)}`);
+        devopsParts.push(`\n## NOTE: This is MAINTAIN mode. Update existing Docker/K8s configs rather than creating from scratch.`);
+    }
+    const userMsg = devopsParts.join('\n');
 
     const output = await invokeAgent(agent, userMsg, 'devops');
     opsLog.info(`Build: ${output.devops?.buildStatus}, Run: ${output.devops?.runStatus}`);

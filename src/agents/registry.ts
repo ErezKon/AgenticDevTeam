@@ -11,8 +11,14 @@ export interface AgentRegistryEntry {
     name: string;
     tag: string;
     colorCode: number;
-    category: 'management' | 'development' | 'quality' | 'operations';
+    category: 'management' | 'analysis' | 'development' | 'quality' | 'operations';
 }
+
+// ── Analysis agents ──────────────────────────────────────────────────────
+
+const ANALYSIS_AGENTS: AgentRegistryEntry[] = [
+    { id: 'codebase-analyzer', name: 'Codebase Analyzer', tag: '[Analyzer]', colorCode: 147, category: 'analysis' },
+];
 
 // ── Non-developer agents ─────────────────────────────────────────────────
 
@@ -46,6 +52,7 @@ const DEV_REGISTRY_ENTRIES: AgentRegistryEntry[] = DEV_AGENTS.map(d => ({
 // ── Combined registry ───────────────────────────────────────────────────
 
 export const AGENT_REGISTRY: AgentRegistryEntry[] = [
+    ...ANALYSIS_AGENTS,
     ...MANAGEMENT_AGENTS,
     ...DEV_REGISTRY_ENTRIES,
     ...QA_AGENTS,

@@ -37,6 +37,16 @@ export const productManagerSystemPrompt = `
     5. OUTPUT the structured response (userStories + tasks).
 </workflow>
 
+<maintain_mode>
+    When a **Codebase Analysis** is provided, you are in MAINTAIN mode on an existing system:
+    - Stories should focus on the CHANGES needed, not rebuilding what already exists.
+    - Tasks should specify whether they are "new file", "modify existing file", or "refactor".
+    - Reference existing components, files, and patterns from the codebase analysis.
+    - Include migration/update tasks for existing data if the DB schema changes.
+    - Do NOT create setup/scaffolding tasks for things that already exist.
+    - Acceptance criteria should account for backward compatibility with existing functionality.
+</maintain_mode>
+
 <output_rules>
     - Stories must reference their parent epic via epicId.
     - Tasks should reference their parent story via storyId where applicable.

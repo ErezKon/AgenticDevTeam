@@ -74,11 +74,12 @@ async function mainMenu(): Promise<void> {
     console.log(`${color256(255)}Commands:${LogColors.RESET}`);
     console.log('  1) Start new run (autonomous)');
     console.log('  2) Start new run (human-in-the-loop)');
-    console.log('  3) Show agent roster');
-    console.log('  4) Exit');
+    console.log('  3) Maintain existing project');
+    console.log('  4) Show agent roster');
+    console.log('  5) Exit');
     console.log('');
 
-    const choice = await ask('Choose [1-4]: ');
+    const choice = await ask('Choose [1-5]: ');
 
     switch (choice) {
         case '1':
@@ -88,10 +89,13 @@ async function mainMenu(): Promise<void> {
             await startHitlRun();
             break;
         case '3':
+            await startMaintainRun();
+            break;
+        case '4':
             printAgentRoster();
             await mainMenu();
             break;
-        case '4':
+        case '5':
             console.log(`${TAG} Goodbye!`);
             rl.close();
             process.exit(0);
@@ -267,6 +271,148 @@ async function startHitlRun() {
             default:
                 console.log(`${TAG} Invalid choice.`);
         }
+    }
+
+    await mainMenu();
+}
+
+// ─── Maintain existing project ──────────────────────────────────────────────
+
+async function startMaintainRun() {
+    const projectPath = await ask('Existing project path: ');
+    const resolvedPath = path.resolve(projectPath);
+    if (!fs.existsSync(resolvedPath)) {
+        console.log(`${TAG} ${LogColors.RED}Directory not found: ${resolvedPath}${LogColors.RESET}`);
+        await mainMenu();
+        return;
+    }
+
+    // Infer system name from directory, allow override
+    const dirName = path.basename(resolvedPath);
+    const systemName = await ask(`System name [${dirName}]: `) || dirName;
+
+    // Get the specs/demands
+    console.log(`${TAG} How to provide the specs/demands?`);
+    console.log('  1) File path (.md, .txt, .pdf, .docx)');
+    console.log('  2) Type/paste text inline');
+
+    const method = await ask('Choose [1-2]: ');
+    let requirementsText: string | undefined;
+    let requirementsDocPath: string | undefined;
+
+    if (method === '1') {
+        const filePath = await ask('File path: ');
+        const resolved = path.resolve(filePath);
+        if (!fs.existsSync(resolved)) {
+            console.log(`${TAG} ${LogColors.RED}File not found: ${resolved}${LogColors.RESET}`);
+            await mainMenu();
+            return;
+        }
+        requirementsDocPath = resolved;
+        console.log(`${TAG} Parsing specs file...`);
+        requirementsText = await parseRequirementsFile(resolved);
+    } else {
+        console.log(`${TAG} Enter specs/demands (type END on a new line to finish):`);
+        const lines: string[] = [];
+        while (true) {
+            const line = await ask('');
+            if (line === 'END') break;
+            lines.push(line);
+        }
+        requirementsText = lines.join('\n');
+    }
+
+    // Choose run mode
+    console.log(`${TAG} Run mode?`);
+    console.log('  1) Autonomous (no stops)');
+    console.log('  2) Human-in-the-loop (approve each phase)');
+    const modeChoice = await ask('Choose [1-2]: ');
+    const mode = modeChoice === '1' ? 'autonomous' : 'human';
+
+    console.log(`\n${TAG} Starting ${mode} maintain run for "${systemName}" at ${resolvedPath}...\n`);
+
+    const runOpts = {
+        systemName,
+        requirementsText,
+        requirementsDocPath,
+        mode: mode as 'autonomous' | 'human',
+        runType: 'maintain' as const,
+        existingProjectPath: resolvedPath,
+    };
+
+    try {
+        if (mode === 'autonomous') {
+            const finalState = await runAutonomous(runOpts);
+            console.log(`\n${color256(46)}═══ Maintain Run Complete ═══${LogColors.RESET}`);
+            printPhaseStatus(finalState);
+            if (finalState.workspacePath) console.log(`${TAG} Project: ${finalState.workspacePath}`);
+            if (finalState.outputPath) console.log(`${TAG} Run logs: ${finalState.outputPath}`);
+        } else {
+            const session = await runHumanInTheLoop(runOpts);
+
+            let running = true;
+            while (running) {
+                const state = await session.getState();
+                printPhaseStatus(state);
+
+                if (state.phase === 'finalize') {
+                    console.log(`${color256(46)}═══ Maintain Run Complete ═══${LogColors.RESET}`);
+                    if (state.workspacePath) console.log(`${TAG} Project: ${state.workspacePath}`);
+                    if (state.outputPath) console.log(`${TAG} Run logs: ${state.outputPath}`);
+                    running = false;
+                    break;
+                }
+
+                const recentTranscript = state.transcript.slice(-5);
+                if (recentTranscript.length > 0) {
+                    console.log(`${color256(255)}Recent activity:${LogColors.RESET}`);
+                    for (const t of recentTranscript) {
+                        console.log(`  ${t.timestamp} ${t.agentId}: ${t.message}`);
+                    }
+                    console.log('');
+                }
+
+                console.log(`${TAG} Phase "${state.phase}" is ready for review.`);
+                console.log('  a) Approve and continue');
+                console.log('  d) Deny (stop the run)');
+                console.log('  e) Enhance (provide feedback and re-run this phase)');
+                console.log('  s) Show full state details');
+
+                const decision = await ask('Your decision [a/d/e/s]: ');
+
+                switch (decision.toLowerCase()) {
+                    case 'a': {
+                        console.log(`${TAG} Approved. Continuing...\n`);
+                        try { await session.resume(true); } catch (err: any) {
+                            console.error(`${TAG} ${LogColors.RED}Error: ${err.message}${LogColors.RESET}`);
+                        }
+                        break;
+                    }
+                    case 'd': {
+                        console.log(`${TAG} Run denied by user.`);
+                        running = false;
+                        break;
+                    }
+                    case 'e': {
+                        const feedback = await ask('Enhancement feedback: ');
+                        console.log(`${TAG} Enhancing with feedback...\n`);
+                        try { await session.resume(true, feedback); } catch (err: any) {
+                            console.error(`${TAG} ${LogColors.RED}Error: ${err.message}${LogColors.RESET}`);
+                        }
+                        break;
+                    }
+                    case 's': {
+                        console.log(JSON.stringify(state, null, 2));
+                        break;
+                    }
+                    default:
+                        console.log(`${TAG} Invalid choice.`);
+                }
+            }
+        }
+    } catch (err: any) {
+        console.error(`\n${TAG} ${LogColors.RED}Maintain run failed: ${err.message}${LogColors.RESET}`);
+        console.error(err.stack);
     }
 
     await mainMenu();

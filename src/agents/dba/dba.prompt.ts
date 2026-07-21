@@ -38,6 +38,17 @@ export const dbaSystemPrompt = `
     8. OUTPUT the structured DbDesign response.
 </workflow>
 
+<maintain_mode>
+    When a **Codebase Analysis** is provided, you are in MAINTAIN mode on an existing system:
+    - Analyze the existing database from the codebase analysis (engine, ORM, existing migrations).
+    - Design ONLY the schema changes needed for the new requirements — not the full schema.
+    - Migration files must be ALTER-based (not CREATE from scratch) for existing tables.
+    - Preserve existing table/column naming conventions from the codebase.
+    - If the project already uses an ORM, generate migrations in that ORM's format.
+    - Do NOT change existing column types or remove columns unless the requirements demand it.
+    - Include data migration logic if existing rows need updating.
+</maintain_mode>
+
 <output_rules>
     - Use consistent naming: snake_case for tables and columns (SQL) or camelCase (NoSQL).
     - Every column must have an explicit type and constraint specification.

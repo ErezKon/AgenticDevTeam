@@ -1,6 +1,6 @@
 # AgenticDevTeam
 
-> A LangGraph-orchestrated multi-agent system that ingests a requirements document and autonomously designs, builds, tests, and containerizes a complete software product.
+> A LangGraph-orchestrated multi-agent system that ingests a requirements document and autonomously designs, builds, tests, and containerizes a complete software product — or maintains, extends, and fixes an existing one.
 
 ---
 
@@ -9,6 +9,7 @@
 - [Overview](#overview)
 - [Architecture](#architecture)
 - [Pipeline Flow](#pipeline-flow)
+- [Maintaining Existing Projects](#maintaining-existing-projects)
 - [Agent Roster](#agent-roster)
 - [Run Modes](#run-modes)
 - [Bug-Fix Loop](#bug-fix-loop)
@@ -27,7 +28,12 @@
 
 ## Overview
 
-AgenticDevTeam is a **fully autonomous software delivery pipeline** powered by 19 specialized AI agents. Given a requirements document (Markdown, TXT, PDF, or DOCX), the system will:
+AgenticDevTeam is a **fully autonomous software delivery pipeline** powered by 20 specialized AI agents. It supports two run types:
+
+- **Greenfield** — build a new project from scratch given a requirements document
+- **Maintain** — analyze an existing codebase and apply changes, fixes, or new features
+
+Given a requirements document (Markdown, TXT, PDF, or DOCX), the system will:
 
 1. **Design** the architecture, select the tech stack, and produce component diagrams
 2. **Plan** epics, user stories, acceptance criteria, and granular tasks
@@ -109,7 +115,7 @@ graph TB
 | **Conductor** | `src/conductor/` | LangGraph state machine — nodes, graph, run modes |
 | **ProjectState** | `src/conductor/state.ts` | Single source of truth with typed annotations and merge reducers |
 | **Agent Factory** | `src/agents/_shared/agent-factory.ts` | Builds LangGraph `createReactAgent` instances with OAuth, tools, and checkpointers |
-| **Agent Registry** | `src/agents/registry.ts` | 19-agent lookup table with IDs, display tags, and color codes |
+| **Agent Registry** | `src/agents/registry.ts` | 20-agent lookup table with IDs, display tags, and color codes |
 | **Tools** | `src/tools/` | Workspace filesystem, sandboxed shell, Mermaid diagrams, requirements parser, Playwright MCP |
 | **Docker Runner** | `src/executor/docker-runner.ts` | Dockerode-based image build, container run, and health checks |
 | **CLI** | `src/cli.ts` | Interactive terminal interface |
@@ -154,9 +160,60 @@ flowchart LR
 | 9 | **DevOps** | `devopsNode` | Generate Dockerfiles, docker-compose, K8s manifests; build images; run containers; health-check |
 | 10 | **Finalize** | `finalizeNode` | Write final mission report with summary, stats, and Mermaid diagrams; close run |
 
+### Maintain-Mode Pipeline
+
+When targeting an existing codebase, a **Codebase Analyzer** step is inserted before the Architect:
+
+```mermaid
+flowchart LR
+    START([Specs / Demands<br/>Document]) --> INTAKE[Intake<br/>set workspace to<br/>existing project]
+    INTAKE --> ANALYZER[Codebase<br/>Analyzer]
+    ANALYZER --> ARCH[Architect<br/>plan changes]
+    ARCH --> PM[Product<br/>Manager]
+    PM --> DBA[DBA<br/>migration changes]
+    DBA --> TL[Team<br/>Leader]
+    TL --> DEV[Development<br/>modify existing code]
+    DEV --> QA[QA<br/>extend tests]
+    QA -->|All pass| DEVOPS[DevOps<br/>update configs]
+    QA -->|Failures| BUG[Bug-fix<br/>Triage]
+    BUG --> DEV
+    DEVOPS --> FIN([Finalize])
+
+    style START fill:#f59e0b,color:#fff
+    style ANALYZER fill:#8b5cf6,color:#fff
+    style FIN fill:#3b82f6,color:#fff
+    style BUG fill:#ef4444,color:#fff
+```
+
+---
+
+## Maintaining Existing Projects
+
+In **maintain mode**, agents operate on an existing codebase rather than generating a new one:
+
+1. **Intake** validates the existing project path and uses it as the workspace (no new directory created)
+2. **Codebase Analyzer** scans the project — file tree, architecture, modules, DB, tests, build tooling — producing a structured `CodebaseAnalysis` and a persistent `docs/codebase-analysis.md`
+3. **Architect** receives the analysis + your specs and designs **incremental changes** (not a full redesign)
+4. **Product Manager** creates stories/tasks focused on the **delta** — what to add, modify, or fix
+5. **DBA** produces only the schema **migrations** needed, not a full schema from scratch
+6. **Team Leader** assigns work, noting which existing files to modify
+7. **Developers** use `edit_file` for surgical changes, preserving existing code style and conventions
+8. **QA** extends existing test suites and adds regression tests
+9. **DevOps** updates existing Docker/K8s configs rather than recreating them
+
+### Codebase Analysis File
+
+The analyzer writes `docs/codebase-analysis.md` **inside the target project** (persistent across runs) and a snapshot in the run's `outputs/` directory. On subsequent runs, the analyzer reads the existing file as a baseline and only updates changed sections — making re-analysis faster.
+
 ---
 
 ## Agent Roster
+
+### Analysis Agents
+
+| Agent | ID | Specialty |
+|-------|----|----------|
+| Codebase Analyzer | `codebase-analyzer` | Scans and documents existing codebases for the maintenance pipeline |
 
 ### Management Agents
 
@@ -245,7 +302,7 @@ sequenceDiagram
     C-->>U: Final report
 ```
 
-**HITL interrupt points:** Architect, Product Manager, DBA, Team Leader, Development, QA, DevOps
+**HITL interrupt points:** Codebase Analyzer (maintain mode), Architect, Product Manager, DBA, Team Leader, Development, QA, DevOps
 
 ---
 
@@ -290,7 +347,8 @@ AgenticDevTeam/
 │   │   │   ├── base-schemas.ts             # 20+ Zod schemas for all domain entities
 │   │   │   ├── persona.ts                  # Developer persona prompt builder
 │   │   │   └── artifact.ts                 # Mission report writer
-│   │   ├── registry.ts                     # Master 19-agent registry
+│   │   ├── registry.ts                     # Master 20-agent registry
+│   │   ├── codebase-analyzer/              # Codebase Analyzer agent (maintain mode)
 │   │   ├── architect/                      # Architect agent (prompt, schema, agent)
 │   │   ├── product-manager/                # PM agent
 │   │   ├── dba/                            # DBA agent
@@ -317,7 +375,11 @@ AgenticDevTeam/
 │   │   ├── log-colors.util.ts              # ANSI 256-color codes
 │   │   ├── log-capture.util.ts             # Stdout/stderr capture for log files
 │   │   ├── oauth-auth.util.ts              # OAuth2 client-credentials token cache
-│   │   └── workspace.ts                    # Project workspace + output dir creation
+│   │   ├── workspace.ts                    # Project workspace + output dir creation
+│   │   └── codebase-analysis-writer.ts     # Write analysis markdown to project + outputs
+│   │
+│   ├── templates/
+│   │   └── codebase-analysis.template.ts   # Markdown renderer for CodebaseAnalysis
 │   │
 │   └── types/
 │       └── shims.d.ts                      # Module declarations (pdf-parse, mammoth)
@@ -404,12 +466,14 @@ The CLI presents a menu:
 Commands:
   1) Start new run (autonomous)
   2) Start new run (human-in-the-loop)
-  3) Show agent roster
-  4) Exit
+  3) Maintain existing project
+  4) Show agent roster
+  5) Exit
 ```
 
-- Provide a **system name** and **requirements** (file path or inline text)
-- In HITL mode, you'll approve/deny/enhance each phase interactively
+- **Options 1-2:** Greenfield — provide a **system name** and **requirements** (file path or inline text)
+- **Option 3:** Maintain — provide the **existing project path**, a name, specs/demands, and run mode
+- In HITL mode, you'll approve/deny/enhance each phase interactively (including Codebase Analyzer)
 
 ### REST + Dashboard Server
 
@@ -433,10 +497,31 @@ Starts the orchestrator and Playwright MCP server in containers.
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `GET` | `/api/agents` | List all 19 agents with metadata |
-| `POST` | `/api/run` | Start a new run (body: `{ systemName, requirementsText, mode }`) |
+| `GET` | `/api/agents` | List all 20 agents with metadata |
+| `POST` | `/api/run` | Start a new run (body: see below) |
 | `GET` | `/api/run/:id` | Get current state of a run |
 | `POST` | `/api/run/:id/approve` | Approve/deny a HITL phase (body: `{ approved, feedback? }`) |
+
+#### `POST /api/run` Body
+
+```json
+{
+  "systemName": "My App",
+  "requirementsText": "...",
+  "mode": "human",
+  "runType": "greenfield",
+  "existingProjectPath": null
+}
+```
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `systemName` | Yes | Name of the system |
+| `requirementsText` | Yes* | Full requirements text (*or provide `requirementsDocPath`) |
+| `requirementsDocPath` | No | Path to a .md/.txt/.pdf/.docx file |
+| `mode` | No | `"autonomous"` or `"human"` (default: `"human"`) |
+| `runType` | No | `"greenfield"` (default) or `"maintain"` |
+| `existingProjectPath` | Maintain only | Absolute path to the existing project directory |
 
 ### WebSocket Events
 
@@ -508,18 +593,20 @@ Each run produces two output directories:
 ### Generated Project
 
 ```
-generated-projects/<system-name>/
+generated-projects/<system-name>/    # (or the existing project in maintain mode)
 ├── src/                    # Application source code
 ├── tests/                  # Unit + integration test suites
 ├── docs/
-│   ├── architect-report.md
-│   ├── pm-report.md
-│   ├── dba-report.md
-│   ├── team-leader-report.md
-│   ├── qa-lead-report.md
-│   ├── qa-unit-report.md
-│   ├── devops-report.md
-│   └── [developer]-report.md  # One per developer agent
+│   ├── codebase-analysis.md          # (maintain mode) Persistent codebase analysis
+│   ├── agents/
+│   │   ├── architect-mission.md
+│   │   ├── product-manager-mission.md
+│   │   ├── dba-mission.md
+│   │   ├── team-leader-mission.md
+│   │   ├── codebase-analyzer-mission.md  # (maintain mode)
+│   │   ├── qa-lead-mission.md
+│   │   ├── devops-mission.md
+│   │   └── [developer]-mission.md    # One per developer agent
 ├── Dockerfile
 ├── docker-compose.yml
 ├── k8s/                    # Kubernetes manifests
@@ -531,6 +618,7 @@ generated-projects/<system-name>/
 ```
 outputs/<system-name>-<timestamp>/
 ├── run.log                 # Full console log (ANSI stripped)
+├── codebase-analysis.md    # (maintain mode) Snapshot of the analysis for this run
 ├── state.json              # Final ProjectState snapshot
 └── artifacts/              # Mission reports + diagrams
 ```

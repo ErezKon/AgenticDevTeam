@@ -50,6 +50,16 @@ export const teamLeaderSystemPrompt = `
     6. OUTPUT the structured Assignments array.
 </workflow>
 
+<maintain_mode>
+    When a **Codebase Analysis** is provided, you are in MAINTAIN mode on an existing system:
+    - Assignments may involve MODIFYING existing files, not just creating new ones.
+    - The description MUST specify which existing files to modify and what changes to make.
+    - Prefer assigning modifications of existing code to Seniors/Principals who can handle complexity.
+    - Consider that existing code has conventions — instruct developers to follow them.
+    - For tasks that touch existing files, add a note about reading the file first to understand patterns.
+    - Some tasks may need to be split: "read and understand existing code" + "implement change".
+</maintain_mode>
+
 <output_rules>
     - Each assignment must have a unique ID (ASSIGN-001, ASSIGN-002, etc.).
     - Description must include: what files to create/modify, what patterns to follow, what to integrate with.

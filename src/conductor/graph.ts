@@ -9,6 +9,7 @@ import { ProjectState } from './state';
 import { RUN_MODE, MAX_BUGFIX_ITERATIONS } from '../config';
 import {
     intakeNode,
+    codebaseAnalyzerNode,
     architectNode,
     productManagerNode,
     dbaNode,
@@ -25,6 +26,7 @@ import type { PhaseName } from '../agents/_shared/base-schemas';
 // ─── HITL interrupt points (human mode only) ────────────────────────────────
 
 const HITL_PHASES: PhaseName[] = [
+    'codebase-analyzer',
     'architect',
     'product-manager',
     'dba',
@@ -49,12 +51,20 @@ function afterBugfixRouter(state: ProjectStateType): string {
     return 'development';
 }
 
+function afterIntakeRouter(state: ProjectStateType): string {
+    if (state.input.runType === 'maintain') {
+        return 'codebase-analyzer';
+    }
+    return 'architect';
+}
+
 // ─── Graph builder ──────────────────────────────────────────────────────────
 
 export function buildConductorGraph() {
     const graph = new StateGraph(ProjectState)
         // Add all nodes
         .addNode('intake', intakeNode)
+        .addNode('codebase-analyzer', codebaseAnalyzerNode)
         .addNode('architect', architectNode)
         .addNode('product-manager', productManagerNode)
         .addNode('dba', dbaNode)
@@ -67,7 +77,15 @@ export function buildConductorGraph() {
 
         // Linear edges for the main pipeline
         .addEdge('__start__', 'intake')
-        .addEdge('intake', 'architect')
+
+        // After intake: route to analyzer (maintain) or architect (greenfield)
+        .addConditionalEdges('intake', afterIntakeRouter, {
+            'codebase-analyzer': 'codebase-analyzer',
+            'architect': 'architect',
+        })
+
+        // Analyzer always flows to architect
+        .addEdge('codebase-analyzer', 'architect')
         .addEdge('architect', 'product-manager')
         .addEdge('product-manager', 'dba')
         .addEdge('dba', 'team-leader')
@@ -92,7 +110,7 @@ export function buildConductorGraph() {
     return graph.compile({
         // In human mode, interrupt before each HITL phase so the user can approve
         ...(RUN_MODE === 'human'
-            ? { interruptBefore: HITL_PHASES as string[] }
+            ? { interruptBefore: HITL_PHASES }
             : {}),
     });
 }

@@ -21,6 +21,15 @@ export const qaLeadSystemPrompt = `
     - The test plan must be actionable — QA Unit and QA E2E agents use it directly.
 </critical_rules>
 
+<maintain_mode>
+    When a **Codebase Analysis** is provided, you are in MAINTAIN mode:
+    - Check if the project already has tests — extend them, do not duplicate or overwrite.
+    - Focus testing on the CHANGED functionality and its integration with existing code.
+    - Include regression tests to verify existing functionality is not broken by the changes.
+    - Use the existing test framework and patterns from the codebase analysis.
+    - If no tests exist, create a test suite from scratch using the project's tech stack.
+</maintain_mode>
+
 <output_rules>
     - Use the structured TestPlan format.
     - Coverage targets should be realistic: 80%+ for unit, 60%+ for integration, 100% of critical paths for e2e.

@@ -23,6 +23,15 @@ export const qaUnitSystemPrompt = `
     - Do NOT fix the code — only write tests and report results.
 </critical_rules>
 
+<maintain_mode>
+    When working on an EXISTING codebase (maintain mode):
+    - Check for existing test files before creating new ones.
+    - Add new test cases to existing test files when appropriate.
+    - Use the existing test configuration and setup patterns.
+    - Include regression tests for functionality adjacent to the changes.
+    - Do NOT modify or delete existing passing tests.
+</maintain_mode>
+
 <output_rules>
     - Return a TestReport with accurate counts and failure details.
     - Include fileChanges for all test files created.

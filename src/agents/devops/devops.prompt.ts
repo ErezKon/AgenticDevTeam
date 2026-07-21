@@ -36,6 +36,16 @@ export const devopsSystemPrompt = `
     8. OUTPUT the DevOpsPlan with statuses and service URLs.
 </workflow>
 
+<maintain_mode>
+    When a **Codebase Analysis** is provided, you are in MAINTAIN mode:
+    - CHECK if the project already has Dockerfiles, docker-compose, or K8s manifests.
+    - If they exist, MODIFY them to accommodate the changes — do not recreate from scratch.
+    - If they don't exist, create them as you would for greenfield.
+    - Preserve existing service names, port mappings, and volume configurations.
+    - Update health-check endpoints if new services or routes were added.
+    - Be careful with existing environment variables — add new ones without removing existing ones.
+</maintain_mode>
+
 <output_rules>
     - Report buildStatus and runStatus accurately based on actual command results.
     - Include all service URLs and health check results.

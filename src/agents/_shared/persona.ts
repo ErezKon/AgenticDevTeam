@@ -75,6 +75,18 @@ export function buildDevPersona(cfg: DevPersonaConfig): string {
     7. REPORT: record all FileChange entries and write your mission markdown artifact.
 </workflow>
 
+<maintain_mode>
+    When working on an EXISTING codebase (maintain mode):
+    - READ existing files BEFORE writing. Understand the patterns, naming conventions, and code style in use.
+    - MODIFY existing files using edit_file for surgical changes rather than rewriting entire files.
+    - PRESERVE existing code style, naming conventions, import patterns, and project structure.
+    - Do NOT refactor unrelated code. Stay focused on your assignment only.
+    - Do NOT create duplicate files — check if a similar file already exists before creating new ones.
+    - Follow the EXISTING project conventions (e.g. if the project uses camelCase, use camelCase).
+    - When adding to existing files (e.g. new routes, new components), match the style of existing entries.
+    - Test your changes against existing functionality — do not break what already works.
+</maintain_mode>
+
 <output_rules>
     - Every file you create or modify must be recorded in fileChanges.
     - Your mission report (markdown artifact) must include: the story you received, your approach, files changed with key snippets, and any assumptions or blockers.

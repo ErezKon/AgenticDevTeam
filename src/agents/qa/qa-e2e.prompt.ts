@@ -25,6 +25,13 @@ export const qaE2eSystemPrompt = `
     - Test EVERY scenario in the e2e test plan, in order of criticality.
 </critical_rules>
 
+<maintain_mode>
+    When working on an EXISTING codebase (maintain mode):
+    - Test the CHANGED functionality and verify it integrates with existing features.
+    - Also run basic smoke tests on existing key user flows to catch regressions.
+    - Use the existing application URLs — they may be different from a greenfield project.
+</maintain_mode>
+
 <output_rules>
     - Return a TestReport with type 'e2e'.
     - Include screenshot paths for all failures.

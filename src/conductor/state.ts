@@ -23,6 +23,7 @@ import type {
     Approval,
     ArtifactRef,
     TranscriptMessage,
+    CodebaseAnalysis,
 } from '../agents/_shared/base-schemas';
 
 // ─── Reducers ───────────────────────────────────────────────────────────────
@@ -47,6 +48,7 @@ export const ProjectState = Annotation.Root({
             systemName: '',
             requirementsText: '',
             mode: 'human' as const,
+            runType: 'greenfield' as const,
         }),
     }),
 
@@ -58,6 +60,12 @@ export const ProjectState = Annotation.Root({
     outputPath: Annotation<string>({
         reducer: replaceReducer,
         default: () => '',
+    }),
+
+    // ── Codebase analysis (maintain mode only) ───────────────────────────
+    codebaseAnalysis: Annotation<CodebaseAnalysis | null>({
+        reducer: replaceReducer,
+        default: () => null,
     }),
 
     // ── Architect outputs ────────────────────────────────────────────────

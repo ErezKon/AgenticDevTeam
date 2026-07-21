@@ -14,6 +14,8 @@ export interface RunRequest {
   systemName: string;
   requirementsText: string;
   mode: 'autonomous' | 'human';
+  runType?: 'greenfield' | 'maintain';
+  existingProjectPath?: string;
 }
 
 export interface RunResponse {
