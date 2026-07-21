@@ -1,0 +1,21 @@
+services:
+  orchestrator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "${DASHBOARD_PORT:-3000}:3000"
+    volumes:
+      - ./outputs:/app/outputs
+      - ./generated-projects:/app/generated-projects
+      - /var/run/docker.sock:/var/run/docker.sock
+    env_file:
+      - .env
+    environment:
+      - NODE_TLS_REJECT_UNAUTHORIZED=0
+    restart: unless-stopped
+
+  playwright-mcp:
+    image: mcr.microsoft.com/playwright:v1.52.0-noble
+    command: ["npx", "@playwright/mcp@latest", "--headless"]
+    restart: unless-stopped

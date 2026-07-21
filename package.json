@@ -1,0 +1,39 @@
+{
+  "name": "agentic-dev-team",
+  "version": "1.0.0",
+  "description": "Multi-agent AI system that ingests requirements and autonomously designs, builds, tests, and containerizes a complete software product.",
+  "main": "src/index.ts",
+  "scripts": {
+    "start": "NODE_TLS_REJECT_UNAUTHORIZED=0 tsx src/index.ts",
+    "cli": "NODE_TLS_REJECT_UNAUTHORIZED=0 tsx src/cli.ts",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@langchain/core": "^1.1.16",
+    "@langchain/langgraph": "^1.0.7",
+    "@langchain/mcp-adapters": "^1.1.2",
+    "@langchain/openai": "^1.2.0",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "cors": "^2.8.5",
+    "dockerode": "^4.0.7",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "langchain": "^1.2.3",
+    "mammoth": "^1.9.0",
+    "pdf-parse": "^1.1.1",
+    "ws": "^8.18.2",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.19",
+    "@types/dockerode": "^3.3.38",
+    "@types/express": "^5.0.6",
+    "@types/node": "^25.2.3",
+    "@types/pdf-parse": "^1.1.5",
+    "@types/ws": "^8.18.1",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
+  }
+}

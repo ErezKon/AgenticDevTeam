@@ -1,0 +1,9 @@
+node_modules/
+dist/
+outputs/
+generated-projects/
+.idea/
+.vscode/
+*.log
+dashboard/node_modules/
+dashboard/dist/
