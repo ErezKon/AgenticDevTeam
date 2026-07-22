@@ -1,0 +1,15 @@
+I need a calculator application.
+The calculator should support basic operations: addition, subtraction, multiplication, and division.
+It should have a clean and user-friendly interface.
+It should handle invalid input gracefully.
+It should support decimal numbers.
+It should support negative numbers.
+It should support parentheses for grouping.
+It should support the following operations:
+- Addition (+)
+- Subtraction (-)
+- Multiplication (*)
+- Division (/)
+- Parentheses ()
+- Decimal numbers (.)
+- Negative numbers (-)

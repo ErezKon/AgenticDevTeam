@@ -1,0 +1,20 @@
+for the existing SimpleCalculator program, 
+I want to add scientific calculator functionality.
+The calculator should support the following operations:
+- Square root (√)
+- Power (x^y)
+- Logarithm (log)
+- Natural logarithm (ln)
+- Sine (sin)
+- Cosine (cos)
+- Tangent (tan)
+- Factorial (n!)
+- Pi (π)
+- E (e)
+- Absolute value (|x|)
+- Radians to degrees (rad→deg)
+- Degrees to radians (deg→rad)
+- Percentage (%)
+- Parentheses ()
+- Decimal numbers (.)
+- Negative numbers (-)
