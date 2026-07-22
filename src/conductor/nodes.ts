@@ -100,15 +100,26 @@ export async function intakeNode(state: ProjectStateType): Promise<Partial<Proje
     const outputPath = createRunOutputDir(state.input.systemName);
     setRunLogPath(path.join(outputPath, 'run.log'));
 
-    // Validate workspace is a git repo (required for PR workflow)
-    const gitDir = path.join(workspacePath, '.git');
-    if (!fs.existsSync(gitDir)) {
+    // Validate workspace lives inside a git repo (required for PR workflow).
+    // Walk up from workspacePath to find the nearest .git directory.
+    let gitRoot: string | null = null;
+    let search = workspacePath;
+    while (true) {
+        if (fs.existsSync(path.join(search, '.git'))) {
+            gitRoot = search;
+            break;
+        }
+        const parent = path.dirname(search);
+        if (parent === search) break; // reached filesystem root
+        search = parent;
+    }
+    if (!gitRoot) {
         throw new Error(
-            `Workspace is not a Git repository: ${workspacePath}. ` +
-            `Initialize with 'git init' and configure a GitHub remote before running.`
+            `Workspace is not inside a Git repository: ${workspacePath}. ` +
+            `Initialize with 'git init' in a parent directory and configure a GitHub remote before running.`
         );
     }
-    const defaultBranch = detectDefaultBranch(workspacePath);
+    const defaultBranch = detectDefaultBranch(gitRoot);
     intakeLog.info(`Git repo validated. Default branch: ${defaultBranch}`);
 
     intakeLog.info(`Workspace: ${workspacePath}`);
@@ -450,14 +461,14 @@ export async function qaNode(state: ProjectStateType): Promise<Partial<ProjectSt
     // 7c. QA E2E — Playwright MCP testing (only if services are running)
     let e2eReport = null;
     let e2eArtifact = null;
-    if (state.devops?.serviceUrls && state.devops.serviceUrls.length > 0) {
+    if (state.devopsPlan?.serviceUrls && state.devopsPlan.serviceUrls.length > 0) {
         qaLog.info('QA E2E running Playwright tests...');
         try {
             const mcpTools = await getPlaywrightMcpTools();
             const qaE2eAgent = createQaE2eAgent(apiKey, mcpTools);
             const e2eMsg = [
                 `## Test Plan (e2e)\n\n${JSON.stringify(leadOutput.testPlan?.e2e, null, 2)}`,
-                `\n## Service URLs\n\n${JSON.stringify(state.devops.serviceUrls, null, 2)}`,
+                `\n## Service URLs\n\n${JSON.stringify(state.devopsPlan.serviceUrls, null, 2)}`,
             ].join('\n');
             const e2eOutput = await invokeAgent(qaE2eAgent, e2eMsg, 'qa-e2e');
             e2eReport = e2eOutput.testReport;
@@ -571,7 +582,7 @@ export async function devopsNode(state: ProjectStateType): Promise<Partial<Proje
     });
 
     return {
-        devops: output.devops,
+        devopsPlan: output.devops,
         fileChanges: output.fileChanges ?? [],
         phase: 'finalize' as PhaseName,
         artifacts: [artifact],

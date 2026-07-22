@@ -7,6 +7,9 @@
  * - Human-in-the-loop mode: pauses after each phase for approve/deny/enhance.
  * - Requirements from file path or inline text.
  */
+import { webcrypto } from 'node:crypto';
+if (!globalThis.crypto) (globalThis as any).crypto = webcrypto;
+
 import 'dotenv/config';
 import * as fs from 'fs';
 import * as path from 'path';

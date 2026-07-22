@@ -127,7 +127,7 @@ export const ProjectState = Annotation.Root({
     }),
 
     // ── DevOps outputs ───────────────────────────────────────────────────
-    devops: Annotation<DevOpsPlan | null>({
+    devopsPlan: Annotation<DevOpsPlan | null>({
         reducer: replaceReducer,
         default: () => null,
     }),

@@ -7,3 +7,4 @@ generated-projects/
 .vscode/
 *.log
 _verify*
+dashboard/.angular/*
