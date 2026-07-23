@@ -1,27 +1,23 @@
-// src/utils/errorHandler.ts
 /**
- * Formats errors thrown by the expression parser (mathjs) into user‑friendly messages.
+ * Formats errors from the expression parser into user‑friendly messages.
  *
- * The function inspects the error message and maps known patterns to a clearer
- * description that can be displayed in the UI. If the error does not match any
- * known pattern, the original message is returned.
+ * The parser (mathjs) can throw generic Error instances with various messages.
+ * This function maps known error patterns to messages that can be displayed in the UI.
+ * If the error is not recognised, a generic fallback message is returned.
  */
-export function formatError(err: Error): string {
-export default formatError;
-  const message = err.message ?? '';
+export function formatError(error: Error): string {
+  const msg = error.message.toLowerCase();
 
-  // mathjs syntax errors usually contain "Unexpected token" or "syntax"
-  if (/unexpected token|syntax/i.test(message)) {
+  // Invalid syntax – mathjs throws messages containing "unexpected" or "invalid".
+  if (msg.includes('invalid') || msg.includes('unexpected')) {
     return 'Invalid syntax';
   }
 
-  // Division by zero error from mathjs
-  if (/division by zero/i.test(message)) {
+  // Division by zero – mathjs throws "Division by zero" or similar.
+  if (msg.includes('division by zero') || msg.includes('cannot divide by zero')) {
     return 'Cannot divide by zero';
   }
 
-  // Add more mappings here as needed.
-
-  // Fallback – return the original message.
-  return message;
+  // Fallback generic message.
+  return 'An unexpected error occurred';
 }
