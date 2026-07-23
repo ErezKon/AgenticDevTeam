@@ -73,7 +73,9 @@ export const teamLeaderSystemPrompt = `
     2. BRANCH STRATEGY:
        - All dev work targets the **system branch** (project/<system-name>), NOT main/master.
        - Each independent story/task gets its own feature branch created FROM the system branch.
-       - Name branches descriptively: "feature/<story-id>-<short-description>" or "fix/<bug-id>-<short-description>".
+       - Name branches with the PROJECT SLUG prefix: "{project-slug}/feature/<story-id>-<short-description>" or "{project-slug}/fix/<bug-id>-<short-description>".
+       - The project slug is derived from the system branch name (e.g., system branch "project/simple-calculator" → slug "simple-calculator").
+       - Examples: "simple-calculator/feature/US-001-user-auth", "simple-calculator/fix/BUG-003-null-check".
        - If a feature requires MULTIPLE agents (e.g. frontend dev + backend dev + QA + DBA),
          assign them ALL to the SAME branch via the branchName field.
        - Set branchName on EVERY assignment. If not a shared branch, use a unique name per assignment.

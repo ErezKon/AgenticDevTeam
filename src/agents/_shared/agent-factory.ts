@@ -8,6 +8,7 @@ import { ChatOpenAI } from '@langchain/openai';
 import type { StructuredToolInterface } from '@langchain/core/tools';
 import { z } from 'zod';
 import { LLM_BASE_URL, LLM_MODEL } from '../../config';
+import { getAccessToken } from '../../utils/oauth-auth.util';
 
 export interface AgentConfig {
     /** Unique agent identifier (e.g. "architect", "junior-react"). */
@@ -35,6 +36,13 @@ export interface AgentConfig {
 export function buildAgent(apiKey: string, cfg: AgentConfig) {
     const checkpointer = new MemorySaver();
 
+    const oauthFetch: typeof globalThis.fetch = async (url, init) => {
+        const freshToken = await getAccessToken();
+        const headers = new Headers(init?.headers);
+        headers.set('Authorization', `Bearer ${freshToken}`);
+        return globalThis.fetch(url, { ...init, headers });
+    };
+
     const model = new ChatOpenAI({
         model: cfg.model ?? LLM_MODEL,
         temperature: cfg.temperature ?? 0.3,
@@ -44,6 +52,7 @@ export function buildAgent(apiKey: string, cfg: AgentConfig) {
         apiKey: apiKey,
         configuration: {
             baseURL: LLM_BASE_URL,
+            fetch: oauthFetch,
         },
     });
 

@@ -419,12 +419,15 @@ export async function teamLeaderNode(state: ProjectStateType): Promise<Partial<P
     const apiKey = await getAccessToken();
     const agent = createTeamLeaderAgent(apiKey);
 
+    const projectSlug = state.systemBranch.replace(/^project\//, '');
+
     const tlParts = [
         `## Architecture\n\n${JSON.stringify(state.architecture, null, 2)}`,
         `\n## Tech Stack\n\n${JSON.stringify(state.techStack, null, 2)}`,
         `\n## DB Design\n\n${JSON.stringify(state.dbDesign, null, 2)}`,
         `\n## User Stories\n\n${JSON.stringify(state.userStories, null, 2)}`,
         `\n## Tasks\n\n${JSON.stringify(state.tasks, null, 2)}`,
+        `\n## Project Slug: ${projectSlug}\nUse this slug as the prefix for all branch names (e.g., "${projectSlug}/feature/US-001-description").`,
     ];
     if (state.codebaseAnalysis) {
         tlParts.unshift(`## Existing Codebase Analysis\n\n${JSON.stringify(state.codebaseAnalysis, null, 2)}`);
@@ -476,8 +479,9 @@ export async function developmentNode(state: ProjectStateType): Promise<Partial<
         devParts.push(`\n## NOTE: This is MAINTAIN mode. Modify existing files where appropriate rather than creating new ones.`);
     }
     const contextPrompt = devParts.join('\n');
+    const projectSlug = state.systemBranch.replace(/^project\//, '');
 
-    const result = await dispatchDevelopers(apiKey, state.assignments, state.workspacePath, contextPrompt, state.systemBranch);
+    const result = await dispatchDevelopers(apiKey, state.assignments, state.workspacePath, contextPrompt, state.systemBranch, projectSlug);
 
     devLog.info(`Development complete: ${result.fileChanges.length} file changes, ${result.pullRequests.length} PRs`);
 

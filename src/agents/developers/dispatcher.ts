@@ -50,10 +50,14 @@ function topoSort(assignments: Assignment[]): Assignment[][] {
  * Group assignments by branch name.
  * Assignments without a branchName get their own auto-generated branch.
  */
-function groupByBranch(assignments: Assignment[]): Map<string, Assignment[]> {
+function groupByBranch(assignments: Assignment[], projectSlug: string): Map<string, Assignment[]> {
     const groups = new Map<string, Assignment[]>();
     for (const a of assignments) {
-        const branch = a.branchName ?? `feature/${a.id}-${slugify(a.description)}`;
+        let branch = a.branchName ?? `${projectSlug}/feature/${a.id}-${slugify(a.description)}`;
+        // Ensure project slug prefix even if team leader forgot it
+        if (!branch.startsWith(`${projectSlug}/`)) {
+            branch = `${projectSlug}/${branch}`;
+        }
         const existing = groups.get(branch) ?? [];
         existing.push(a);
         groups.set(branch, existing);
@@ -113,6 +117,7 @@ export async function dispatchDevelopers(
     workspacePath: string,
     contextPrompt: string,
     baseBranch: string,
+    projectSlug: string,
 ): Promise<DispatchResult> {
     const fileChanges: FileChange[] = [];
     const artifacts: ArtifactRef[] = [];
@@ -120,7 +125,7 @@ export async function dispatchDevelopers(
     const pullRequests: PullRequest[] = [];
 
     // ── Group by branch ──────────────────────────────────────────────────
-    const branchGroups = groupByBranch(assignments);
+    const branchGroups = groupByBranch(assignments, projectSlug);
     log.info(`Dispatch plan: ${branchGroups.size} branch(es), ${assignments.length} total assignments`);
 
     // ── Topological sort within each branch, then process branches ────────
@@ -134,7 +139,10 @@ export async function dispatchDevelopers(
         // Identify which branches appear in this layer
         const layerBranches = new Map<string, Assignment[]>();
         for (const a of layer) {
-            const branch = a.branchName ?? `feature/${a.id}-${slugify(a.description)}`;
+            let branch = a.branchName ?? `${projectSlug}/feature/${a.id}-${slugify(a.description)}`;
+            if (!branch.startsWith(`${projectSlug}/`)) {
+                branch = `${projectSlug}/${branch}`;
+            }
             const existing = layerBranches.get(branch) ?? [];
             existing.push(a);
             layerBranches.set(branch, existing);
@@ -172,6 +180,7 @@ export async function dispatchDevelopers(
                     workspacePath,
                     apiKey,
                     contextPrompt,
+                    projectSlug,
                 });
             });
 

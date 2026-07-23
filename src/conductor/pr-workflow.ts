@@ -41,6 +41,7 @@ export interface PRWorkflowInput {
     apiKey: string;
     contextPrompt: string;
     currentState?: string;
+    projectSlug: string;
 }
 
 export interface PRWorkflowResult {
@@ -177,8 +178,10 @@ async function invokeReviewerAgent(
 export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkflowResult> {
     const {
         branchName, baseBranch, assignments, reviewerAgentIds, taskType,
-        workspacePath, apiKey, contextPrompt, currentState,
+        workspacePath, apiKey, contextPrompt, currentState, projectSlug,
     } = input;
+
+    const primaryStoryId = assignments[0]?.storyId ?? 'CLEANUP';
 
     const allFileChanges: FileChange[] = [];
     const allArtifacts: ArtifactRef[] = [];
@@ -240,6 +243,7 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
 
             const message = [
                 contextPrompt,
+                `\n## Project Slug: ${projectSlug}`,
                 `\n## Your Branch: ${branchName}`,
                 `\nYou are already on this branch. Do NOT create or switch branches — your workspace is isolated for this branch.`,
                 `\n## Your Assignments\n\n${assignmentText}`,
@@ -277,7 +281,7 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
         gitExec(worktreeWorkspace, 'add .');
         const statusOutput = gitExec(worktreeWorkspace, 'status --short');
         if (statusOutput && !statusOutput.includes('nothing to commit')) {
-            gitExec(worktreeWorkspace, `commit -m "chore: final cleanup for ${branchName}"`);
+            gitExec(worktreeWorkspace, `commit -m "[${projectSlug}]-[${primaryStoryId}]-chore: final cleanup for ${branchName}"`);
         }
         gitExec(worktreeWorkspace, `push -u origin ${branchName}`);
 
@@ -448,6 +452,7 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                     const fixAgent = buildDevAgent(apiKey, primaryEntry, worktreeWorkspace);
                     const fixMsg = [
                         contextPrompt,
+                        `\n## Project Slug: ${projectSlug}`,
                         `\n## Your Branch: ${branchName}`,
                         `\nYou are already on this branch. Do NOT switch branches. Fix the review comments below.`,
                         `\n## Review Comments to Fix\n\n${JSON.stringify(allComments, null, 2)}`,
@@ -469,7 +474,7 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                         gitExec(worktreeWorkspace, 'add .');
                         const fixStatus = gitExec(worktreeWorkspace, 'status --short');
                         if (fixStatus && !fixStatus.includes('nothing to commit')) {
-                            gitExec(worktreeWorkspace, `commit -m "fix: address review comments (iteration ${iteration})"`);
+                            gitExec(worktreeWorkspace, `commit -m "[${projectSlug}]-[${primaryStoryId}]-fix: address review comments (iteration ${iteration})"`);
                         }
                         gitExec(worktreeWorkspace, `push origin ${branchName}`);
                     } catch (err: any) {

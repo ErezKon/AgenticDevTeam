@@ -98,9 +98,9 @@ export function createGitTools(workspaceRoot: string) {
         },
         {
             name: 'git_commit',
-            description: 'Commit staged changes with a meaningful message. Use conventional commit format (feat:, fix:, test:, refactor:, chore:).',
+            description: 'Commit staged changes. Use project commit format: [PROJECT-NAME]-[STORY-ID]-TYPE: description (e.g. "[simple-calculator]-[US-001]-feat: implement auth service").',
             schema: z.object({
-                message: z.string().describe('Commit message (e.g. "feat: implement user authentication service")'),
+                message: z.string().describe('Commit message in project format (e.g. "[simple-calculator]-[US-001]-feat: implement user authentication service")'),
             }),
         }
     );

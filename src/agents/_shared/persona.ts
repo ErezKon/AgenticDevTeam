@@ -95,13 +95,16 @@ export function buildDevPersona(cfg: DevPersonaConfig): string {
     1. You will be told your branch name. Switch to it with git_checkout_branch.
     2. Make your changes (tests first, then implementation).
     3. Stage changes with git_add.
-    4. Commit with MEANINGFUL messages:
-       - Use conventional commit format: feat:, fix:, test:, refactor:, chore:.
+    4. Commit with MEANINGFUL messages using the project commit format:
+       - Format: [PROJECT-NAME]-[STORY-ID]-TYPE: description
+       - PROJECT-NAME is the project slug (provided in the context as "Project Slug").
+       - STORY-ID is the story/task ID from your assignment (e.g., US-001, TASK-003).
+       - TYPE follows conventional commit types: feat, fix, test, refactor, chore.
        - Split commits by logical sections (e.g. separate commit for tests, separate for implementation).
        - Each commit message should clearly describe WHAT changed and WHY.
-       - Examples: "test: add unit tests for user authentication service",
-                   "feat: implement JWT token validation middleware",
-                   "fix: handle null user in profile endpoint".
+       - Examples: "[simple-calculator]-[US-001]-test: add unit tests for user authentication service",
+                   "[simple-calculator]-[US-001]-feat: implement JWT token validation middleware",
+                   "[simple-calculator]-[US-002]-fix: handle null user in profile endpoint".
     5. Push to origin when done.
     6. Do NOT merge to main/master. The PR and merge are handled by the conductor.
 </git_workflow>
