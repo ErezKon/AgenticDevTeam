@@ -21,51 +21,54 @@ export class DivisionByZeroError extends Error {
 }
 
 /**
- * Parses and evaluates a mathematical expression.
+ * Parses a mathematical expression string and returns the numeric result.
  *
- * @param expr - The expression string to evaluate.
- * @returns The numeric result of the evaluation.
- * @throws {ExpressionSyntaxError} If the expression cannot be parsed.
- * @throws {DivisionByZeroError} If the expression attempts division by zero.
+ * Supported operators: +, -, *, /, parentheses, decimals and negative numbers.
+ *
+ * On success, returns a number. On failure, throws an Error with a user‑friendly
+ * message. Currently, syntax errors are normalized to "Invalid syntax".
  */
 export function parseExpression(expr: string): number {
+  // Pre‑validation: reject obvious syntax errors like consecutive operators
+  if (/[+\-*/]{2,}/.test(expr)) {
+    throw new Error('Invalid syntax');
+  }
+  // Check for balanced parentheses
+  const stack: string[] = [];
+  for (const ch of expr) {
+    if (ch === '(') {
+      stack.push(ch);
+    } else if (ch === ')') {
+      if (stack.length === 0) {
+        throw new Error('Invalid syntax');
+      }
+      stack.pop();
+    }
+  }
+  if (stack.length !== 0) {
+    throw new Error('Invalid syntax');
+  }
   try {
+    // mathjs evaluate will throw on syntax errors or illegal operations.
     const result = evaluate(expr);
-    // mathjs may return a BigNumber or other types; coerce to number if possible
-    if (typeof result === 'number') {
-      if (!Number.isFinite(result)) {
-        // Handles division by zero resulting in Infinity
-        throw new DivisionByZeroError();
-      }
-      return result;
+    // Ensure the result is a finite number.
+    if (typeof result !== 'number' || !Number.isFinite(result)) {
+      // For cases like division by zero which yields Infinity.
+      throw new Error('Invalid result');
     }
-    // If result is a BigNumber, convert to number safely
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    if ((result as any).toNumber) {
-      // @ts-ignore
-      const num = (result as any).toNumber();
-      if (!Number.isFinite(num)) {
-        throw new DivisionByZeroError();
-      }
-      return num;
+    return result;
+  } catch (err: any) {
+    // Normalize known mathjs error messages to a generic user‑friendly message.
+    const msg = err?.message ?? '';
+    // mathjs syntax errors typically contain the word "Unexpected" or "Parenthesis".
+    if (/Unexpected|Parenthesis|Syntax|Invalid/.test(msg)) {
+      throw new Error('Invalid syntax');
     }
-    throw new Error('Result is not a number');
-  } catch (e: any) {
-    // mathjs throws an Error with a message describing the problem.
-    const msg = e?.message ?? '';
-    if (msg.toLowerCase().includes('division by zero')) {
-      throw new DivisionByZeroError();
+    // For division by zero, mathjs may produce "Infinity" or a specific message.
+    if (/divide by zero/i.test(msg) || /Infinity/.test(msg)) {
+      throw new Error('Cannot divide by zero');
     }
-    // Syntax errors typically contain the word "parse" or "unexpected"
-    if (
-      msg.toLowerCase().includes('parse') ||
-      msg.toLowerCase().includes('unexpected') ||
-      msg.toLowerCase().includes('syntax') ||
-      msg.toLowerCase().includes('undefined symbol')
-    ) {
-      throw new ExpressionSyntaxError();
-    }
-    // Re‑throw unknown errors
-    throw e;
+    // Fallback to the original error message.
+    throw err;
   }
 }
