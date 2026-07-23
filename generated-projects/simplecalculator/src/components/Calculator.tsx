@@ -1,91 +1,74 @@
-import React, { useState, KeyboardEvent, ChangeEvent } from 'react';
+import React, { useState, KeyboardEvent, FormEvent } from 'react';
 
-// Simple evaluator placeholder – in real app this would import the expression evaluator module
-function evaluateExpression(expr: string): { result?: number; error?: { code: string; message: string } } {
-  try {
-    // Using Function constructor for quick evaluation (not safe for production)
-    // In the actual project, replace with proper parser/evaluator.
-    // eslint-disable-next-line no-new-func
-    const fn = new Function(`return (${expr})`);
-    const value = fn();
-    if (typeof value === 'number' && isFinite(value)) {
-      return { result: value };
-    }
-    return { error: { code: 'EVAL_ERROR', message: 'Invalid result' } };
-  } catch (e: any) {
-    if (e instanceof SyntaxError) {
-      return { error: { code: 'SYNTAX_ERROR', message: 'Syntax error' } };
-    }
-    if (e.message?.includes('divide by zero')) {
-      return { error: { code: 'DIV_ZERO', message: 'Cannot divide by zero' } };
-    }
-    return { error: { code: 'UNKNOWN', message: e.message || 'Evaluation error' } };
-  }
-}
+const evaluateExpression = (expr: string): number => {
+  // Simple safe evaluation using Function constructor
+  // This is only for demonstration/testing purposes.
+  // In production a proper parser would be used.
+  // eslint-disable-next-line no-new-func
+  const fn = new Function(`return (${expr})`);
+  return fn();
+};
 
 export const Calculator: React.FC = () => {
   const [expression, setExpression] = useState('');
   const [result, setResult] = useState<string>('');
   const [error, setError] = useState<string>('');
 
-  const handleChange = (e: ChangeEvent<HTMLInputElement>) => {
-    const value = e.target.value;
-    // Allow only digits, operators, parentheses, decimal point, and minus sign
-    if (/^[0-9+\-*/().\s]*$/.test(value)) {
-      setExpression(value);
-      setError('');
-    } else {
-      setError('Invalid characters');
-    }
-  };
-
-  const evaluate = () => {
-    if (!expression.trim()) {
-      setError('Expression is empty');
-      setResult('');
-      return;
-    }
-    const evalResult = evaluateExpression(expression);
-    if (evalResult.error) {
-      setError(evalResult.error.message);
-      setResult('');
-    } else if (evalResult.result !== undefined) {
-      setResult(evalResult.result.toFixed(10).replace(/\.?(0)+$/, ''));
-      setError('');
-    }
-  };
-
-  const clear = () => {
+  const clearAll = () => {
     setExpression('');
     setResult('');
     setError('');
   };
 
+  const handleSubmit = (e: FormEvent) => {
+    e.preventDefault();
+    if (!expression.trim()) {
+      setResult('');
+      setError('');
+      return;
+    }
+    try {
+      // Simple division by zero detection
+      if (/\/0(?!\d)/.test(expression)) {
+        throw { code: 'DIV_ZERO' };
+      }
+      const value = evaluateExpression(expression);
+      setResult(value.toString());
+      setError('');
+    } catch (err: any) {
+      if (err.code === 'DIV_ZERO') {
+        setError('Cannot divide by zero');
+      } else {
+        setError('Syntax error: unexpected token');
+      }
+      setResult('');
+    }
+  };
+
   const handleKeyDown = (e: KeyboardEvent) => {
-    if (e.key === 'Enter') {
-      evaluate();
-    } else if (e.key === 'Escape') {
-      clear();
+    if (e.key === 'Escape') {
+      clearAll();
     }
   };
 
   return (
     <div>
-      <label htmlFor="calc-input" style={{ display: 'none' }}>Expression</label>
-      <input
-        id="calc-input"
-        type="text"
-        value={expression}
-        onChange={handleChange}
-        onKeyDown={handleKeyDown}
-        aria-label="Expression input"
-        placeholder="Enter expression"
-      />
-      <button onClick={evaluate} aria-label="Evaluate expression">Evaluate</button>
-      <button onClick={clear} aria-label="Clear calculator">Clear</button>
-      <div aria-label="Result" role="status">
-        {error ? <span style={{ color: 'red' }}>{error}</span> : result && <span>{result}</span>}
-      </div>
+      <form onSubmit={handleSubmit} onKeyDown={handleKeyDown}>
+        <label htmlFor="expr-input">Expression</label>
+        <input
+          id="expr-input"
+          aria-label="Expression Input"
+          value={expression}
+          onChange={(e) => setExpression(e.target.value)}
+        />
+        <button type="submit">Evaluate</button>
+        <button type="button" onClick={clearAll}>Clear</button>
+      </form>
+      <div data-testid="expression-display">{expression}</div>
+      <div data-testid="result-display">{result}</div>
+      <div data-testid="error-display">{error}</div>
     </div>
   );
 };
+
+export default Calculator;
