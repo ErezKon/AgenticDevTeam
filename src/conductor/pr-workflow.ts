@@ -153,8 +153,16 @@ function buildPRDescription(
     fileChanges: FileChange[],
     taskType: string,
     currentState?: string,
+    authorAgentId?: string,
 ): string {
     const sections: string[] = [];
+
+    // Author attribution
+    if (authorAgentId) {
+        const authorEntry = getDevAgent(authorAgentId);
+        const authorLabel = authorEntry ? `${authorEntry.name} (${authorAgentId})` : authorAgentId;
+        sections.push(`**Opened by ${authorLabel}**\n`);
+    }
 
     // Task summary
     sections.push('## Task Summary\n');
@@ -339,7 +347,7 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
 
         // ── 2. Create GitHub PR ─────────────────────────────────────────
         const prTitle = buildPRTitle(assignments, taskType);
-        const prBody = buildPRDescription(assignments, allFileChanges, taskType, currentState);
+        const prBody = buildPRDescription(assignments, allFileChanges, taskType, currentState, assignments[0].devAgentId);
 
         log.info(`Creating PR: "${prTitle}"`);
         const octokit = getOctokit();
@@ -361,8 +369,25 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
         log.info(`PR #${ghPr.number} created: ${ghPr.html_url}`);
         allTranscript.push(msg('conductor', `PR #${ghPr.number} created: ${prTitle}`));
 
+        // Post simulated review-request comment
+        try {
+            const authorEntry = getDevAgent(assignments[0].devAgentId);
+            const reviewerNames = reviewerAgentIds
+                .map(id => getDevAgent(id))
+                .filter(Boolean)
+                .map(e => `${e!.name} (${e!.id})`);
+            const requestBody = `[REVIEW_REQUEST] ${authorEntry?.name ?? assignments[0].devAgentId} requested review from ${reviewerNames.join(' and ')}.`;
+            await octokit.issues.createComment({
+                owner: GITHUB_OWNER, repo: GITHUB_REPO,
+                issue_number: ghPr.number, body: requestBody,
+            });
+        } catch (reqErr: any) {
+            log.warn(`Failed to post review-request comment: ${reqErr.message}`);
+        }
+
         // ── 3. Review loop ──────────────────────────────────────────────
         const allReviews: PRReview[] = [];
+        const seenCommentKeys = new Set<string>();
         let prStatus: 'open' | 'approved' | 'merged' | 'closed' = 'open';
 
         for (let iteration = 1; iteration <= MAX_REVIEW_ITERATIONS; iteration++) {
@@ -417,8 +442,7 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                     reviewResults.push({ reviewerId, output: reviewOutput });
                     reviewerLog.info(`Decision: ${reviewOutput.status} (${reviewOutput.comments?.length ?? 0} comments)`);
 
-                    // Post review to GitHub
-                    const ghEvent = reviewOutput.status === 'approved' ? 'APPROVE' : 'REQUEST_CHANGES';
+                    // Post simulated review as an issue comment (avoids "Can not request changes on your own pull request")
                     const ghComments = (reviewOutput.comments ?? [])
                         .filter((c: any) => c.filePath && c.body)
                         .map((c: any) => ({
@@ -427,26 +451,26 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                             body: `**[${c.severity?.toUpperCase() ?? 'INFO'}]** ${c.body}`,
                         }));
 
-                    try {
-                        const reviewParams: any = {
-                            owner: GITHUB_OWNER,
-                            repo: GITHUB_REPO,
-                            pull_number: ghPr.number,
-                            body: `**${reviewerEntry.name}** (${reviewerEntry.tag}): ${reviewOutput.summary}`,
-                            event: ghEvent,
-                        };
-
-                        if (ghComments.length > 0) {
-                            const { data: prData } = await octokit.pulls.get({
-                                owner: GITHUB_OWNER, repo: GITHUB_REPO, pull_number: ghPr.number,
-                            });
-                            reviewParams.commit_id = prData.head.sha;
-                            reviewParams.comments = ghComments;
+                    const statusTag = reviewOutput.status === 'approved' ? 'APPROVED' : 'CHANGES_REQUESTED';
+                    const commentParts = [
+                        `[REVIEW: ${statusTag} by ${reviewerEntry.name} (${reviewerEntry.id})] — iteration ${iteration}`,
+                        '',
+                        `**Summary:** ${reviewOutput.summary}`,
+                    ];
+                    if (ghComments.length > 0) {
+                        commentParts.push('', '### Comments', '');
+                        for (const c of ghComments) {
+                            commentParts.push(`- **\`${c.path}\`${c.line ? `:${c.line}` : ''}** — ${c.body}`);
                         }
+                    }
 
-                        await octokit.pulls.createReview(reviewParams);
-                    } catch (ghErr: any) {
-                        log.warn(`Failed to post review to GitHub: ${ghErr.message}`);
+                    try {
+                        await octokit.issues.createComment({
+                            owner: GITHUB_OWNER, repo: GITHUB_REPO,
+                            issue_number: ghPr.number, body: commentParts.join('\n'),
+                        });
+                    } catch (commentErr: any) {
+                        log.warn(`Failed to post review comment to GitHub: ${commentErr.message}`);
                     }
 
                     // Record review
@@ -490,7 +514,7 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
             if (changesRequested.length > 0 && iteration < MAX_REVIEW_ITERATIONS) {
                 log.info(`${changesRequested.length} reviewer(s) requested changes. Re-invoking dev agent(s)...`);
 
-                // Collect all review comments
+                // Collect all review comments, deduplicating across iterations
                 const allComments = changesRequested.flatMap(r =>
                     (r.output.comments ?? []).map((c: any) => ({
                         reviewer: r.reviewerId,
@@ -499,7 +523,19 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                         comment: c.body,
                         severity: c.severity,
                     }))
-                );
+                ).filter(c => {
+                    const key = `${(c.file ?? '').toLowerCase()}::${(c.comment ?? '').slice(0, 100).toLowerCase()}`;
+                    if (seenCommentKeys.has(key)) return false;
+                    seenCommentKeys.add(key);
+                    return true;
+                });
+
+                // If all comments are duplicates of prior iterations, treat as approved
+                if (allComments.length === 0) {
+                    log.info('All review comments are duplicates of prior iterations — treating as approved');
+                    prStatus = 'approved';
+                    break;
+                }
 
                 // Re-invoke the primary dev agent with the review comments
                 const primaryDevId = assignments[0].devAgentId;

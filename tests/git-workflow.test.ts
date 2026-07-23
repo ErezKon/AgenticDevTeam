@@ -30,8 +30,21 @@ describeIf('Git Workflow Integration', () => {
     let octokit: Octokit;
     let createdPrNumber: number | null = null;
 
-    beforeAll(() => {
+    beforeAll(async () => {
         octokit = new Octokit({ auth: GITHUB_TOKEN });
+
+        // Clean up stale remote branch/PR from a prior failed run
+        try {
+            const { data: prs } = await octokit.pulls.list({
+                owner: GITHUB_OWNER, repo: GITHUB_REPO, head: `${GITHUB_OWNER}:${TEST_BRANCH}`, state: 'open',
+            });
+            for (const pr of prs) {
+                await octokit.pulls.update({ owner: GITHUB_OWNER, repo: GITHUB_REPO, pull_number: pr.number, state: 'closed' });
+            }
+        } catch { /* ignore */ }
+        try {
+            await octokit.git.deleteRef({ owner: GITHUB_OWNER, repo: GITHUB_REPO, ref: `heads/${TEST_BRANCH}` });
+        } catch { /* ignore — branch may not exist */ }
 
         // Clone the real repo into a temp directory (shallow)
         tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'git-workflow-test-'));
@@ -120,5 +133,35 @@ describeIf('Git Workflow Integration', () => {
         expect(pr.html_url).toContain(GITHUB_REPO);
         expect(pr.head.ref).toBe(TEST_BRANCH);
         expect(pr.state).toBe('open');
+    }, TIMEOUT);
+
+    it('should post a simulated review comment to the PR', async () => {
+        expect(createdPrNumber).not.toBeNull();
+
+        const commentBody = [
+            '[REVIEW: APPROVED by Test Reviewer (test-reviewer)] — iteration 1',
+            '',
+            '**Summary:** All changes look good. Code follows conventions.',
+            '',
+            '### Comments',
+            '',
+            '- **`git-workflow-test-file.txt`:1** — **[SUGGESTION]** Consider adding a header comment',
+        ].join('\n');
+
+        const { data: comment } = await octokit.issues.createComment({
+            owner: GITHUB_OWNER, repo: GITHUB_REPO,
+            issue_number: createdPrNumber!, body: commentBody,
+        });
+
+        expect(comment.id).toBeGreaterThan(0);
+        expect(comment.body).toContain('[REVIEW: APPROVED');
+
+        // Verify the comment is retrievable
+        const { data: comments } = await octokit.issues.listComments({
+            owner: GITHUB_OWNER, repo: GITHUB_REPO,
+            issue_number: createdPrNumber!,
+        });
+        const found = comments.find(c => c.body?.includes('[REVIEW: APPROVED by Test Reviewer'));
+        expect(found).toBeDefined();
     }, TIMEOUT);
 });

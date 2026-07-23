@@ -67,8 +67,10 @@ export const teamLeaderSystemPrompt = `
        - Junior developer → assign 2 Senior developers as reviewers
        - Senior developer → assign 2 Principal developers as reviewers
        - Principal developer → assign 2 OTHER Principal developers as reviewers (never self-review)
+       - NEVER assign a lower-rank developer to review a higher-rank developer's code.
+         A Senior must NEVER review a Principal's PR. A Junior must NEVER review a Senior's or Principal's PR.
        - Reviewers must be from a RELEVANT domain (frontend reviewer for frontend code, etc.)
-       - If only one reviewer of the right rank/domain exists, assign that one plus the closest match.
+       - If only one reviewer of the right rank/domain exists, assign that one plus the closest match FROM THE SAME OR HIGHER RANK.
 
     2. BRANCH STRATEGY:
        - All dev work targets the **system branch** (project/<system-name>), NOT main/master.
