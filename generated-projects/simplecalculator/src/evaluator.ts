@@ -1,178 +1,172 @@
-// src/evaluator.ts
-/**
- * Expression Evaluator module
- * Provides a public evaluate function that parses and evaluates arithmetic expressions.
- * Supports +, -, *, /, parentheses, decimal numbers, and unary plus/minus.
- * Returns a result number or a structured error.
- */
+// Expression Evaluator Module
+// Supports +, -, *, /, parentheses, decimals, negatives
+// Returns { result: number } on success or { error: { code: string, message: string } } on failure
 
-export interface EvalError {
-  code: string;
-  message: string;
-}
-
-interface EvalResult {
+export interface EvalResult {
   result?: number;
-  error?: EvalError;
+  error?: { code: string; message: string };
 }
 
-/**
- * Public API: evaluate an arithmetic expression string.
- * @param expression The arithmetic expression to evaluate.
- * @returns An object containing either the numeric result or an EvalError.
- */
-export function evaluate(expression: string): EvalResult {
-  try {
-    const parser = new Parser(expression);
-    const value = parser.parseExpression();
-    if (!parser.isAtEnd()) {
-      // Unexpected trailing characters
-      throw new SyntaxError('Unexpected token');
+// Token types
+type Token =
+  | { type: 'number'; value: number }
+  | { type: 'operator'; value: string }
+  | { type: 'paren'; value: '(' | ')' };
+
+function tokenize(expr: string): Token[] {
+  const tokens: Token[] = [];
+  let i = 0;
+  while (i < expr.length) {
+    const ch = expr[i];
+    if (ch === ' ' || ch === '\t' || ch === '\n') {
+      i++;
+      continue;
     }
-    return { result: value };
-  } catch (e) {
-    if (e instanceof EvalErrorClass) {
-      return { error: { code: e.code, message: e.message } };
-    }
-    if (e instanceof SyntaxError) {
-      return { error: { code: 'SYNTAX_ERROR', message: e.message } };
-    }
-    // Fallback generic error
-    return { error: { code: 'UNKNOWN_ERROR', message: String(e) } };
-  }
-}
-
-/**
- * Internal error class for evaluation errors (e.g., division by zero).
- */
-class EvalErrorClass extends Error {
-  public code: string;
-  constructor(code: string, message: string) {
-    super(message);
-    this.code = code;
-    this.name = 'EvalError';
-  }
-}
-
-/**
- * Recursive‑descent parser for arithmetic expressions.
- */
-class Parser {
-  private input: string;
-  private pos: number = 0;
-
-  constructor(input: string) {
-    this.input = input;
-  }
-
-  // Entry point
-  public parseExpression(): number {
-    // Expression = Term ((+|-) Term)*
-    let value = this.parseTerm();
-    while (true) {
-      this.skipWhitespace();
-      const ch = this.peek();
-      if (ch === '+' || ch === '-') {
-        this.pos++; // consume operator
-        const rhs = this.parseTerm();
-        if (ch === '+') value += rhs;
-        else value -= rhs;
-      } else {
-        break;
+    if (ch >= '0' && ch <= '9' || ch === '.') {
+      let numStr = '';
+      while (i < expr.length && ((expr[i] >= '0' && expr[i] <= '9') || expr[i] === '.')) {
+        numStr += expr[i];
+        i++;
       }
+      const num = Number(numStr);
+      if (isNaN(num)) {
+        throw new Error('Invalid number');
+      }
+      tokens.push({ type: 'number', value: num });
+      continue;
     }
-    return value;
+    if (ch === '+' || ch === '-' || ch === '*' || ch === '/') {
+      tokens.push({ type: 'operator', value: ch });
+      i++;
+      continue;
+    }
+    if (ch === '(' || ch === ')') {
+      tokens.push({ type: 'paren', value: ch });
+      i++;
+      continue;
+    }
+    throw new Error('Invalid character');
   }
+  return tokens;
+}
 
-  private parseTerm(): number {
-    // Term = Factor ((*|/) Factor)*
-    let value = this.parseFactor();
-    while (true) {
-      this.skipWhitespace();
-      const ch = this.peek();
-      if (ch === '*' || ch === '/') {
-        this.pos++; // consume operator
-        const rhs = this.parseFactor();
-        if (ch === '*') {
-          value *= rhs;
-        } else {
-          // Division – check for zero
-          if (rhs === 0) {
-            throw new EvalErrorClass('DIV_ZERO', 'Cannot divide by zero');
-          }
-          value /= rhs;
+function shuntingYard(tokens: Token[]): Token[] {
+  const output: Token[] = [];
+  const ops: Token[] = [];
+  const precedence: Record<string, number> = { '+': 1, '-': 1, '*': 2, '/': 2 };
+  const associativity: Record<string, 'left'> = { '+': 'left', '-': 'left', '*': 'left', '/': 'left' };
+
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i];
+    if (token.type === 'number') {
+      output.push(token);
+    } else if (token.type === 'operator') {
+      while (
+        ops.length > 0 &&
+        ops[ops.length - 1].type === 'operator' &&
+        ((associativity[token.value] === 'left' && precedence[token.value] <= precedence[ops[ops.length - 1].value]) ||
+          (associativity[token.value] === 'right' && precedence[token.value] < precedence[ops[ops.length - 1].value]))
+      ) {
+        output.push(ops.pop() as Token);
+      }
+      ops.push(token);
+    } else if (token.type === 'paren') {
+      if (token.value === '(') {
+        ops.push(token);
+      } else {
+        // token.value === ')'
+        while (ops.length > 0 && ops[ops.length - 1].type !== 'paren') {
+          output.push(ops.pop() as Token);
         }
+        if (ops.length === 0) {
+          throw new Error('Mismatched parentheses');
+        }
+        // pop '('
+        ops.pop();
+      }
+    }
+  }
+  while (ops.length > 0) {
+    const op = ops.pop() as Token;
+    if (op.type === 'paren') {
+      throw new Error('Mismatched parentheses');
+    }
+    output.push(op);
+  }
+  return output;
+}
+
+function evaluateRPN(rpn: Token[]): number {
+  const stack: number[] = [];
+  for (const token of rpn) {
+    if (token.type === 'number') {
+      stack.push(token.value);
+    } else if (token.type === 'operator') {
+      if (stack.length < 2) {
+        throw new Error('Insufficient values');
+      }
+      const b = stack.pop() as number;
+      const a = stack.pop() as number;
+      let res: number;
+      switch (token.value) {
+        case '+':
+          res = a + b;
+          break;
+        case '-':
+          res = a - b;
+          break;
+        case '*':
+          res = a * b;
+          break;
+        case '/':
+          if (b === 0) {
+            const err = new Error('Division by zero');
+            // attach code
+            (err as any).code = 'DIV_ZERO';
+            throw err;
+          }
+          res = a / b;
+          break;
+        default:
+          throw new Error('Unknown operator');
+      }
+      stack.push(res);
+    }
+  }
+  if (stack.length !== 1) {
+    throw new Error('Invalid expression');
+  }
+  return stack[0];
+}
+
+export function evaluateExpression(expr: string): EvalResult {
+  try {
+    const tokens = tokenize(expr);
+    // Handle unary minus: insert 0 before leading '-' or after '('
+    const processed: Token[] = [];
+    for (let i = 0; i < tokens.length; i++) {
+      const token = tokens[i];
+      if (
+        token.type === 'operator' &&
+        token.value === '-' &&
+        (i === 0 || (tokens[i - 1].type === 'paren' && tokens[i - 1].value === '('))
+      ) {
+        // unary minus, treat as (0 - number)
+        processed.push({ type: 'number', value: 0 });
+        processed.push(token);
       } else {
-        break;
+        processed.push(token);
       }
     }
-    return value;
-  }
-
-  private parseFactor(): number {
-    this.skipWhitespace();
-    const ch = this.peek();
-    if (ch === '+' || ch === '-') {
-      // Unary plus/minus
-      this.pos++;
-      const factor = this.parseFactor();
-      return ch === '+' ? factor : -factor;
+    const rpn = shuntingYard(processed);
+    const result = evaluateRPN(rpn);
+    // Round to 10 decimal places to avoid floating noise
+    const rounded = Number(result.toFixed(10));
+    return { result: rounded };
+  } catch (e: any) {
+    if (e.code === 'DIV_ZERO') {
+      return { error: { code: 'DIV_ZERO', message: 'Cannot divide by zero' } };
     }
-    if (ch === '(') {
-      this.pos++; // consume '('
-      const expr = this.parseExpression();
-      this.skipWhitespace();
-      if (this.peek() !== ')') {
-        throw new SyntaxError('Expected closing parenthesis');
-      }
-      this.pos++; // consume ')'
-      return expr;
-    }
-    return this.parseNumber();
-  }
-
-  private parseNumber(): number {
-    this.skipWhitespace();
-    const start = this.pos;
-    let hasDigits = false;
-    while (this.isDigit(this.peek())) {
-      this.pos++;
-      hasDigits = true;
-    }
-    if (this.peek() === '.') {
-      this.pos++; // consume '.'
-      while (this.isDigit(this.peek())) {
-        this.pos++;
-        hasDigits = true;
-      }
-    }
-    if (!hasDigits) {
-      throw new SyntaxError('Invalid number');
-    }
-    const numStr = this.input.slice(start, this.pos);
-    const value = Number(numStr);
-    if (Number.isNaN(value)) {
-      throw new SyntaxError('Invalid number format');
-    }
-    return value;
-  }
-
-  private skipWhitespace(): void {
-    while (this.peek() === ' ' || this.peek() === '\t' || this.peek() === '\n' || this.peek() === '\r') {
-      this.pos++;
-    }
-  }
-
-  private peek(): string {
-    return this.input[this.pos] ?? '\0';
-  }
-
-  private isDigit(ch: string): boolean {
-    return ch >= '0' && ch <= '9';
-  }
-
-  public isAtEnd(): boolean {
-    this.skipWhitespace();
-    return this.pos >= this.input.length;
+    return { error: { code: 'SYNTAX_ERROR', message: e.message } };
   }
 }

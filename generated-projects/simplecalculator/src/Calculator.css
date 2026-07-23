@@ -1,32 +1,9 @@
-.calculator {
-  display: flex;
-  flex-direction: column;
-  gap: 1rem;
+/* Focus-visible style for accessibility */
+button:focus-visible {
+  outline: 2px solid #1976d2; /* blue */
+  outline-offset: 2px;
 }
-
-.expression-input {
-  padding: 0.5rem;
-  font-size: 1rem;
-}
-
-.button-group {
-  display: flex;
-  gap: 0.5rem;
-}
-
-.button-group button {
-  flex: 1;
-  padding: 0.5rem;
-  font-size: 1rem;
-}
-
-.result, .error {
-  margin-top: 0.5rem;
-  font-weight: bold;
-}
-
-@media (max-width: 599px) {
-  .button-group {
-    flex-direction: column;
-  }
+input:focus-visible {
+  outline: 2px solid #1976d2;
+  outline-offset: 2px;
 }
