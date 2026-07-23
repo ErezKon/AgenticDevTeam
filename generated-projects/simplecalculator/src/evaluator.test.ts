@@ -1,73 +1,49 @@
-// Unit tests for the arithmetic AST evaluator
-import { evaluate, ASTNode, EvalError } from './evaluator';
+import { evaluate } from './evaluator';
 
-describe('AST Evaluator', () => {
-  test('evaluates simple addition', () => {
-    const ast: ASTNode = {
-      type: 'BinaryExpression',
-      operator: '+',
-      left: { type: 'NumberLiteral', value: 2 },
-      right: { type: 'NumberLiteral', value: 3 },
-    };
-    expect(evaluate(ast)).toBe(5);
+describe('evaluate', () => {
+  test('evaluates simple expression with precedence', () => {
+    const res = evaluate('2+3*4');
+    expect(res.result).toBe(14);
+    expect(res.error).toBeUndefined();
   });
 
-  test('evaluates expression with precedence (1+2)*3', () => {
-    const ast: ASTNode = {
-      type: 'BinaryExpression',
-      operator: '*',
-      left: {
-        type: 'BinaryExpression',
-        operator: '+',
-        left: { type: 'NumberLiteral', value: 1 },
-        right: { type: 'NumberLiteral', value: 2 },
-      },
-      right: { type: 'NumberLiteral', value: 3 },
-    };
-    expect(evaluate(ast)).toBe(9);
+  test('evaluates expression with parentheses and division', () => {
+    const res = evaluate('(1+2)/3');
+    expect(res.result).toBeCloseTo(1);
+    expect(res.error).toBeUndefined();
   });
 
-  test('handles decimal numbers correctly', () => {
-    const ast: ASTNode = {
-      type: 'BinaryExpression',
-      operator: '*',
-      left: { type: 'NumberLiteral', value: 1.5 },
-      right: { type: 'NumberLiteral', value: 2 },
-    };
-    expect(evaluate(ast)).toBeCloseTo(3);
+  test('handles unary minus and whitespace', () => {
+    const res = evaluate(' -5 + 2 ');
+    expect(res.result).toBe(-3);
+    expect(res.error).toBeUndefined();
   });
 
-  test('handles unary minus (negative numbers)', () => {
-    const ast: ASTNode = {
-      type: 'BinaryExpression',
-      operator: '+',
-      left: {
-        type: 'UnaryExpression',
-        operator: '-',
-        argument: { type: 'NumberLiteral', value: 5 },
-      },
-      right: { type: 'NumberLiteral', value: 3 },
-    };
-    expect(evaluate(ast)).toBe(-2);
+  test('handles decimal numbers', () => {
+    const res = evaluate('0.1+0.2');
+    expect(res.result).toBeCloseTo(0.3);
+    expect(res.error).toBeUndefined();
   });
 
-  test('handles unary plus (no effect)', () => {
-    const ast: ASTNode = {
-      type: 'UnaryExpression',
-      operator: '+',
-      argument: { type: 'NumberLiteral', value: 7 },
-    };
-    expect(evaluate(ast)).toBe(7);
+  test('division by zero returns DIV_ZERO error', () => {
+    const res = evaluate('10/0');
+    expect(res.result).toBeUndefined();
+    expect(res.error).toBeDefined();
+    expect(res.error?.code).toBe('DIV_ZERO');
+    expect(res.error?.message).toBe('Cannot divide by zero');
   });
 
-  test('returns DIV_ZERO error on division by zero', () => {
-    const ast: ASTNode = {
-      type: 'BinaryExpression',
-      operator: '/',
-      left: { type: 'NumberLiteral', value: 5 },
-      right: { type: 'NumberLiteral', value: 0 },
-    };
-    const result = evaluate(ast) as EvalError;
-    expect(result).toMatchObject({ code: 'DIV_ZERO', message: 'Cannot divide by zero' });
+  test('syntax error returns SYNTAX_ERROR', () => {
+    const res = evaluate('2+*3');
+    expect(res.result).toBeUndefined();
+    expect(res.error).toBeDefined();
+    expect(res.error?.code).toBe('SYNTAX_ERROR');
+  });
+
+  test('empty string returns SYNTAX_ERROR', () => {
+    const res = evaluate('');
+    expect(res.result).toBeUndefined();
+    expect(res.error).toBeDefined();
+    expect(res.error?.code).toBe('SYNTAX_ERROR');
   });
 });
