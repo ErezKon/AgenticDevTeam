@@ -1,5 +1,14 @@
-export type EvalResult =
+/**
+ * Result of evaluation: either a numeric result or an error message.
+ */
+export type EvalOutcome =
   | { result?: number; error?: string };
+
+/**
+ * Simple alias for a successful numeric result or null when evaluation fails.
+ * UI components can use this to display a placeholder when null.
+ */
+export type EvalResult = number | null;
 
 /**
  * Safe evaluator for arithmetic expressions supporting +, -, *, /, parentheses,

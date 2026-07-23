@@ -1,22 +1,23 @@
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, memo } from 'react';
 import { evaluate, EvalResult } from './engine/evaluate';
 import Input from './components/Input';
 import ResultDisplay from './components/ResultDisplay';
 import ErrorDisplay from './components/ErrorDisplay';
 
 // Main CalculatorApp component
-export default function CalculatorApp() {
-  // Strongly typed state for the expression string
+const CalculatorApp = memo(function CalculatorApp() {
+  // State for the expression input
   const [expression, setExpression] = useState<string>('');
 
-  // State to hold the evaluation result or error
+  // State for evaluation result or error
   const [evalResult, setEvalResult] = useState<EvalResult | null>(null);
 
+  // Handle input changes
   const handleExpressionChange = useCallback((value: string) => {
     setExpression(value);
   }, []);
 
-  // Evaluate the expression whenever it changes (excluding empty input)
+  // Evaluate expression on change
   useEffect(() => {
     const trimmed = expression.trim();
     if (trimmed === '') {
@@ -58,4 +59,6 @@ export default function CalculatorApp() {
       )}
     </div>
   );
-}
+});
+
+export default CalculatorApp;

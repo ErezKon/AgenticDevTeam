@@ -12,7 +12,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "test": "jest",
-    "lint": "eslint . --ext .js,.jsx,.ts,.tsx",
+    "lint": "eslint . --ext .ts,.tsx",
     "format": "prettier --write .",
     "type-check": "tsc --noEmit"
   },
