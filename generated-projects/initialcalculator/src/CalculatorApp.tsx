@@ -6,15 +6,25 @@ import ErrorDisplay from './components/ErrorDisplay';
 
 // Main CalculatorApp component
 export default function CalculatorApp() {
-  const [expression, setExpression] = useState('');
+  // Strongly typed state for the expression string
+  const [expression, setExpression] = useState<string>('');
+
+  // State to hold the evaluation result or error
+  const [evalResult, setEvalResult] = useState<EvalResult | null>(null);
 
   const handleExpressionChange = useCallback((value: string) => {
     setExpression(value);
   }, []);
 
-  // Only evaluate when there is a non‑empty expression
-  const trimmed = expression.trim();
-  const evalResult: EvalResult | null = trimmed === '' ? null : evaluate(trimmed);
+  // Evaluate the expression whenever it changes (excluding empty input)
+  useEffect(() => {
+    const trimmed = expression.trim();
+    if (trimmed === '') {
+      setEvalResult(null);
+    } else {
+      setEvalResult(evaluate(trimmed));
+    }
+  }, [expression]);
 
   const hasError = evalResult && 'error' in evalResult;
 
@@ -42,7 +52,7 @@ export default function CalculatorApp() {
       {hasError ? (
         <ErrorDisplay error={getUserFriendlyError((evalResult as { error: string }).error)} />
       ) : (
-        trimmed !== '' && evalResult && (
+        expression.trim() !== '' && evalResult && (
           <ResultDisplay result={(evalResult as { result: number }).result} />
         )
       )}
