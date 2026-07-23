@@ -1,6 +1,10 @@
 module.exports = {
-  preset: 'ts-jest',
-  testEnvironment: 'jsdom',
-  setupFilesAfterEnv: ['<rootDir>/src/setupTests.ts'],
-  moduleFileExtensions: ['ts', 'tsx', 'js', 'jsx', 'json', 'node'],
+  preset: 'jest-puppeteer',
+  setupFilesAfterEnv: ['./jest.setup.js'],
+  testEnvironment: 'jest-environment-puppeteer',
+  transform: {
+    '^.+\\.[jt]sx?$': 'babel-jest',
+  },
+  moduleFileExtensions: ['js', 'jsx', 'json', 'node'],
+
 };
