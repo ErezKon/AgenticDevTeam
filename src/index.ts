@@ -11,7 +11,8 @@
  * - ws://host:port/ws       Real-time transcript + state updates
  */
 process.env.NODE_TLS_REJECT_UNAUTHORIZED ??= '0';
-import 'dotenv/config';
+import * as dotenv from 'dotenv';
+dotenv.config({ override: true });
 import express from 'express';
 import cors from 'cors';
 import { createServer } from 'http';
