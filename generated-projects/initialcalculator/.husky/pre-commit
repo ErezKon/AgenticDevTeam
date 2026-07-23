@@ -1,4 +1,5 @@
 #!/bin/sh
 . "$(dirname "$0")/_/husky.sh"
 
+# Run lint-staged as configured in package.json or .lintstagedrc
 npx lint-staged || exit 1
