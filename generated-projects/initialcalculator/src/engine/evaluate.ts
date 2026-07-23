@@ -1,6 +1,5 @@
 export type EvalResult =
-  | { result: number }
-  | { error: string };
+  | { result?: number; error?: string };
 
 /**
  * Safe evaluator for arithmetic expressions supporting +, -, *, /, parentheses,
@@ -86,7 +85,7 @@ export function evaluate(expression: string): EvalResult {
   // Shunting‑yard algorithm to convert to Reverse Polish Notation (RPN)
   const outputQueue: Token[] = [];
   const operatorStack: Token[] = [];
-  const precedence: Record<string, number> = { "+": 1, "-": 1, "*": 2, "/": 2 };
+  const precedence: Record<string, number> = { "+": 1, "-": 1, "*": 2, "/": 2, "u-": 3 };
   const isLeftAssociative = (op: string) => true; // all left‑associative for our operators
 
   for (let idx = 0; idx < tokens.length; idx++) {
@@ -94,18 +93,21 @@ export function evaluate(expression: string): EvalResult {
     if (token.type === "number") {
       outputQueue.push(token);
     } else if (token.type === "operator") {
-      // Handle unary minus: if at start or after '(' or another operator, treat as part of number
-      if (token.value === "-" && (idx === 0 || (tokens[idx - 1].type === "operator" && tokens[idx - 1].value !== ")") || tokens[idx - 1].type === "paren" && tokens[idx - 1].value === "(")) {
-        // Unary minus: combine with next number token
-        const next = tokens[idx + 1];
-        if (next && next.type === "number") {
-          // Negate the number and push as number
-          outputQueue.push({ type: "number", value: -next.value });
-          idx++; // skip next token
-          continue;
-        } else {
-          return { error: "Invalid syntax" };
+      // Handle unary minus (including before parentheses)
+      if (token.value === "-" && (idx === 0 || (tokens[idx - 1].type === "operator" && tokens[idx - 1].value !== ")") || (tokens[idx - 1].type === "paren" && tokens[idx - 1].value === "("))) {
+        // Represent unary minus as a distinct operator "u-"
+        const unaryOp: Token = { type: "operator", value: "u-" };
+        // Push unary operator onto operator stack (higher precedence)
+        while (
+          operatorStack.length > 0 &&
+          operatorStack[operatorStack.length - 1].type === "operator" &&
+          ((precedence[operatorStack[operatorStack.length - 1].value] > precedence[unaryOp.value]) ||
+            (precedence[operatorStack[operatorStack.length - 1].value] === precedence[unaryOp.value] && isLeftAssociative(unaryOp.value)))
+        ) {
+          outputQueue.push(operatorStack.pop() as Token);
         }
+        operatorStack.push(unaryOp);
+        continue;
       }
       while (
         operatorStack.length > 0 &&
@@ -142,6 +144,21 @@ export function evaluate(expression: string): EvalResult {
     if (token.type === "number") {
       stack.push(token.value);
     } else if (token.type === "operator") {
+      // Handle unary minus operator "u-"
+      if (token.value === "u-") {
+        if (stack.length < 1) return { error: "Invalid syntax" };
+        const a = stack.pop() as number;
+        const res = -a;
+        // Check overflow after unary operation
+        if (!Number.isFinite(res) || Math.abs(res) > Number.MAX_SAFE_INTEGER) {
+          return { error: "Numeric overflow" };
+        }
+        // Round result to maintain precision consistency
+        const rounded = Math.round(res * 1e10) / 1e10;
+        stack.push(rounded);
+        continue;
+      }
+      // Binary operators require two operands
       if (stack.length < 2) return { error: "Invalid syntax" };
       const b = stack.pop() as number;
       const a = stack.pop() as number;

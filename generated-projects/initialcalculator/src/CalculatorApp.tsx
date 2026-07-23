@@ -18,12 +18,29 @@ export default function CalculatorApp() {
 
   const hasError = evalResult && 'error' in evalResult;
 
+  const getUserFriendlyError = (error: string): string => {
+    switch (error) {
+      case 'Division by zero':
+        return 'Division by zero';
+      case 'Mismatched parentheses':
+        return 'Mismatched parentheses';
+      case 'Invalid syntax':
+        return 'Invalid syntax';
+      case 'Expression too long':
+        return 'Expression too long';
+      case 'Numeric overflow':
+        return 'Numeric overflow';
+      default:
+        return 'Error evaluating expression';
+    }
+  };
+
   return (
     <div style={{ maxWidth: '400px', margin: '2rem auto', padding: '1rem', border: '1px solid #ccc', borderRadius: '8px' }}>
       <h2>Calculator</h2>
       <Input value={expression} onChange={handleExpressionChange} />
       {hasError ? (
-        <ErrorDisplay error={(evalResult as { error: string }).error} />
+        <ErrorDisplay error={getUserFriendlyError((evalResult as { error: string }).error)} />
       ) : (
         trimmed !== '' && evalResult && (
           <ResultDisplay result={(evalResult as { result: number }).result} />
