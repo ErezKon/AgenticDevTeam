@@ -10,7 +10,7 @@ import { z } from 'zod';
 import { execSync } from 'child_process';
 import { LogColors, color256 } from '../../utils/log-colors.util';
 import { logToolAction } from '../../utils/logger';
-import { GIT_DEFAULT_BRANCH, GITHUB_TOKEN, GITHUB_OWNER, GITHUB_REPO } from '../../config';
+import { GIT_DEFAULT_BRANCH, GITHUB_TOKEN, GITHUB_OWNER, GITHUB_REPO, GIT_USER_NAME, GIT_USER_EMAIL } from '../../config';
 
 const TAG_COLOR = 202;
 const TAG = `${color256(TAG_COLOR)}[git]${LogColors.RESET}`;
@@ -26,7 +26,12 @@ function git(workspaceRoot: string, args: string): string {
             encoding: 'utf-8',
             timeout: 30_000,
             maxBuffer: 1024 * 1024 * 5,
-            env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' },
+            env: {
+                ...process.env,
+                GIT_TERMINAL_PROMPT: '0', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null',
+                GIT_AUTHOR_NAME: GIT_USER_NAME, GIT_AUTHOR_EMAIL: GIT_USER_EMAIL,
+                GIT_COMMITTER_NAME: GIT_USER_NAME, GIT_COMMITTER_EMAIL: GIT_USER_EMAIL,
+            },
         });
         return result.trim();
     } catch (err: any) {

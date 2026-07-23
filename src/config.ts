@@ -88,6 +88,10 @@ export const GITHUB_REPO = process.env.GITHUB_REPO ?? '';
 /** The main/master branch name to merge PRs into. */
 export const GIT_DEFAULT_BRANCH = process.env.GIT_DEFAULT_BRANCH ?? 'main';
 
+/** Git committer identity used when GIT_CONFIG_GLOBAL is suppressed. */
+export const GIT_USER_NAME = process.env.GIT_USER_NAME ?? 'AgenticDevTeam';
+export const GIT_USER_EMAIL = process.env.GIT_USER_EMAIL ?? 'agenticdevteam@noreply.github.com';
+
 /** Max PR review iterations before force-merging or escalating. */
 export const MAX_REVIEW_ITERATIONS =
     parseInt(process.env.MAX_REVIEW_ITERATIONS ?? '5', 10);

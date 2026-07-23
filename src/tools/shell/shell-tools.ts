@@ -10,6 +10,7 @@ import { z } from 'zod';
 import { exec } from 'child_process';
 import { LogColors, color256 } from '../../utils/log-colors.util';
 import { logToolAction } from '../../utils/logger';
+import { GIT_USER_NAME, GIT_USER_EMAIL } from '../../config';
 
 const TAG = `${color256(166)}[shell]${LogColors.RESET}`;
 
@@ -21,7 +22,14 @@ interface ShellResult {
 
 function runShell(command: string, cwd: string, timeoutMs: number): Promise<ShellResult> {
     return new Promise((resolve) => {
-        const child = exec(command, { cwd, timeout: timeoutMs, maxBuffer: 1024 * 1024 * 5 }, (error, stdout, stderr) => {
+        const child = exec(command, {
+            cwd, timeout: timeoutMs, maxBuffer: 1024 * 1024 * 5,
+            env: {
+                ...process.env,
+                GIT_AUTHOR_NAME: GIT_USER_NAME, GIT_AUTHOR_EMAIL: GIT_USER_EMAIL,
+                GIT_COMMITTER_NAME: GIT_USER_NAME, GIT_COMMITTER_EMAIL: GIT_USER_EMAIL,
+            },
+        }, (error, stdout, stderr) => {
             resolve({
                 stdout: stdout?.toString() ?? '',
                 stderr: stderr?.toString() ?? '',

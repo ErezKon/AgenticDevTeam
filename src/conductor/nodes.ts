@@ -20,7 +20,7 @@ import { dispatchDevelopers } from '../agents/developers/dispatcher';
 import { createQaLeadAgent, createQaUnitAgent, createQaE2eAgent } from '../agents/qa/qa.agents';
 import { createDevOpsAgent } from '../agents/devops/devops.agent';
 import { getPlaywrightMcpTools, closePlaywrightMcp } from '../tools/mcp/playwright-mcp';
-import { MAX_BUGFIX_ITERATIONS, GIT_DEFAULT_BRANCH, AGENT_RECURSION_LIMIT, GITHUB_TOKEN, GITHUB_OWNER, GITHUB_REPO } from '../config';
+import { MAX_BUGFIX_ITERATIONS, GIT_DEFAULT_BRANCH, AGENT_RECURSION_LIMIT, GITHUB_TOKEN, GITHUB_OWNER, GITHUB_REPO, GIT_USER_NAME, GIT_USER_EMAIL } from '../config';
 import { execSync } from 'child_process';
 import type { ProjectStateType } from './state';
 import type { PhaseName, TranscriptMessage, Bug, CodebaseAnalysis } from '../agents/_shared/base-schemas';
@@ -60,7 +60,12 @@ function gitExec(workspacePath: string, args: string): string {
         return execSync(`git ${args}`, {
             cwd: workspacePath, encoding: 'utf-8',
             timeout: 30_000, maxBuffer: 1024 * 1024 * 5,
-            env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' },
+            env: {
+                ...process.env,
+                GIT_TERMINAL_PROMPT: '0', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null',
+                GIT_AUTHOR_NAME: GIT_USER_NAME, GIT_AUTHOR_EMAIL: GIT_USER_EMAIL,
+                GIT_COMMITTER_NAME: GIT_USER_NAME, GIT_COMMITTER_EMAIL: GIT_USER_EMAIL,
+            },
         }).trim();
     } catch (err: any) {
         return `Error: ${err.stderr?.toString() ?? err.message}`.trim();
