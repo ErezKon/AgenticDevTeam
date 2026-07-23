@@ -9,6 +9,7 @@ import { z } from 'zod';
 import { Octokit } from '@octokit/rest';
 import { GITHUB_TOKEN, GITHUB_OWNER, GITHUB_REPO, GIT_DEFAULT_BRANCH } from '../../config';
 import { LogColors, color256 } from '../../utils/log-colors.util';
+import {logToolAction} from '../../utils/logger';
 
 const TAG_COLOR = 240;
 const TAG = `${color256(TAG_COLOR)}[GitHub]${LogColors.RESET}`;
@@ -29,7 +30,7 @@ export function createGitHubTools() {
 
     const githubCreatePrTool = tool(
         async ({ title, body, head, base }) => {
-            console.log(`${TAG} Creating PR: "${title}" (${head} → ${base ?? GIT_DEFAULT_BRANCH})`);
+            logToolAction(`${TAG} Creating PR: "${title}" (${head} → ${base ?? GIT_DEFAULT_BRANCH})`);
             const octokit = getOctokit();
             const { data } = await octokit.pulls.create({
                 owner,
@@ -39,7 +40,7 @@ export function createGitHubTools() {
                 head,
                 base: base ?? GIT_DEFAULT_BRANCH,
             });
-            console.log(`${TAG} PR #${data.number} created: ${data.html_url}`);
+            logToolAction(`${TAG} PR #${data.number} created: ${data.html_url}`);
             return JSON.stringify({
                 prNumber: data.number,
                 prUrl: data.html_url,
@@ -60,7 +61,7 @@ export function createGitHubTools() {
 
     const githubGetPrStatusTool = tool(
         async ({ prNumber }) => {
-            console.log(`${TAG} Getting status of PR #${prNumber}`);
+            logToolAction(`${TAG} Getting status of PR #${prNumber}`);
             const octokit = getOctokit();
             const { data: pr } = await octokit.pulls.get({ owner, repo, pull_number: prNumber });
             const { data: reviews } = await octokit.pulls.listReviews({ owner, repo, pull_number: prNumber });
@@ -90,7 +91,7 @@ export function createGitHubTools() {
 
     const githubListPrCommentsTool = tool(
         async ({ prNumber }) => {
-            console.log(`${TAG} Listing comments on PR #${prNumber}`);
+            logToolAction(`${TAG} Listing comments on PR #${prNumber}`);
             const octokit = getOctokit();
             const { data: reviewComments } = await octokit.pulls.listReviewComments({
                 owner, repo, pull_number: prNumber,
@@ -129,7 +130,7 @@ export function createGitHubTools() {
 
     const githubPostPrReviewTool = tool(
         async ({ prNumber, body, event, comments }) => {
-            console.log(`${TAG} Posting ${event} review on PR #${prNumber}`);
+            logToolAction(`${TAG} Posting ${event} review on PR #${prNumber}`);
             const octokit = getOctokit();
 
             const reviewParams: any = {
@@ -152,7 +153,7 @@ export function createGitHubTools() {
             }
 
             const { data } = await octokit.pulls.createReview(reviewParams);
-            console.log(`${TAG} Review posted: ${event} (ID: ${data.id})`);
+            logToolAction(`${TAG} Review posted: ${event} (ID: ${data.id})`);
             return JSON.stringify({
                 reviewId: data.id,
                 state: data.state,
@@ -176,7 +177,7 @@ export function createGitHubTools() {
 
     const githubPostPrCommentTool = tool(
         async ({ prNumber, body }) => {
-            console.log(`${TAG} Posting comment on PR #${prNumber}`);
+            logToolAction(`${TAG} Posting comment on PR #${prNumber}`);
             const octokit = getOctokit();
             const { data } = await octokit.issues.createComment({
                 owner, repo, issue_number: prNumber, body,
@@ -196,13 +197,13 @@ export function createGitHubTools() {
     const githubMergePrTool = tool(
         async ({ prNumber, mergeMethod }) => {
             const method = mergeMethod ?? 'squash';
-            console.log(`${TAG} Merging PR #${prNumber} (method: ${method})`);
+            logToolAction(`${TAG} Merging PR #${prNumber} (method: ${method})`);
             const octokit = getOctokit();
             const { data } = await octokit.pulls.merge({
                 owner, repo, pull_number: prNumber,
                 merge_method: method,
             });
-            console.log(`${TAG} PR #${prNumber} merged: ${data.sha}`);
+            logToolAction(`${TAG} PR #${prNumber} merged: ${data.sha}`);
             return JSON.stringify({
                 merged: data.merged,
                 sha: data.sha,

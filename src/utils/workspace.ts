@@ -2,6 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { GENERATED_PROJECTS_DIR, OUTPUTS_DIR } from '../config';
 import { LogColors } from './log-colors.util';
+import {logToolAction} from './logger';
 
 const TAG = `${LogColors.BRIGHT_BLUE}[workspace]${LogColors.RESET}`;
 
@@ -30,7 +31,7 @@ export function createProjectWorkspace(systemName: string): string {
     fs.mkdirSync(path.join(projectDir, 'docs', 'agents'), { recursive: true });
     fs.mkdirSync(path.join(projectDir, 'tests'), { recursive: true });
 
-    console.log(`${TAG} Created project workspace: ${projectDir}`);
+    logToolAction(`${TAG} Created project workspace: ${projectDir}`);
     return projectDir;
 }
 
@@ -46,7 +47,7 @@ export function createRunOutputDir(systemName: string): string {
     fs.mkdirSync(outputDir, { recursive: true });
     fs.mkdirSync(path.join(outputDir, 'test-reports'), { recursive: true });
 
-    console.log(`${TAG} Created run output dir: ${outputDir}`);
+    logToolAction(`${TAG} Created run output dir: ${outputDir}`);
     return outputDir;
 }
 

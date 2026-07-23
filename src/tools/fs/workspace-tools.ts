@@ -10,6 +10,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { resolveWorkspacePath } from '../../utils/workspace';
 import { LogColors, color256 } from '../../utils/log-colors.util';
+import { logToolAction } from '../../utils/logger';
 
 const TAG_COLOR = 75;
 const TAG = `${color256(TAG_COLOR)}[fs-tools]${LogColors.RESET}`;
@@ -21,7 +22,7 @@ export function createWorkspaceTools(workspaceRoot: string) {
     const writeFileTool = tool(
         async ({ filePath, content }) => {
             const resolved = resolveWorkspacePath(workspaceRoot, filePath);
-            console.log(`${TAG} write_file: ${filePath}`);
+            logToolAction(`${TAG} write_file: ${filePath}`);
             fs.mkdirSync(path.dirname(resolved), { recursive: true });
             fs.writeFileSync(resolved, content, 'utf-8');
             return `File written: ${filePath} (${content.length} chars)`;
@@ -39,7 +40,7 @@ export function createWorkspaceTools(workspaceRoot: string) {
     const readFileTool = tool(
         async ({ filePath }) => {
             const resolved = resolveWorkspacePath(workspaceRoot, filePath);
-            console.log(`${TAG} read_file: ${filePath}`);
+            logToolAction(`${TAG} read_file: ${filePath}`);
             if (!fs.existsSync(resolved)) {
                 return `Error: File not found: ${filePath}`;
             }
@@ -58,7 +59,7 @@ export function createWorkspaceTools(workspaceRoot: string) {
     const editFileTool = tool(
         async ({ filePath, oldString, newString }) => {
             const resolved = resolveWorkspacePath(workspaceRoot, filePath);
-            console.log(`${TAG} edit_file: ${filePath}`);
+            logToolAction(`${TAG} edit_file: ${filePath}`);
             if (!fs.existsSync(resolved)) {
                 return `Error: File not found: ${filePath}`;
             }
@@ -84,7 +85,7 @@ export function createWorkspaceTools(workspaceRoot: string) {
     const listDirTool = tool(
         async ({ dirPath, recursive }) => {
             const resolved = resolveWorkspacePath(workspaceRoot, dirPath || '.');
-            console.log(`${TAG} list_dir: ${dirPath || '.'}`);
+            logToolAction(`${TAG} list_dir: ${dirPath || '.'}`);
             if (!fs.existsSync(resolved)) {
                 return `Error: Directory not found: ${dirPath}`;
             }
@@ -104,7 +105,7 @@ export function createWorkspaceTools(workspaceRoot: string) {
     const searchCodeTool = tool(
         async ({ query, filePattern }) => {
             const resolved = resolveWorkspacePath(workspaceRoot, '.');
-            console.log(`${TAG} search_code: "${query}" pattern=${filePattern || '*'}`);
+            logToolAction(`${TAG} search_code: "${query}" pattern=${filePattern || '*'}`);
             const results = searchInFiles(resolved, workspaceRoot, query, filePattern);
             if (results.length === 0) return 'No matches found.';
             return results.slice(0, 50).join('\n');

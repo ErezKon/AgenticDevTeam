@@ -9,6 +9,7 @@ import { tool } from '@langchain/core/tools';
 import { z } from 'zod';
 import { execSync } from 'child_process';
 import { LogColors, color256 } from '../../utils/log-colors.util';
+import { logToolAction } from '../../utils/logger';
 import { GIT_DEFAULT_BRANCH } from '../../config';
 
 const TAG_COLOR = 202;
@@ -41,7 +42,7 @@ export function createGitTools(workspaceRoot: string) {
     const gitCheckoutBranchTool = tool(
         async ({ branchName, fromBranch }) => {
             const base = fromBranch ?? GIT_DEFAULT_BRANCH;
-            console.log(`${TAG} checkout -b ${branchName} from ${base}`);
+            logToolAction(`${TAG} checkout -b ${branchName} from ${base}`);
             // Ensure we're on the base branch and up to date first
             git(workspaceRoot, `checkout ${base}`);
             git(workspaceRoot, `pull origin ${base} --ff-only`);
@@ -60,7 +61,7 @@ export function createGitTools(workspaceRoot: string) {
 
     const gitSwitchBranchTool = tool(
         async ({ branchName }) => {
-            console.log(`${TAG} checkout ${branchName}`);
+            logToolAction(`${TAG} checkout ${branchName}`);
             const result = git(workspaceRoot, `checkout ${branchName}`);
             return result || `Switched to branch '${branchName}'`;
         },
@@ -76,7 +77,7 @@ export function createGitTools(workspaceRoot: string) {
     const gitAddTool = tool(
         async ({ paths }) => {
             const target = paths ?? '.';
-            console.log(`${TAG} add ${target}`);
+            logToolAction(`${TAG} add ${target}`);
             const result = git(workspaceRoot, `add ${target}`);
             return result || `Staged: ${target}`;
         },
@@ -91,7 +92,7 @@ export function createGitTools(workspaceRoot: string) {
 
     const gitCommitTool = tool(
         async ({ message }) => {
-            console.log(`${TAG} commit -m "${message.slice(0, 60)}..."`);
+            logToolAction(`${TAG} commit -m "${message.slice(0, 60)}..."`);
             const result = git(workspaceRoot, `commit -m "${message.replace(/"/g, '\\"')}"`);
             return result;
         },
@@ -107,7 +108,7 @@ export function createGitTools(workspaceRoot: string) {
     const gitPushTool = tool(
         async ({ branchName }) => {
             const branch = branchName ?? git(workspaceRoot, 'rev-parse --abbrev-ref HEAD');
-            console.log(`${TAG} push -u origin ${branch}`);
+            logToolAction(`${TAG} push -u origin ${branch}`);
             const result = git(workspaceRoot, `push -u origin ${branch}`);
             return result || `Pushed branch '${branch}' to origin`;
         },
@@ -122,7 +123,7 @@ export function createGitTools(workspaceRoot: string) {
 
     const gitStatusTool = tool(
         async () => {
-            console.log(`${TAG} status --short`);
+            logToolAction(`${TAG} status --short`);
             const result = git(workspaceRoot, 'status --short');
             return result || '(working tree clean)';
         },
@@ -138,7 +139,7 @@ export function createGitTools(workspaceRoot: string) {
             const args = ['diff'];
             if (cached) args.push('--cached');
             if (filePath) args.push('--', filePath);
-            console.log(`${TAG} ${args.join(' ')}`);
+            logToolAction(`${TAG} ${args.join(' ')}`);
             const result = git(workspaceRoot, args.join(' '));
             return result || '(no diff)';
         },
@@ -154,7 +155,7 @@ export function createGitTools(workspaceRoot: string) {
 
     const gitCurrentBranchTool = tool(
         async () => {
-            console.log(`${TAG} rev-parse --abbrev-ref HEAD`);
+            logToolAction(`${TAG} rev-parse --abbrev-ref HEAD`);
             return git(workspaceRoot, 'rev-parse --abbrev-ref HEAD');
         },
         {
@@ -167,7 +168,7 @@ export function createGitTools(workspaceRoot: string) {
     const gitMergeBaseDiffTool = tool(
         async ({ baseBranch }) => {
             const base = baseBranch ?? GIT_DEFAULT_BRANCH;
-            console.log(`${TAG} diff ${base}...HEAD`);
+            logToolAction(`${TAG} diff ${base}...HEAD`);
             const result = git(workspaceRoot, `diff ${base}...HEAD`);
             return result || '(no differences from base branch)';
         },
@@ -183,7 +184,7 @@ export function createGitTools(workspaceRoot: string) {
     const gitLogTool = tool(
         async ({ count }) => {
             const n = count ?? 10;
-            console.log(`${TAG} log --oneline -${n}`);
+            logToolAction(`${TAG} log --oneline -${n}`);
             return git(workspaceRoot, `log --oneline -${n}`);
         },
         {

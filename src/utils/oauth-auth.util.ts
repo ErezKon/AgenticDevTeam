@@ -1,5 +1,6 @@
 import { LogColors } from './log-colors.util';
 import { OAUTH_TOKEN_URL, OAUTH_CLIENT_ID, OAUTH_CLIENT_SECRET } from '../config';
+import {logToolAction} from './logger';
 
 const TAG = `${LogColors.BRIGHT_MAGENTA}[oauth-auth]${LogColors.RESET}`;
 
@@ -56,7 +57,7 @@ async function fetchNewToken(): Promise<string> {
     const tokenString = `${clientId}:${clientSecret}`;
     const encodedToken = Buffer.from(tokenString).toString('base64');
 
-    console.log(`${TAG} Requesting new access token from ${OAUTH_TOKEN_URL}...`);
+    logToolAction(`${TAG} Requesting new access token from ${OAUTH_TOKEN_URL}...`);
 
     const response = await fetch(OAUTH_TOKEN_URL, {
         method: 'POST',
@@ -87,7 +88,7 @@ async function fetchNewToken(): Promise<string> {
     cachedToken = data.access_token;
     expiresAtMs = Date.now() + data.expires_in * 1000;
 
-    console.log(`${TAG} Fetched new token (expires in ${data.expires_in}s)`);
+    logToolAction(`${TAG} Fetched new token (expires in ${data.expires_in}s)`);
 
     return cachedToken;
 }

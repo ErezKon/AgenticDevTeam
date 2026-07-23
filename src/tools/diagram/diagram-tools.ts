@@ -7,6 +7,7 @@
 import { tool } from '@langchain/core/tools';
 import { z } from 'zod';
 import { LogColors, color256 } from '../../utils/log-colors.util';
+import {logToolAction} from '../../utils/logger';
 
 const TAG = `${color256(183)}[diagram]${LogColors.RESET}`;
 
@@ -30,10 +31,10 @@ function validateMermaid(source: string): { valid: boolean; error?: string } {
 
 export const emitMermaidTool = tool(
     async ({ title, source }) => {
-        console.log(`${TAG} Emitting diagram: ${title}`);
+        logToolAction(`${TAG} Emitting diagram: ${title}`);
         const validation = validateMermaid(source);
         if (!validation.valid) {
-            console.log(`${TAG} Validation warning: ${validation.error}`);
+            logToolAction(`${TAG} Validation warning: ${validation.error}`);
             return JSON.stringify({ title, source, warning: validation.error });
         }
         return JSON.stringify({ title, source, valid: true });

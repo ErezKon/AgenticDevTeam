@@ -40,6 +40,15 @@ function appendToRunLog(line: string): void {
 }
 
 /**
+ * Log a tool action to both console and the run log file.
+ * Used by workspace-tools, git-tools, shell-tools, etc.
+ */
+export function logToolAction(line: string): void {
+    console.log(line);
+    appendToRunLog(stripAnsi(line));
+}
+
+/**
  * Create a logger for a specific agent.
  *
  * @param tag   Display tag, e.g. "[Architect]"

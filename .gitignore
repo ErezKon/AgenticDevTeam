@@ -7,3 +7,4 @@ outputs/
 *.log
 _verify*
 dashboard/.angular/*
+.worktrees/

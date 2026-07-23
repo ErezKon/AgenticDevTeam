@@ -6,6 +6,7 @@
  */
 import { getAccessToken } from '../utils/oauth-auth.util';
 import { getLogger, setRunLogPath } from '../utils/logger';
+import { retryWithBackoff } from '../utils/retry';
 import { writeArtifact } from '../agents/_shared/artifact';
 import { createProjectWorkspace, createRunOutputDir } from '../utils/workspace';
 import { parseRequirementsFile } from '../tools/requirements/parse-requirements';
@@ -70,30 +71,32 @@ function msg(agentId: string, phase: PhaseName, message: string): TranscriptMess
 }
 
 async function invokeAgent(agent: any, userMessage: string, threadSuffix: string): Promise<any> {
-    const result = await agent.invoke(
-        { messages: [{ role: 'user', content: userMessage }] },
-        { configurable: { thread_id: `conductor-${threadSuffix}-${Date.now()}` } },
-    );
-    const last = result.messages[result.messages.length - 1];
-    if (typeof last.content !== 'string') return last.content;
+    return retryWithBackoff(async () => {
+        const result = await agent.invoke(
+            { messages: [{ role: 'user', content: userMessage }] },
+            { configurable: { thread_id: `conductor-${threadSuffix}-${Date.now()}` }, recursionLimit: 75 },
+        );
+        const last = result.messages[result.messages.length - 1];
+        if (typeof last.content !== 'string') return last.content;
 
-    // Try direct JSON parse first
-    const raw = last.content.trim();
-    try { return JSON.parse(raw); } catch { /* fall through */ }
+        // Try direct JSON parse first
+        const raw = last.content.trim();
+        try { return JSON.parse(raw); } catch { /* fall through */ }
 
-    // Try to extract JSON from markdown code blocks or raw braces
-    const codeBlock = raw.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
-    if (codeBlock) {
-        try { return JSON.parse(codeBlock[1].trim()); } catch { /* fall through */ }
-    }
-    const braces = raw.match(/(\{[\s\S]*\})/);
-    if (braces) {
-        try { return JSON.parse(braces[1]); } catch { /* fall through */ }
-    }
+        // Try to extract JSON from markdown code blocks or raw braces
+        const codeBlock = raw.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
+        if (codeBlock) {
+            try { return JSON.parse(codeBlock[1].trim()); } catch { /* fall through */ }
+        }
+        const braces = raw.match(/(\{[\s\S]*\})/);
+        if (braces) {
+            try { return JSON.parse(braces[1]); } catch { /* fall through */ }
+        }
 
-    throw new SyntaxError(
-        `Agent "${threadSuffix}" did not return valid JSON. Response starts with: ${raw.substring(0, 200)}`
-    );
+        throw new SyntaxError(
+            `Agent "${threadSuffix}" did not return valid JSON. Response starts with: ${raw.substring(0, 200)}`
+        );
+    }, threadSuffix);
 }
 
 // ─── 1. Intake ──────────────────────────────────────────────────────────────
