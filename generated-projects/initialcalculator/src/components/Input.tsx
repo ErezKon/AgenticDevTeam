@@ -17,12 +17,12 @@ const Input: React.FC<InputProps> = memo(function Input({ value, onChange }) {
   return (
     <div>
       <label htmlFor="expression-input" style={{ display: 'block', marginBottom: '0.5rem' }}>
-        Expression
+        Expression input
       </label>
       <input
         id="expression-input"
         type="text"
-        aria-label="Expression input"
+        aria-label="Calculator expression"
         placeholder="Enter expression"
         value={value}
         onChange={handleChange}
