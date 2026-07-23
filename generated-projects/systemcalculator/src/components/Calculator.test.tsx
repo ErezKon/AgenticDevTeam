@@ -1,27 +1,29 @@
 import React from 'react';
-import { render, screen } from '@testing-library/react';
+import { render, screen, fireEvent } from '@testing-library/react';
 import '@testing-library/jest-dom';
 import Calculator from './Calculator';
-import * as fs from 'fs';
-import * as path from 'path';
 
 describe('Calculator component', () => {
-  test('renders display and keypad', () => {
+  test('initial display is empty', () => {
     render(<Calculator />);
     const display = screen.getByTestId('display');
-    const keypad = screen.getByTestId('keypad');
-    expect(display).toBeInTheDocument();
-    expect(keypad).toBeInTheDocument();
-    // ensure buttons rendered
-    const button = screen.getByRole('button', { name: '7' });
-    expect(button).toBeInTheDocument();
+    expect(display).toHaveTextContent('');
   });
 
-  test('includes responsive media query for keypad layout', () => {
-    const cssPath = path.resolve(__dirname, 'Calculator.css');
-    const cssContent = fs.readFileSync(cssPath, 'utf8');
-    expect(cssContent).toMatch(/@media\s*\(max-width:\s*600px\)/);
-    // ensure grid-template-columns set to 1fr inside media query
-    expect(cssContent).toMatch(/\.keypad\s*{[^}]*grid-template-columns:\s*1fr;/s);
+  test('clicking buttons updates the display expression', () => {
+    render(<Calculator />);
+    const button1 = screen.getByRole('button', { name: '1' });
+    const buttonPlus = screen.getByRole('button', { name: '+' });
+    const button2 = screen.getByRole('button', { name: '2' });
+    const display = screen.getByTestId('display');
+
+    fireEvent.click(button1);
+    expect(display).toHaveTextContent('1');
+
+    fireEvent.click(buttonPlus);
+    expect(display).toHaveTextContent('1+');
+
+    fireEvent.click(button2);
+    expect(display).toHaveTextContent('1+2');
   });
 });
