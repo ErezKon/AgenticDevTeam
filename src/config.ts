@@ -36,7 +36,11 @@ export const MAX_BUGFIX_ITERATIONS =
 
 /** Max parallel developer agents during fan-out. */
 export const MAX_CONCURRENT_DEVS =
-    parseInt(process.env.MAX_CONCURRENT_DEVS ?? '3', 10);
+    parseInt(process.env.MAX_CONCURRENT_DEVS ?? '2', 10);
+
+/** Delay (ms) between dispatching batches of branches to avoid rate limits. */
+export const INTER_BATCH_DELAY_MS =
+    parseInt(process.env.INTER_BATCH_DELAY_MS ?? '2000', 10);
 
 // ─── Paths ──────────────────────────────────────────────────────────────────
 

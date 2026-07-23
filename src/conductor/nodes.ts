@@ -64,7 +64,25 @@ async function invokeAgent(agent: any, userMessage: string, threadSuffix: string
         { configurable: { thread_id: `conductor-${threadSuffix}-${Date.now()}` } },
     );
     const last = result.messages[result.messages.length - 1];
-    return typeof last.content === 'string' ? JSON.parse(last.content) : last.content;
+    if (typeof last.content !== 'string') return last.content;
+
+    // Try direct JSON parse first
+    const raw = last.content.trim();
+    try { return JSON.parse(raw); } catch { /* fall through */ }
+
+    // Try to extract JSON from markdown code blocks or raw braces
+    const codeBlock = raw.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
+    if (codeBlock) {
+        try { return JSON.parse(codeBlock[1].trim()); } catch { /* fall through */ }
+    }
+    const braces = raw.match(/(\{[\s\S]*\})/);
+    if (braces) {
+        try { return JSON.parse(braces[1]); } catch { /* fall through */ }
+    }
+
+    throw new SyntaxError(
+        `Agent "${threadSuffix}" did not return valid JSON. Response starts with: ${raw.substring(0, 200)}`
+    );
 }
 
 // ─── 1. Intake ──────────────────────────────────────────────────────────────

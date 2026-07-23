@@ -26,6 +26,32 @@ import type { ReviewOutput } from '../agents/developers/schemas/review-output.sc
 
 const log = getLogger('[PR-Workflow]', 135);
 
+// ─── Rate-limit retry helper ─────────────────────────────────────────────────
+
+const RETRY_ATTEMPTS = 5;
+const INITIAL_BACKOFF_MS = 5_000;
+
+async function retryWithBackoff<T>(fn: () => Promise<T>, label: string): Promise<T> {
+    for (let attempt = 1; attempt <= RETRY_ATTEMPTS; attempt++) {
+        try {
+            return await fn();
+        } catch (err: any) {
+            const is429 = err?.status === 429
+                || err?.message?.includes('429')
+                || err?.message?.includes('Rate limit')
+                || err?.message?.includes('Request limit');
+            if (is429 && attempt < RETRY_ATTEMPTS) {
+                const delay = INITIAL_BACKOFF_MS * Math.pow(2, attempt - 1);
+                log.warn(`${label}: rate-limited (attempt ${attempt}/${RETRY_ATTEMPTS}), retrying in ${delay / 1000}s...`);
+                await new Promise(r => setTimeout(r, delay));
+                continue;
+            }
+            throw err;
+        }
+    }
+    throw new Error(`${label}: unreachable`);
+}
+
 // ─── Types ───────────────────────────────────────────────────────────────────
 
 export interface PRWorkflowInput {
@@ -135,23 +161,27 @@ function buildPRDescription(
 async function invokeDevAgent(
     agent: any, userMessage: string, threadSuffix: string,
 ): Promise<DeveloperOutput> {
-    const result = await agent.invoke(
-        { messages: [{ role: 'user', content: userMessage }] },
-        { configurable: { thread_id: `dev-pr-${threadSuffix}-${Date.now()}` } },
-    );
-    const last = result.messages[result.messages.length - 1];
-    return typeof last.content === 'string' ? JSON.parse(last.content) : last.content;
+    return retryWithBackoff(async () => {
+        const result = await agent.invoke(
+            { messages: [{ role: 'user', content: userMessage }] },
+            { configurable: { thread_id: `dev-pr-${threadSuffix}-${Date.now()}` }, recursionLimit: 75 },
+        );
+        const last = result.messages[result.messages.length - 1];
+        return typeof last.content === 'string' ? JSON.parse(last.content) : last.content;
+    }, `dev-${threadSuffix}`);
 }
 
 async function invokeReviewerAgent(
     agent: any, userMessage: string, threadSuffix: string,
 ): Promise<ReviewOutput> {
-    const result = await agent.invoke(
-        { messages: [{ role: 'user', content: userMessage }] },
-        { configurable: { thread_id: `review-${threadSuffix}-${Date.now()}` } },
-    );
-    const last = result.messages[result.messages.length - 1];
-    return typeof last.content === 'string' ? JSON.parse(last.content) : last.content;
+    return retryWithBackoff(async () => {
+        const result = await agent.invoke(
+            { messages: [{ role: 'user', content: userMessage }] },
+            { configurable: { thread_id: `review-${threadSuffix}-${Date.now()}` }, recursionLimit: 75 },
+        );
+        const last = result.messages[result.messages.length - 1];
+        return typeof last.content === 'string' ? JSON.parse(last.content) : last.content;
+    }, `review-${threadSuffix}`);
 }
 
 // ─── Main PR workflow ────────────────────────────────────────────────────────

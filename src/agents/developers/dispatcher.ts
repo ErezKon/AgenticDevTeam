@@ -4,7 +4,7 @@
  * Groups assignments by devAgentId, respects dependency ordering,
  * and runs up to MAX_CONCURRENT_DEVS agents in parallel.
  */
-import { MAX_CONCURRENT_DEVS } from '../../config';
+import { MAX_CONCURRENT_DEVS, INTER_BATCH_DELAY_MS } from '../../config';
 import { getLogger } from '../../utils/logger';
 import { executePRWorkflow } from '../../conductor/pr-workflow';
 import type { Assignment, FileChange, ArtifactRef, TranscriptMessage, PhaseName, PullRequest } from '../_shared/base-schemas';
@@ -190,6 +190,12 @@ export async function dispatchDevelopers(
                         message: `PR workflow failed: ${r.reason}`,
                     });
                 }
+            }
+
+            // Delay between batches to avoid rate-limit bursts
+            if (j + MAX_CONCURRENT_DEVS < branchesToProcess.length && INTER_BATCH_DELAY_MS > 0) {
+                log.info(`Waiting ${INTER_BATCH_DELAY_MS}ms before next batch...`);
+                await new Promise(r => setTimeout(r, INTER_BATCH_DELAY_MS));
             }
         }
     }
