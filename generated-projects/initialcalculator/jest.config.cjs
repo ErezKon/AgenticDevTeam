@@ -26,6 +26,6 @@ module.exports = {
   moduleNameMapper: {
     '\\.(css|less|scss|sass)$': 'identity-obj-proxy',
     '\\.(png|jpe?g|svg|gif)$': '<rootDir>/src/__mocks__/fileMock.js',
-    '^react-jsx-runtime$': 'react/jsx-runtime',
+    // Removed custom mock for react-jsx-runtime; using native JSX runtime
   },
 };
