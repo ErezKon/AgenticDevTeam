@@ -62,6 +62,26 @@ describe('Calculator Engine evaluate', () => {
     expect(getResult('2* -3')).toBe(-6);
   });
 
+  test('unary plus at start', () => {
+    expect(getResult('+5')).toBe(5);
+  });
+
+  test('invalid consecutive operators', () => {
+    expect(getError('5*/2')).toBe('Invalid syntax');
+  });
+
+  test('spaces around operators', () => {
+    expect(getResult(' 3 + 4 * 2 ')).toBe(11);
+  });
+
+  test('deep nested parentheses', () => {
+    expect(getResult('(((1+2)))')).toBe(3);
+  });
+
+  test('rounding more than 10 decimals', () => {
+    expect(getResult('1/3')).toBeCloseTo(0.3333333333, 10);
+  });
+
   test('unary minus with parentheses', () => {
     expect(getResult('-(3+2)')).toBe(-5);
   });
