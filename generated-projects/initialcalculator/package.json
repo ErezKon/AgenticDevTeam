@@ -10,8 +10,8 @@
     "build": "vite build",
     "preview": "vite preview",
     "test": "jest",
-    "lint": "eslint --config .eslintrc.cjs src --ext .ts,.tsx",
-    "format": "prettier --config .prettierrc --write .",
+    "lint": "eslint . --ext .js,.jsx,.ts,.tsx",
+    "format": "prettier --write .",
     "type-check": "tsc --noEmit"
   },
   "dependencies": {
