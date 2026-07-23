@@ -1,13 +1,6 @@
 module.exports = {
+  preset: 'ts-jest',
   testEnvironment: 'jsdom',
-  transform: {
-    '^.+\\.(ts|tsx)$': 'babel-jest',
-  },
+  setupFilesAfterEnv: ['<rootDir>/src/setupTests.ts'],
   moduleFileExtensions: ['ts', 'tsx', 'js', 'jsx', 'json', 'node'],
-  testMatch: ['**/src/**/*.test.{ts,tsx}'],
-  testPathIgnorePatterns: ['/node_modules/', '/tests/'],
-  transformIgnorePatterns: ['/node_modules/(?!@octokit)'],
-  moduleNameMapper: {
-    '^@octokit/rest$': '<rootDir>/__mocks__/octokitRestMock.js',
-  },
 };
