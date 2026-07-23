@@ -1,1 +1,1 @@
-// Mock removed: React 18 JSX runtime is handled natively
+export * from 'react/jsx-runtime';
