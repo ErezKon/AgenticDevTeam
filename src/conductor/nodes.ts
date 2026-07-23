@@ -70,31 +70,65 @@ function msg(agentId: string, phase: PhaseName, message: string): TranscriptMess
     return { timestamp: ts(), agentId, phase, message };
 }
 
+function tryParseJson(raw: string): any | undefined {
+    if (!raw) return undefined;
+    try { return JSON.parse(raw); } catch { /* fall through */ }
+    const codeBlock = raw.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
+    if (codeBlock) {
+        try { return JSON.parse(codeBlock[1].trim()); } catch { /* fall through */ }
+    }
+    const braces = raw.match(/(\{[\s\S]*\})/);
+    if (braces) {
+        try { return JSON.parse(braces[1]); } catch { /* fall through */ }
+    }
+    return undefined;
+}
+
+function extractContent(msg: any): string {
+    if (typeof msg.content === 'string') return msg.content.trim();
+    // Some providers return content as [{type:'text', text:'...'}]
+    if (Array.isArray(msg.content)) {
+        return msg.content
+            .filter((c: any) => c.type === 'text')
+            .map((c: any) => c.text)
+            .join('\n')
+            .trim();
+    }
+    return '';
+}
+
 async function invokeAgent(agent: any, userMessage: string, threadSuffix: string): Promise<any> {
     return retryWithBackoff(async () => {
         const result = await agent.invoke(
             { messages: [{ role: 'user', content: userMessage }] },
             { configurable: { thread_id: `conductor-${threadSuffix}-${Date.now()}` }, recursionLimit: 75 },
         );
-        const last = result.messages[result.messages.length - 1];
-        if (typeof last.content !== 'string') return last.content;
+        const msgs = result.messages;
 
-        // Try direct JSON parse first
-        const raw = last.content.trim();
-        try { return JSON.parse(raw); } catch { /* fall through */ }
+        // Walk backwards to find a message with parseable JSON content
+        for (let i = msgs.length - 1; i >= 0; i--) {
+            const m = msgs[i];
+            // Skip user and tool messages
+            const role = m._getType?.() ?? m.constructor?.name ?? '';
+            if (role === 'human' || role === 'tool') continue;
 
-        // Try to extract JSON from markdown code blocks or raw braces
-        const codeBlock = raw.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
-        if (codeBlock) {
-            try { return JSON.parse(codeBlock[1].trim()); } catch { /* fall through */ }
+            // Non-string content (already structured) — return directly
+            if (typeof m.content !== 'string' && !Array.isArray(m.content)) return m.content;
+
+            const raw = extractContent(m);
+            if (!raw) continue;
+
+            const parsed = tryParseJson(raw);
+            if (parsed !== undefined) return parsed;
         }
-        const braces = raw.match(/(\{[\s\S]*\})/);
-        if (braces) {
-            try { return JSON.parse(braces[1]); } catch { /* fall through */ }
-        }
 
+        // Nothing found — build a helpful error from the last message
+        const last = msgs[msgs.length - 1];
+        const lastRaw = extractContent(last);
         throw new SyntaxError(
-            `Agent "${threadSuffix}" did not return valid JSON. Response starts with: ${raw.substring(0, 200)}`
+            `Agent "${threadSuffix}" did not return valid JSON. ` +
+            `Last message type: ${last._getType?.() ?? last.constructor?.name ?? 'unknown'}, ` +
+            `content starts with: ${lastRaw.substring(0, 200) || '(empty)'}`
         );
     }, threadSuffix);
 }
