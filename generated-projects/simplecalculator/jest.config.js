@@ -1,13 +1,13 @@
-/** @type {import('ts-jest').JestConfigWithTsJest} */
 module.exports = {
-  preset: 'ts-jest',
   testEnvironment: 'jsdom',
-  moduleFileExtensions: ['ts', 'tsx', 'js', 'jsx', 'json', 'node'],
   transform: {
-    '^.+\\.(ts|tsx)$': 'ts-jest',
+    '^.+\\.(ts|tsx)$': 'babel-jest',
   },
+  moduleFileExtensions: ['ts', 'tsx', 'js', 'jsx', 'json', 'node'],
+  testMatch: ['**/src/**/*.test.{ts,tsx}'],
+  testPathIgnorePatterns: ['/node_modules/', '/tests/'],
+  transformIgnorePatterns: ['/node_modules/(?!@octokit)'],
   moduleNameMapper: {
-    '\\.(css|less|scss|sass)$': 'identity-obj-proxy',
+    '^@octokit/rest$': '<rootDir>/__mocks__/octokitRestMock.js',
   },
-  setupFilesAfterEnv: ['@testing-library/jest-dom/extend-expect'],
 };
