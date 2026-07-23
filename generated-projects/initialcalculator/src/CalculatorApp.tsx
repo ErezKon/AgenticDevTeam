@@ -5,6 +5,8 @@ import ResultDisplay from './components/ResultDisplay';
 import ErrorDisplay from './components/ErrorDisplay';
 
 // Main CalculatorApp component
+import styles from './CalculatorApp.module.css';
+
 export default function CalculatorApp() {
   // Strongly typed state for the expression string
   const [expression, setExpression] = useState<string>('');
@@ -46,8 +48,8 @@ export default function CalculatorApp() {
   };
 
   return (
-    <div style={{ maxWidth: '400px', margin: '2rem auto', padding: '1rem', border: '1px solid #ccc', borderRadius: '8px' }}>
-      <h2>Calculator</h2>
+    <div className={styles.container} data-testid="calculator-container">
+      <h2 className={styles.title}>Calculator</h2>
       <Input value={expression} onChange={handleExpressionChange} />
       {hasError ? (
         <ErrorDisplay error={getUserFriendlyError((evalResult as { error: string }).error)} />
