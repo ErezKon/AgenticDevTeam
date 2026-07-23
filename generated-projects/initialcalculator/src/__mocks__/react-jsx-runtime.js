@@ -1,1 +1,1 @@
-module.exports = require('react/jsx-runtime');
+// Mock removed as React 18 JSX runtime is handled natively
