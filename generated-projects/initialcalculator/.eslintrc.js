@@ -1,4 +1,4 @@
-
+module.exports = {
   env: {
     browser: true,
     es2021: true,
@@ -28,6 +28,6 @@
     },
   },
   rules: {
-    // Add any project-specific rule overrides here
+    // Project-specific overrides can be added here
   },
 };
