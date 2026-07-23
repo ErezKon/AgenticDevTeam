@@ -1,6 +1,6 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { evaluate, EvalResult } from './engine/evaluate';
-import Input from './components/Input';
+import ExpressionInput from './components/ExpressionInput';
 import ResultDisplay from './components/ResultDisplay';
 import ErrorDisplay from './components/ErrorDisplay';
 
@@ -48,7 +48,7 @@ export default function CalculatorApp() {
   return (
     <div style={{ maxWidth: '400px', margin: '2rem auto', padding: '1rem', border: '1px solid #ccc', borderRadius: '8px' }}>
       <h2>Calculator</h2>
-      <Input value={expression} onChange={handleExpressionChange} />
+      <ExpressionInput value={expression} onChange={handleExpressionChange} />
       {hasError ? (
         <ErrorDisplay error={getUserFriendlyError((evalResult as { error: string }).error)} />
       ) : (
