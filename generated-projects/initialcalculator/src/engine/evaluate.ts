@@ -227,8 +227,11 @@ export function evaluate(expr: string): EvalResult {
     // Round to at most 10 decimal places
     const rounded = Number(rawResult.toFixed(10));
     return { result: rounded };
-  } catch (e: any) {
-    const msg = e?.message ?? 'Invalid syntax';
+  } catch (e: unknown) {
+    let msg = 'Invalid syntax';
+    if (e instanceof Error && typeof e.message === 'string') {
+      msg = e.message;
+    }
     if (
       msg === 'Division by zero' ||
       msg === 'Mismatched parentheses' ||
@@ -238,5 +241,6 @@ export function evaluate(expr: string): EvalResult {
     }
     // Fallback for unexpected errors
     return { error: 'Invalid syntax' };
+
   }
 }
