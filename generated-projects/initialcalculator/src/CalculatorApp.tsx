@@ -48,7 +48,7 @@ export default function CalculatorApp() {
   };
 
   return (
-    <div className={`container ${styles.container || ''}`} data-testid="calculator-container">
+    <div data-testid="calculator-container" className={styles.container}>
       <h2 className={styles.title}>Calculator</h2>
       <Input value={expression} onChange={handleExpressionChange} />
       {hasError ? (

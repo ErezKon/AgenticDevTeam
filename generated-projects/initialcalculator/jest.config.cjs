@@ -2,6 +2,14 @@
  * Jest configuration for a React + TypeScript project using ts-jest.
  */
 module.exports = {
+  coverageThreshold: {
+    global: {
+      branches: 80,
+      functions: 80,
+      lines: 80,
+      statements: 80,
+    },
+  },
   preset: 'ts-jest',
   testEnvironment: 'jsdom',
   moduleFileExtensions: ['ts', 'tsx', 'js', 'jsx', 'json', 'node'],
@@ -16,7 +24,7 @@ module.exports = {
   },
   setupFilesAfterEnv: ['<rootDir>/jest.setup.js'],
   moduleNameMapper: {
-
     '\\.(css|less|scss|sass)$': 'identity-obj-proxy',
+    '\\.(png|jpe?g|svg|gif)$': '<rootDir>/src/__mocks__/fileMock.js',
   },
 };
