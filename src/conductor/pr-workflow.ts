@@ -64,10 +64,16 @@ function gitExec(workspacePath: string, args: string): string {
         return execSync(`git ${args}`, {
             cwd: workspacePath, encoding: 'utf-8',
             timeout: 30_000, maxBuffer: 1024 * 1024 * 5,
+            env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' },
         }).trim();
     } catch (err: any) {
         return `Error: ${err.stderr?.toString() ?? err.message}`.trim();
     }
+}
+
+function gitPush(workspacePath: string, branchName: string): string {
+    const authUrl = `https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_OWNER}/${GITHUB_REPO}.git`;
+    return gitExec(workspacePath, `push ${authUrl} HEAD:refs/heads/${branchName}`);
 }
 
 function getOctokit(): Octokit {
@@ -206,10 +212,17 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
     }
     // Delete stale local branch if it exists (ignore errors)
     gitExec(gitRoot, `branch -D ${branchName}`);
-    // Fetch latest base branch from remote
+    // Fetch latest base branch from remote (may fail if not pushed yet)
     gitExec(gitRoot, `fetch origin ${baseBranch}`);
-    // Create worktree with a new branch from the remote base
-    const wtResult = gitExec(gitRoot, `worktree add "${worktreeDir}" -b ${branchName} origin/${baseBranch}`);
+    // Create worktree with a new branch — try remote ref first, fall back to local
+    let wtResult = gitExec(gitRoot, `worktree add "${worktreeDir}" -b ${branchName} origin/${baseBranch}`);
+    if (wtResult.startsWith('Error:')) {
+        log.warn(`Remote ref origin/${baseBranch} not found, falling back to local branch`);
+        wtResult = gitExec(gitRoot, `worktree add "${worktreeDir}" -b ${branchName} ${baseBranch}`);
+    }
+    if (wtResult.startsWith('Error:')) {
+        throw new Error(`Failed to create worktree for ${branchName}: ${wtResult}`);
+    }
     log.info(`Worktree created: ${wtResult}`);
     // Ensure the workspace sub-directory exists in the worktree
     fs.mkdirSync(worktreeWorkspace, { recursive: true });
@@ -283,7 +296,7 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
         if (statusOutput && !statusOutput.includes('nothing to commit')) {
             gitExec(worktreeWorkspace, `commit -m "[${projectSlug}]-[${primaryStoryId}]-chore: final cleanup for ${branchName}"`);
         }
-        gitExec(worktreeWorkspace, `push -u origin ${branchName}`);
+        gitPush(worktreeWorkspace, branchName);
 
         // ── 2. Create GitHub PR ─────────────────────────────────────────
         const prTitle = buildPRTitle(assignments, taskType);
@@ -476,7 +489,7 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                         if (fixStatus && !fixStatus.includes('nothing to commit')) {
                             gitExec(worktreeWorkspace, `commit -m "[${projectSlug}]-[${primaryStoryId}]-fix: address review comments (iteration ${iteration})"`);
                         }
-                        gitExec(worktreeWorkspace, `push origin ${branchName}`);
+                        gitPush(worktreeWorkspace, branchName);
                     } catch (err: any) {
                         log.error(`Fix attempt failed: ${err.message}`);
                         allTranscript.push(msg(primaryDevId, `Fix failed: ${err.message}`));

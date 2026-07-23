@@ -10,6 +10,7 @@
 import { webcrypto } from 'node:crypto';
 if (!globalThis.crypto) (globalThis as any).crypto = webcrypto;
 
+process.env.NODE_TLS_REJECT_UNAUTHORIZED ??= '0';
 import 'dotenv/config';
 import * as fs from 'fs';
 import * as path from 'path';

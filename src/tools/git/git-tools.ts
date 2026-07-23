@@ -10,7 +10,7 @@ import { z } from 'zod';
 import { execSync } from 'child_process';
 import { LogColors, color256 } from '../../utils/log-colors.util';
 import { logToolAction } from '../../utils/logger';
-import { GIT_DEFAULT_BRANCH } from '../../config';
+import { GIT_DEFAULT_BRANCH, GITHUB_TOKEN, GITHUB_OWNER, GITHUB_REPO } from '../../config';
 
 const TAG_COLOR = 202;
 const TAG = `${color256(TAG_COLOR)}[git]${LogColors.RESET}`;
@@ -26,6 +26,7 @@ function git(workspaceRoot: string, args: string): string {
             encoding: 'utf-8',
             timeout: 30_000,
             maxBuffer: 1024 * 1024 * 5,
+            env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' },
         });
         return result.trim();
     } catch (err: any) {
@@ -108,8 +109,9 @@ export function createGitTools(workspaceRoot: string) {
     const gitPushTool = tool(
         async ({ branchName }) => {
             const branch = branchName ?? git(workspaceRoot, 'rev-parse --abbrev-ref HEAD');
-            logToolAction(`${TAG} push -u origin ${branch}`);
-            const result = git(workspaceRoot, `push -u origin ${branch}`);
+            logToolAction(`${TAG} push ${branch}`);
+            const authUrl = `https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_OWNER}/${GITHUB_REPO}.git`;
+            const result = git(workspaceRoot, `push ${authUrl} HEAD:refs/heads/${branch}`);
             return result || `Pushed branch '${branch}' to origin`;
         },
         {

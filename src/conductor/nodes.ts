@@ -20,7 +20,7 @@ import { dispatchDevelopers } from '../agents/developers/dispatcher';
 import { createQaLeadAgent, createQaUnitAgent, createQaE2eAgent } from '../agents/qa/qa.agents';
 import { createDevOpsAgent } from '../agents/devops/devops.agent';
 import { getPlaywrightMcpTools, closePlaywrightMcp } from '../tools/mcp/playwright-mcp';
-import { MAX_BUGFIX_ITERATIONS, GIT_DEFAULT_BRANCH, AGENT_RECURSION_LIMIT } from '../config';
+import { MAX_BUGFIX_ITERATIONS, GIT_DEFAULT_BRANCH, AGENT_RECURSION_LIMIT, GITHUB_TOKEN, GITHUB_OWNER, GITHUB_REPO } from '../config';
 import { execSync } from 'child_process';
 import type { ProjectStateType } from './state';
 import type { PhaseName, TranscriptMessage, Bug, CodebaseAnalysis } from '../agents/_shared/base-schemas';
@@ -60,10 +60,16 @@ function gitExec(workspacePath: string, args: string): string {
         return execSync(`git ${args}`, {
             cwd: workspacePath, encoding: 'utf-8',
             timeout: 30_000, maxBuffer: 1024 * 1024 * 5,
+            env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' },
         }).trim();
     } catch (err: any) {
         return `Error: ${err.stderr?.toString() ?? err.message}`.trim();
     }
+}
+
+function gitPush(workspacePath: string, branchName: string): string {
+    const authUrl = `https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_OWNER}/${GITHUB_REPO}.git`;
+    return gitExec(workspacePath, `push ${authUrl} HEAD:refs/heads/${branchName}`);
 }
 
 function msg(agentId: string, phase: PhaseName, message: string): TranscriptMessage {
@@ -201,7 +207,7 @@ export async function intakeNode(state: ProjectStateType): Promise<Partial<Proje
         intakeLog.info(`System branch: ${systemBranch} (greenfield)`);
     }
     // Push the system branch to remote
-    gitExec(gitRoot, `push -u origin ${systemBranch}`);
+    gitPush(gitRoot, systemBranch);
 
     intakeLog.info(`Workspace: ${workspacePath}`);
     intakeLog.info(`Output: ${outputPath}`);
