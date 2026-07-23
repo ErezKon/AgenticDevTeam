@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { evaluate, EvalResult } from './engine/evaluate';
 import Input from './components/Input';
 import ResultDisplay from './components/ResultDisplay';

@@ -9,6 +9,9 @@ export interface ErrorDisplayProps {
  * Uses role="alert" for accessibility.
  */
 const ErrorDisplay: React.FC<ErrorDisplayProps> = memo(function ErrorDisplay({ error }) {
+  if (!error) {
+    return null;
+  }
   return (
     <div role="alert" aria-label="Error" style={{ marginTop: '1rem', color: 'red' }}>
       {error}
