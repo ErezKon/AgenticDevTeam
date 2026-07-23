@@ -67,6 +67,9 @@ describe('Calculator Engine evaluate', () => {
   });
 
   // Invalid expression tests
+  test('whitespace only string', () => {
+    expect(getError('   ')).toBe('Invalid syntax');
+  });
   test('division by zero', () => {
     expect(getError('5/0')).toBe('Division by zero');
   });
