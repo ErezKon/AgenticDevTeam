@@ -1,0 +1,29 @@
+// Jest Snapshot v1, https://goo.gl/fbAQLP
+
+exports[`CalculatorApp component matches snapshot on initial render 1`] = `
+<DocumentFragment>
+  <div
+    style="max-width: 400px; margin: 2rem auto; padding: 1rem; border: 1px solid #ccc; border-radius: 8px;"
+  >
+    <h2>
+      Calculator
+    </h2>
+    <div>
+      <label
+        for="expression-input"
+        style="display: block; margin-bottom: 0.5rem;"
+      >
+        Expression
+      </label>
+      <input
+        aria-label="Expression input"
+        id="expression-input"
+        placeholder="Enter expression"
+        style="width: 100%; padding: 0.5rem; font-size: 1rem;"
+        type="text"
+        value=""
+      />
+    </div>
+  </div>
+</DocumentFragment>
+`;
