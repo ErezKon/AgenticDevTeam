@@ -1,15 +1,38 @@
-import React from 'react';
-import Display from './Display';
-import Keypad from './Keypad';
+import React, { useState } from 'react';
+import './Calculator.css';
 
-/**
- * Calculator component – UI skeleton that composes the display and keypad.
- */
-const Calculator: React.FC = () => {
+const buttons = [
+  '7','8','9','/',
+  '4','5','6','*',
+  '1','2','3','-',
+  '0','.','=','+',
+];
+
+export const Calculator: React.FC = () => {
+  const [expression, setExpression] = useState('');
+  const handleClick = (value: string) => {
+    if (value === '=') {
+      // evaluation handled elsewhere; placeholder
+      return;
+    }
+    setExpression(prev => prev + value);
+  };
+
   return (
-    <div data-testid="calculator" className="calculator-container">
-      <Display />
-      <Keypad />
+    <div className="calculator">
+      <div className="display" data-testid="display">{expression}</div>
+      <div className="keypad" data-testid="keypad">
+        {buttons.map(btn => (
+          <button
+            key={btn}
+            className="key"
+            onClick={() => handleClick(btn)}
+            aria-label={btn}
+          >
+            {btn}
+          </button>
+        ))}
+      </div>
     </div>
   );
 };
