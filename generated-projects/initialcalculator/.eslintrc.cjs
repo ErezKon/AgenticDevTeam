@@ -1,4 +1,5 @@
 module.exports = {
+  ignorePatterns: ['generated-projects/**', 'vite.config.ts', 'jest.setup.js'],
   env: {
     browser: true,
     es2021: true,

@@ -241,6 +241,5 @@ export function evaluate(expr: string): EvalResult {
     }
     // Fallback for unexpected errors
     return { error: 'Invalid syntax' };
-
   }
 }
