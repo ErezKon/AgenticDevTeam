@@ -3,6 +3,9 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
+  "jest": "jest.config.cjs",
+  "main": "src/main.tsx",
+  "module": "src/main.tsx",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
