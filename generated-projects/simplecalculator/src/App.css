@@ -1,0 +1,32 @@
+/* App component styles */
+.app {
+  font-family: Arial, sans-serif;
+  max-width: 400px;
+  margin: 2rem auto;
+  padding: 1rem;
+  border: 1px solid #ccc;
+  border-radius: 8px;
+}
+
+input {
+  width: 100%;
+  padding: 0.5rem;
+  margin-bottom: 0.5rem;
+  font-size: 1rem;
+}
+
+button {
+  margin-right: 0.5rem;
+  padding: 0.5rem 1rem;
+  font-size: 1rem;
+}
+
+.result {
+  margin-top: 1rem;
+  color: green;
+}
+
+.error {
+  margin-top: 1rem;
+  color: red;
+}
