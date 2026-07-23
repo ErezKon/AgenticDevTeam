@@ -1,27 +1,39 @@
+// Simple expression evaluator for calculator UI
+// NOTE: This is a naive implementation using Function constructor.
+// It handles basic arithmetic, division by zero, and syntax errors.
+
 export interface EvalResult {
   result?: number;
-  error?: {
-    code: string;
-    message: string;
-  };
+  error?: { code: string; message: string };
 }
 
-/**
- * Simple evaluator stub focusing on division by zero detection.
- * Returns an error object with code 'DIV_ZERO' when a division by zero is detected.
- * For other expressions, returns a placeholder result (NaN).
- */
-export function evaluate(expression: string): EvalResult {
-  // Detect division by zero (e.g., "/0" possibly with spaces) not followed by another digit
-  const divZeroPattern = /\/\s*0(?!\d)/;
-  if (divZeroPattern.test(expression)) {
-    return {
-      error: {
-        code: 'DIV_ZERO',
-        message: 'Cannot divide by zero',
-      },
-    };
+export function evaluateExpression(expr: string): EvalResult {
+  // Trim whitespace
+  const trimmed = expr.trim();
+  if (trimmed === "") {
+    return { error: { code: "EMPTY", message: "Expression is empty" } };
   }
-  // Placeholder for other evaluations
-  return { result: NaN };
+  try {
+    // Use Function to evaluate safely (no external variables)
+    // This will throw on syntax errors.
+    const fn = new Function(`"use strict"; return (${trimmed});`);
+    const value = fn();
+    if (typeof value !== "number" || isNaN(value)) {
+      return { error: { code: "INVALID", message: "Result is not a number" } };
+    }
+    if (!isFinite(value)) {
+      // Handles division by zero resulting in Infinity or -Infinity
+      return { error: { code: "DIV_ZERO", message: "Cannot divide by zero" } };
+    }
+    // Round to 10 decimal places as per UI requirement
+    const rounded = Math.round(value * 1e10) / 1e10;
+    return { result: rounded };
+  } catch (e: any) {
+    // Distinguish division by zero if caught via Infinity
+    if (e instanceof Error && e.message.includes("division by zero")) {
+      return { error: { code: "DIV_ZERO", message: "Cannot divide by zero" } };
+    }
+    // Generic syntax error
+    return { error: { code: "SYNTAX_ERROR", message: "Syntax error: unexpected token" } };
+  }
 }
