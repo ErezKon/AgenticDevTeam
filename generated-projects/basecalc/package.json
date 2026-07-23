@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "jest"
+    "test": "jest",
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview"
@@ -20,9 +20,10 @@
     "ts-jest": "^29.0.0",
     "@types/jest": "^29.0.0",
     "@types/react": "^18.0.0",
-    "@types/react-dom": "^18.0.0"
+    "@types/react-dom": "^18.0.0",
     "@vitejs/plugin-react": "^4.0.0",
     "typescript": "^5.0.0",
-    "vite": "^5.0.0"
+    "vite": "^5.0.0",
+    "jest-environment-jsdom": "^29.0.0"
   }
 }
