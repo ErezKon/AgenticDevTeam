@@ -1,15 +1,7 @@
-/** @type {import('jest').Config} */
+/**
+ * Jest configuration
+ */
 module.exports = {
-  preset: 'ts-jest',
   testEnvironment: 'node',
-  moduleFileExtensions: ['ts', 'js'],
-  transform: {
-    '^.+\\.ts$': 'ts-jest',
-  },
-  globals: {
-    'ts-jest': {
-      useESM: true,
-    },
-  },
-  extensionsToTreatAsEsm: ['.ts'],
+  // No transform needed for native ESM support in Node >= 14
 };
