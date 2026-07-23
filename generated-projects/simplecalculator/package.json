@@ -1,0 +1,21 @@
+{
+  "name": "calculator-spa",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "test": "jest", 
+    "lint": "eslint 'src/**/*.{js,jsx,ts,tsx}'",
+    "format": "prettier --write 'src/**/*.{js,jsx,ts,tsx,css,md}'"
+  },
+  "devDependencies": {
+    "eslint": "^8.0.0",
+    "eslint-config-prettier": "^8.0.0",
+    "eslint-plugin-react": "^7.0.0",
+    "eslint-plugin-react-hooks": "^4.0.0",
+    "@typescript-eslint/eslint-plugin": "^5.0.0",
+    "@typescript-eslint/parser": "^5.0.0",
+    "jest": "^29.0.0",
+    "@types/jest": "^29.0.0"
+    "prettier": "^2.0.0"
+  }
+}
