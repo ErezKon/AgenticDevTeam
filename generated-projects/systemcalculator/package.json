@@ -3,7 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "test": "jest"
+    "test": "jest",
+    "start": "react-scripts start",
+    "build": "react-scripts build"
   },
   "devDependencies": {
     "@testing-library/react": "^14.0.0",
