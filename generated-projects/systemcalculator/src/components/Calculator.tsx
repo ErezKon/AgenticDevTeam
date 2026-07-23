@@ -1,62 +1,78 @@
 import React, { useState } from 'react';
+import { parseExpression } from '../utils/expressionParser';
+import { formatError } from '../utils/errorHandler';
 
 /**
- * Simple Calculator component.
- * Renders a display area showing the current expression and a keypad of buttons.
- * Clicking a button appends its value to the expression string.
+ * Simple calculator UI.
+ * - Displays the current expression or result.
+ * - Provides a keypad with digits, basic operators and an "=" button.
+ * - On "=" evaluates the expression using parseExpression.
+ *   Successful evaluation replaces the display with the numeric result.
+ *   Errors are passed through formatError and the friendly message is shown.
  */
-const Calculator: React.FC = () => {
-  const [expression, setExpression] = useState<string>('');
+export const Calculator: React.FC = () => {
+  const [display, setDisplay] = useState<string>('');
+  const expressionRef = React.useRef<string>('');
 
   const handleButtonClick = (value: string) => {
-    setExpression((prev) => prev + value);
+    if (value === '=') {
+      console.log('expression before parse', expressionRef.current);
+      try {
+        const result = parseExpression(expressionRef.current);
+        console.log('parse result', result);
+        setDisplay(String(result));
+        // Reset expression after evaluation
+        expressionRef.current = String(result);
+      } catch (err) {
+        console.error('parse error', err);
+        const message = formatError(err as Error);
+        setDisplay(message);
+        // Reset expression to empty on error
+        expressionRef.current = '';
+      }
+    } else if (value === 'C') {
+      setDisplay('');
+      expressionRef.current = '';
+    } else {
+      // Update ref immediately
+      console.log('button', value, 'updating ref to', expressionRef.current + value);
+      expressionRef.current = expressionRef.current + value;
+      setDisplay((prev) => prev + value);
+    }
   };
 
-  // Define the buttons to render. Order is not critical for tests.
   const buttons: string[] = [
     '7', '8', '9', '/',
     '4', '5', '6', '*',
     '1', '2', '3', '-',
     '0', '.', '=', '+',
+    'C',
   ];
 
   return (
-    <div className="calculator" style={{ maxWidth: '300px', margin: '0 auto' }}>
-      {/* Display */}
+    <div className="calculator" style={{ maxWidth: '200px', margin: '0 auto' }}>
       <div
         data-testid="display"
-        aria-label="calculator display"
+        className="calculator-display"
         style={{
-          minHeight: '2rem',
           border: '1px solid #ccc',
-          padding: '0.5rem',
-          marginBottom: '1rem',
-          fontSize: '1.5rem',
+          padding: '10px',
+          minHeight: '40px',
+          marginBottom: '10px',
           textAlign: 'right',
-          backgroundColor: '#f9f9f9',
+          fontSize: '1.2rem',
         }}
       >
-        {expression}
+        {display}
       </div>
-
-      {/* Keypad */}
-      <div
-        className="keypad"
-        style={{
-          display: 'grid',
-          gridTemplateColumns: 'repeat(4, 1fr)',
-          gap: '0.5rem',
-        }}
-      >
+      <div className="calculator-keypad" style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '5px' }}>
         {buttons.map((btn) => (
           <button
             key={btn}
             type="button"
             onClick={() => handleButtonClick(btn)}
-            style={{
-              padding: '1rem',
-              fontSize: '1.2rem',
-            }}
+            data-testid={`btn-${btn}`}
+            style={{ padding: '10px', fontSize: '1rem' }}
           >
             {btn}
           </button>
@@ -65,5 +81,3 @@ const Calculator: React.FC = () => {
     </div>
   );
 };
-
-export default Calculator;

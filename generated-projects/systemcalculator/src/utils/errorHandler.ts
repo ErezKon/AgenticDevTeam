@@ -9,12 +9,12 @@ export function formatError(error: Error): string {
   const msg = error.message.toLowerCase();
 
   // Invalid syntax – mathjs throws messages containing "unexpected" or "invalid".
-  if (msg.includes('invalid') || msg.includes('unexpected')) {
+  if (msg.includes('invalid') || msg.includes('unexpected') || msg.includes('syntax')) {
     return 'Invalid syntax';
   }
 
   // Division by zero – mathjs throws "Division by zero" or similar.
-  if (msg.includes('division by zero') || msg.includes('cannot divide by zero')) {
+  if (msg.includes('division by zero') || msg.includes('cannot divide by zero') || msg.includes('infinity')) {
     return 'Cannot divide by zero';
   }
 
