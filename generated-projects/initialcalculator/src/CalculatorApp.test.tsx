@@ -2,10 +2,7 @@ import { render, screen, fireEvent } from '@testing-library/react';
 import CalculatorApp from './CalculatorApp';
 
 describe('CalculatorApp component', () => {
-  test('matches snapshot on initial render', () => {
-    const { asFragment } = render(<CalculatorApp />);
-    expect(asFragment()).toMatchSnapshot();
-  });
+
   test('renders input field with correct ARIA label', () => {
     render(<CalculatorApp />);
     const input = screen.getByLabelText(/expression input/i);

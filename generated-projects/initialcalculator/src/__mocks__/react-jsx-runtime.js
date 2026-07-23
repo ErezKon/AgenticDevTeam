@@ -6,6 +6,6 @@ module.exports.Fragment = "Fragment";
 module.exports.jsx = function jsx(type, props, key) {
   return { type, props, key };
 }
-export function jsxs(type, props, key) {
+module.exports.jsxs = function jsxs(type, props, key) {
   return { type, props, key };
 }
