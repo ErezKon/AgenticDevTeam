@@ -1,5 +1,5 @@
 import { render, screen } from '@testing-library/react';
-import ErrorDisplay from './ErrorDisplay';
+import ErrorDisplay, { ErrorDisplayProps } from './ErrorDisplay';
 
 describe('ErrorDisplay component', () => {
   test('renders error message with role alert when error is provided', () => {
@@ -12,10 +12,25 @@ describe('ErrorDisplay component', () => {
 
   test('does not render anything when error is empty string', () => {
     const { container } = render(<ErrorDisplay error={''} />);
-    // No element with role alert should be present
     const alerts = screen.queryByRole('alert');
     expect(alerts).toBeNull();
-    // Container should be empty (null render)
     expect(container.firstChild).toBeNull();
+  });
+
+  test('does not render and does not crash for non-string falsy values', () => {
+    const falsyValues: any[] = [null, undefined, 0, false, {}];
+    falsyValues.forEach((val) => {
+      const { container } = render(<ErrorDisplay error={val} />);
+      const alerts = screen.queryByRole('alert');
+      expect(alerts).toBeNull();
+      expect(container.firstChild).toBeNull();
+    });
+  });
+
+  test('alert element includes aria-live attribute', () => {
+    const errorMessage = 'Division by zero';
+    render(<ErrorDisplay error={errorMessage} />);
+    const alert = screen.getByRole('alert');
+    expect(alert).toHaveAttribute('aria-live', 'assertive');
   });
 });
