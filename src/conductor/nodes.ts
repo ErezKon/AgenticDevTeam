@@ -54,6 +54,17 @@ function detectDefaultBranch(workspacePath: string): string {
     return GIT_DEFAULT_BRANCH;
 }
 
+function gitExec(workspacePath: string, args: string): string {
+    try {
+        return execSync(`git ${args}`, {
+            cwd: workspacePath, encoding: 'utf-8',
+            timeout: 30_000, maxBuffer: 1024 * 1024 * 5,
+        }).trim();
+    } catch (err: any) {
+        return `Error: ${err.stderr?.toString() ?? err.message}`.trim();
+    }
+}
+
 function msg(agentId: string, phase: PhaseName, message: string): TranscriptMessage {
     return { timestamp: ts(), agentId, phase, message };
 }
@@ -140,6 +151,55 @@ export async function intakeNode(state: ProjectStateType): Promise<Partial<Proje
     const defaultBranch = detectDefaultBranch(gitRoot);
     intakeLog.info(`Git repo validated. Default branch: ${defaultBranch}`);
 
+    // ── Create or checkout the system branch (project/<system-name>) ─────
+    const systemSlug = state.input.systemName
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-|-$/g, '')
+        .slice(0, 50);
+    const systemBranch = `project/${systemSlug}`;
+
+    // Check if the system branch already exists (remote or local)
+    const remoteBranches = gitExec(gitRoot, 'branch -r').split('\n').map((b: string) => b.trim());
+    const localBranches = gitExec(gitRoot, 'branch --list').split('\n').map((b: string) => b.trim().replace(/^\* /, ''));
+    const existsRemote = remoteBranches.some((b: string) => b === `origin/${systemBranch}`);
+    const existsLocal = localBranches.includes(systemBranch);
+
+    if (state.input.runType === 'maintain') {
+        // Maintain mode: checkout existing system branch, update from default branch
+        if (existsLocal) {
+            gitExec(gitRoot, `checkout ${systemBranch}`);
+        } else if (existsRemote) {
+            gitExec(gitRoot, `checkout -b ${systemBranch} origin/${systemBranch}`);
+        } else {
+            // System branch doesn't exist yet — create from default branch
+            gitExec(gitRoot, `checkout ${defaultBranch}`);
+            gitExec(gitRoot, `pull origin ${defaultBranch} --ff-only`);
+            gitExec(gitRoot, `checkout -b ${systemBranch}`);
+        }
+        // Update from default branch
+        gitExec(gitRoot, `merge ${defaultBranch} --no-edit`);
+        intakeLog.info(`System branch: ${systemBranch} (maintain mode, updated from ${defaultBranch})`);
+    } else {
+        // Greenfield mode: create system branch from default branch
+        gitExec(gitRoot, `checkout ${defaultBranch}`);
+        gitExec(gitRoot, `pull origin ${defaultBranch} --ff-only`);
+        if (existsLocal || existsRemote) {
+            // Branch already exists — checkout and update
+            if (existsLocal) {
+                gitExec(gitRoot, `checkout ${systemBranch}`);
+            } else {
+                gitExec(gitRoot, `checkout -b ${systemBranch} origin/${systemBranch}`);
+            }
+            gitExec(gitRoot, `merge ${defaultBranch} --no-edit`);
+        } else {
+            gitExec(gitRoot, `checkout -b ${systemBranch}`);
+        }
+        intakeLog.info(`System branch: ${systemBranch} (greenfield)`);
+    }
+    // Push the system branch to remote
+    gitExec(gitRoot, `push -u origin ${systemBranch}`);
+
     intakeLog.info(`Workspace: ${workspacePath}`);
     intakeLog.info(`Output: ${outputPath}`);
     intakeLog.info(`Run type: ${state.input.runType ?? 'greenfield'}`);
@@ -150,8 +210,9 @@ export async function intakeNode(state: ProjectStateType): Promise<Partial<Proje
         input: { ...state.input, requirementsText },
         workspacePath,
         outputPath,
+        systemBranch,
         phase: nextPhase as PhaseName,
-        transcript: [msg('conductor', 'intake', `Intake complete (${state.input.runType ?? 'greenfield'}). Requirements: ${requirementsText.length} chars`)],
+        transcript: [msg('conductor', 'intake', `Intake complete (${state.input.runType ?? 'greenfield'}). System branch: ${systemBranch}. Requirements: ${requirementsText.length} chars`)],
     };
 }
 
@@ -326,6 +387,7 @@ export async function dbaNode(state: ProjectStateType): Promise<Partial<ProjectS
 
     const artifact = writeArtifact({
         agentId: 'dba',
+        tag: '[DBA]',
         colorCode: 100,
         workspacePath: state.workspacePath,
         title: 'DBA Mission Report',
@@ -412,7 +474,7 @@ export async function developmentNode(state: ProjectStateType): Promise<Partial<
     }
     const contextPrompt = devParts.join('\n');
 
-    const result = await dispatchDevelopers(apiKey, state.assignments, state.workspacePath, contextPrompt);
+    const result = await dispatchDevelopers(apiKey, state.assignments, state.workspacePath, contextPrompt, state.systemBranch);
 
     devLog.info(`Development complete: ${result.fileChanges.length} file changes, ${result.pullRequests.length} PRs`);
 

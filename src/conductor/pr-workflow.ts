@@ -15,7 +15,7 @@ import { buildReviewerAgent } from '../agents/developers/reviewer-agent.builder'
 import { getDevAgent } from '../agents/developers/registry';
 import {
     GITHUB_TOKEN, GITHUB_OWNER, GITHUB_REPO,
-    GIT_DEFAULT_BRANCH, MAX_REVIEW_ITERATIONS,
+    MAX_REVIEW_ITERATIONS,
 } from '../config';
 import type {
     Assignment, FileChange, ArtifactRef, TranscriptMessage,
@@ -56,6 +56,7 @@ async function retryWithBackoff<T>(fn: () => Promise<T>, label: string): Promise
 
 export interface PRWorkflowInput {
     branchName: string;
+    baseBranch: string;
     assignments: Assignment[];
     reviewerAgentIds: string[];
     taskType: 'feature' | 'bug' | 'fix' | 'refactor' | 'chore';
@@ -188,7 +189,7 @@ async function invokeReviewerAgent(
 
 export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkflowResult> {
     const {
-        branchName, assignments, reviewerAgentIds, taskType,
+        branchName, baseBranch, assignments, reviewerAgentIds, taskType,
         workspacePath, apiKey, contextPrompt, currentState,
     } = input;
 
@@ -196,13 +197,13 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
     const allArtifacts: ArtifactRef[] = [];
     const allTranscript: TranscriptMessage[] = [];
 
-    // ── 1. Create feature branch ─────────────────────────────────────────
-    log.info(`Creating branch: ${branchName}`);
-    gitExec(workspacePath, `checkout ${GIT_DEFAULT_BRANCH}`);
-    gitExec(workspacePath, `pull origin ${GIT_DEFAULT_BRANCH} --ff-only`);
+    // ── 1. Create feature branch from system branch ─────────────────────
+    log.info(`Creating branch: ${branchName} (from ${baseBranch})`);
+    gitExec(workspacePath, `checkout ${baseBranch}`);
+    gitExec(workspacePath, `pull origin ${baseBranch} --ff-only`);
     const branchResult = gitExec(workspacePath, `checkout -b ${branchName}`);
     log.info(`Branch result: ${branchResult}`);
-    allTranscript.push(msg('conductor', `Created branch: ${branchName}`));
+    allTranscript.push(msg('conductor', `Created branch: ${branchName} from ${baseBranch}`));
 
     // ── 2. Run dev agent(s) on assignments ───────────────────────────────
     // Group by developer agent
@@ -284,7 +285,7 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
         title: prTitle,
         body: prBody,
         head: branchName,
-        base: GIT_DEFAULT_BRANCH,
+        base: baseBranch,
     });
     log.info(`PR #${ghPr.number} created: ${ghPr.html_url}`);
     allTranscript.push(msg('conductor', `PR #${ghPr.number} created: ${prTitle}`));
@@ -297,7 +298,7 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
         log.info(`Review iteration ${iteration}/${MAX_REVIEW_ITERATIONS}`);
 
         // Get the diff for reviewers
-        const prDiff = gitExec(workspacePath, `diff ${GIT_DEFAULT_BRANCH}...${branchName}`);
+        const prDiff = gitExec(workspacePath, `diff ${baseBranch}...${branchName}`);
 
         // Determine which reviewers need to (re-)review
         const pendingReviewers = iteration === 1
@@ -489,12 +490,25 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                 merge_method: 'squash',
             });
             prStatus = 'merged';
-            log.info(`PR #${ghPr.number} merged to ${GIT_DEFAULT_BRANCH}`);
-            allTranscript.push(msg('conductor', `PR #${ghPr.number} merged to ${GIT_DEFAULT_BRANCH}`));
+            log.info(`PR #${ghPr.number} merged to ${baseBranch}`);
+            allTranscript.push(msg('conductor', `PR #${ghPr.number} merged to ${baseBranch}`));
 
-            // Switch back to default branch and pull
-            gitExec(workspacePath, `checkout ${GIT_DEFAULT_BRANCH}`);
-            gitExec(workspacePath, `pull origin ${GIT_DEFAULT_BRANCH}`);
+            // Switch back to system branch and pull
+            gitExec(workspacePath, `checkout ${baseBranch}`);
+            gitExec(workspacePath, `pull origin ${baseBranch}`);
+
+            // Delete the dev feature branch (local + remote)
+            gitExec(workspacePath, `branch -D ${branchName}`);
+            try {
+                await octokit.git.deleteRef({
+                    owner: GITHUB_OWNER,
+                    repo: GITHUB_REPO,
+                    ref: `heads/${branchName}`,
+                });
+                log.info(`Deleted branch: ${branchName}`);
+            } catch (delErr: any) {
+                log.warn(`Failed to delete remote branch ${branchName}: ${delErr.message}`);
+            }
         } catch (err: any) {
             log.error(`Merge failed: ${err.message}`);
             allTranscript.push(msg('conductor', `Merge failed: ${err.message}`));

@@ -64,6 +64,12 @@ export const ProjectState = Annotation.Root({
         default: () => '',
     }),
 
+    // ── System branch (project/<system-name>) ────────────────────────────
+    systemBranch: Annotation<string>({
+        reducer: replaceReducer,
+        default: () => '',
+    }),
+
     // ── Codebase analysis (maintain mode only) ───────────────────────────
     codebaseAnalysis: Annotation<CodebaseAnalysis | null>({
         reducer: replaceReducer,

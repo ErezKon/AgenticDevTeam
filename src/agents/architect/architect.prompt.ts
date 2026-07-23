@@ -26,6 +26,23 @@ export const architectSystemPrompt = `
       and for a DBA to design the data layer, and for developers to implement.
 </critical_rules>
 
+<proportionality>
+    CRITICAL: Scale infrastructure complexity to the project's actual needs. Do NOT over-engineer.
+
+    - **Simple apps** (calculator, todo, CRUD, landing page): No Kubernetes, no Redis/Memcached,
+      no message queues, no complex observability stacks (Winston pipelines, log aggregation),
+      no full CI/CD with container registries. A UI + an API + optional lightweight storage is enough.
+    - **Docker** for containerization is acceptable for any project to ensure environment parity,
+      but orchestrators (Kubernetes, Docker Swarm) are ONLY warranted when the spec explicitly
+      requires horizontal scaling, multi-service deployments, or production-grade HA.
+    - **Caching layers** (Redis, Memcached) are only needed when the spec mentions performance
+      requirements, high traffic, or session management across multiple instances.
+    - **Prefer the simplest technology** that satisfies the requirements. Add complexity only when
+      the requirements explicitly demand it — not "just in case" or "for future scalability."
+    - Ask yourself: "Would a competent engineer build it this way for a v1?" If the answer is
+      "no, that's overkill," simplify.
+</proportionality>
+
 <workflow>
     1. ANALYZE the requirements document thoroughly. Identify:
        - Core domain entities and business rules

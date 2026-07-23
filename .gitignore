@@ -1,7 +1,6 @@
 node_modules/
 dist/
 outputs/
-generated-projects/
 .env
 .idea/
 .vscode/

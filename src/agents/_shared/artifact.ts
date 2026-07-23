@@ -23,6 +23,8 @@ interface ArtifactOptions {
     content: string;
     /** Optional suffix for the filename (e.g. a story ID). */
     suffix?: string;
+    /** Optional display tag override for the logger (e.g. '[DBA]'). Defaults to '[<agentId>]'. */
+    tag?: string;
 }
 
 /**
@@ -30,7 +32,7 @@ interface ArtifactOptions {
  * Returns an ArtifactRef to record in the project state.
  */
 export function writeArtifact(opts: ArtifactOptions): ArtifactRef {
-    const log = getLogger(`[${opts.agentId}]`, opts.colorCode);
+    const log = getLogger(opts.tag ?? `[${opts.agentId}]`, opts.colorCode);
 
     const filename = opts.suffix
         ? `${opts.agentId}-${opts.suffix}-mission.md`

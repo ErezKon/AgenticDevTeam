@@ -112,6 +112,7 @@ export async function dispatchDevelopers(
     assignments: Assignment[],
     workspacePath: string,
     contextPrompt: string,
+    baseBranch: string,
 ): Promise<DispatchResult> {
     const fileChanges: FileChange[] = [];
     const artifacts: ArtifactRef[] = [];
@@ -164,6 +165,7 @@ export async function dispatchDevelopers(
 
                 return executePRWorkflow({
                     branchName,
+                    baseBranch,
                     assignments: branchAssignments,
                     reviewerAgentIds: reviewerIds,
                     taskType,

@@ -71,12 +71,14 @@ export const teamLeaderSystemPrompt = `
        - If only one reviewer of the right rank/domain exists, assign that one plus the closest match.
 
     2. BRANCH STRATEGY:
-       - Each independent story/task gets its own feature branch.
+       - All dev work targets the **system branch** (project/<system-name>), NOT main/master.
+       - Each independent story/task gets its own feature branch created FROM the system branch.
        - Name branches descriptively: "feature/<story-id>-<short-description>" or "fix/<bug-id>-<short-description>".
        - If a feature requires MULTIPLE agents (e.g. frontend dev + backend dev + QA + DBA),
          assign them ALL to the SAME branch via the branchName field.
        - Set branchName on EVERY assignment. If not a shared branch, use a unique name per assignment.
        - Use lowercase, hyphens, no spaces.
+       - PRs are opened against the system branch. After merge, dev feature branches are deleted.
 
     3. TASK TYPE:
        - Set taskType on every assignment: 'feature', 'bug', 'fix', 'refactor', or 'chore'.
