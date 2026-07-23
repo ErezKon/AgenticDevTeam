@@ -39,7 +39,7 @@ describe('Calculator UI root component', () => {
     expect(screen.getByTestId('display')).toBeInTheDocument();
     const keypad = screen.getByTestId('keypad');
     expect(keypad).toBeInTheDocument();
-    expect(keypad.querySelectorAll('button')).toHaveLength(14);
+    expect(keypad.querySelectorAll('button')).toHaveLength(15);
     expect(consoleErrorSpy).not.toHaveBeenCalled();
     consoleErrorSpy.mockRestore();
   });

@@ -7,7 +7,7 @@ on:
     branches: [main]
 
 jobs:
-  lint:
+  build-and-deploy:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
@@ -19,3 +19,15 @@ jobs:
         run: npm ci
       - name: Run ESLint
         run: npm run lint
+      - name: Run Jest tests
+        run: npm test
+      - name: Build React app
+        run: npm run build
+      - name: Deploy to Netlify
+        uses: nwtgck/actions-netlify@v2
+        with:
+          publish-dir: './build'
+          production-deploy: true
+        env:
+          NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
+          NETLIFY_SITE_ID: ${{ secrets.NETLIFY_SITE_ID }}
