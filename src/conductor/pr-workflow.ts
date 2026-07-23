@@ -29,7 +29,7 @@ const log = getLogger('[PR-Workflow]', 135);
 // ─── Rate-limit retry helper ─────────────────────────────────────────────────
 
 const RETRY_ATTEMPTS = 5;
-const INITIAL_BACKOFF_MS = 5_000;
+const INITIAL_BACKOFF_MS = 10_000;
 
 async function retryWithBackoff<T>(fn: () => Promise<T>, label: string): Promise<T> {
     for (let attempt = 1; attempt <= RETRY_ATTEMPTS; attempt++) {
