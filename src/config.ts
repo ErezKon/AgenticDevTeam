@@ -34,6 +34,10 @@ export const RUN_MODE: 'autonomous' | 'human' =
 export const MAX_BUGFIX_ITERATIONS =
     parseInt(process.env.MAX_BUGFIX_ITERATIONS ?? '3', 10);
 
+/** LangGraph recursion limit per agent invocation. */
+export const AGENT_RECURSION_LIMIT =
+    parseInt(process.env.AGENT_RECURSION_LIMIT ?? '150', 10);
+
 /** Max parallel developer agents during fan-out. */
 export const MAX_CONCURRENT_DEVS =
     parseInt(process.env.MAX_CONCURRENT_DEVS ?? '2', 10);

@@ -18,7 +18,7 @@ import { buildReviewerAgent } from '../agents/developers/reviewer-agent.builder'
 import { getDevAgent } from '../agents/developers/registry';
 import {
     GITHUB_TOKEN, GITHUB_OWNER, GITHUB_REPO,
-    MAX_REVIEW_ITERATIONS,
+    MAX_REVIEW_ITERATIONS, AGENT_RECURSION_LIMIT,
 } from '../config';
 import type {
     Assignment, FileChange, ArtifactRef, TranscriptMessage,
@@ -152,7 +152,7 @@ async function invokeDevAgent(
     return retryWithBackoff(async () => {
         const result = await agent.invoke(
             { messages: [{ role: 'user', content: userMessage }] },
-            { configurable: { thread_id: `dev-pr-${threadSuffix}-${Date.now()}` }, recursionLimit: 75 },
+            { configurable: { thread_id: `dev-pr-${threadSuffix}-${Date.now()}` }, recursionLimit: AGENT_RECURSION_LIMIT },
         );
         const last = result.messages[result.messages.length - 1];
         return typeof last.content === 'string' ? JSON.parse(last.content) : last.content;
@@ -165,7 +165,7 @@ async function invokeReviewerAgent(
     return retryWithBackoff(async () => {
         const result = await agent.invoke(
             { messages: [{ role: 'user', content: userMessage }] },
-            { configurable: { thread_id: `review-${threadSuffix}-${Date.now()}` }, recursionLimit: 75 },
+            { configurable: { thread_id: `review-${threadSuffix}-${Date.now()}` }, recursionLimit: AGENT_RECURSION_LIMIT },
         );
         const last = result.messages[result.messages.length - 1];
         return typeof last.content === 'string' ? JSON.parse(last.content) : last.content;

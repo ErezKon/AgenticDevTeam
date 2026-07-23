@@ -20,7 +20,7 @@ import { dispatchDevelopers } from '../agents/developers/dispatcher';
 import { createQaLeadAgent, createQaUnitAgent, createQaE2eAgent } from '../agents/qa/qa.agents';
 import { createDevOpsAgent } from '../agents/devops/devops.agent';
 import { getPlaywrightMcpTools, closePlaywrightMcp } from '../tools/mcp/playwright-mcp';
-import { MAX_BUGFIX_ITERATIONS, GIT_DEFAULT_BRANCH } from '../config';
+import { MAX_BUGFIX_ITERATIONS, GIT_DEFAULT_BRANCH, AGENT_RECURSION_LIMIT } from '../config';
 import { execSync } from 'child_process';
 import type { ProjectStateType } from './state';
 import type { PhaseName, TranscriptMessage, Bug, CodebaseAnalysis } from '../agents/_shared/base-schemas';
@@ -74,7 +74,7 @@ async function invokeAgent(agent: any, userMessage: string, threadSuffix: string
     return retryWithBackoff(async () => {
         const result = await agent.invoke(
             { messages: [{ role: 'user', content: userMessage }] },
-            { configurable: { thread_id: `conductor-${threadSuffix}-${Date.now()}` }, recursionLimit: 75 },
+            { configurable: { thread_id: `conductor-${threadSuffix}-${Date.now()}` }, recursionLimit: AGENT_RECURSION_LIMIT },
         );
         const last = result.messages[result.messages.length - 1];
         if (typeof last.content !== 'string') return last.content;
@@ -495,7 +495,7 @@ export async function developmentNode(state: ProjectStateType): Promise<Partial<
 
 // ─── 7. QA ──────────────────────────────────────────────────────────────────
 
-const qaLog = getLogger('[QA]', 198);
+const qaLog = getLogger('[QA Lead]', 198);
 
 export async function qaNode(state: ProjectStateType): Promise<Partial<ProjectStateType>> {
     qaLog.info('Starting QA phase...');

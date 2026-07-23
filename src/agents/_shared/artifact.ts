@@ -8,6 +8,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { getLogger } from '../../utils/logger';
+import { getAgentEntry } from '../registry';
 import type { ArtifactRef } from './base-schemas';
 
 interface ArtifactOptions {
@@ -32,7 +33,8 @@ interface ArtifactOptions {
  * Returns an ArtifactRef to record in the project state.
  */
 export function writeArtifact(opts: ArtifactOptions): ArtifactRef {
-    const log = getLogger(opts.tag ?? `[${opts.agentId}]`, opts.colorCode);
+    const registryTag = getAgentEntry(opts.agentId)?.tag;
+    const log = getLogger(opts.tag ?? registryTag ?? `[${opts.agentId}]`, opts.colorCode);
 
     const filename = opts.suffix
         ? `${opts.agentId}-${opts.suffix}-mission.md`
