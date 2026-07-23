@@ -9,7 +9,7 @@ function App() {
       <header className="App-header">
         <h1>Initial Calculator</h1>
         <p>Vite + React + TypeScript</p>
-        <p className="card">
+        <div className="card">
           <button onClick={() => setCount((c) => c + 1)}>
             count is {count}
           </button>
