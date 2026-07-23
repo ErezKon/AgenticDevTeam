@@ -11,8 +11,7 @@ import { webcrypto } from 'node:crypto';
 if (!globalThis.crypto) (globalThis as any).crypto = webcrypto;
 
 process.env.NODE_TLS_REJECT_UNAUTHORIZED ??= '0';
-import * as dotenv from 'dotenv';
-dotenv.config({ override: true });
+import './env';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as readline from 'readline';

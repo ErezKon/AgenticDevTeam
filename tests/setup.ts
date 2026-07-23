@@ -8,8 +8,7 @@
 import { webcrypto } from 'node:crypto';
 if (!globalThis.crypto) (globalThis as any).crypto = webcrypto;
 
-import * as dotenv from 'dotenv';
-dotenv.config({ override: true });
+import '../src/env';
 
 const REQUIRED_ENV = [
     'OAUTH_TOKEN_URL',
