@@ -16,6 +16,14 @@ describe('CalculatorApp component', () => {
     expect(result).toHaveTextContent('Result: 4');
   });
 
+  test('ignores whitespace in expression and evaluates correctly', () => {
+    render(<CalculatorApp />);
+    const input = screen.getByLabelText(/expression input/i) as HTMLInputElement;
+    fireEvent.change(input, { target: { value: '  3   *   4  ' } });
+    const result = screen.getByLabelText(/result/i);
+    expect(result).toHaveTextContent('Result: 12');
+  });
+
   test('shows error message for division by zero', () => {
     render(<CalculatorApp />);
     const input = screen.getByLabelText(/expression input/i) as HTMLInputElement;
@@ -26,17 +34,15 @@ describe('CalculatorApp component', () => {
   test('error disappears when expression becomes valid', () => {
     render(<CalculatorApp />);
     const input = screen.getByLabelText(/expression input/i) as HTMLInputElement;
-    // Trigger error
     fireEvent.change(input, { target: { value: '5/0' } });
     expect(screen.getByRole('alert')).toBeInTheDocument();
-    // Correct expression
     fireEvent.change(input, { target: { value: '5/1' } });
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
     const result = screen.getByLabelText(/result/i);
     expect(result).toHaveTextContent('Result: 5');
   });
 
-  test('handles malformed expressions with appropriate error', () => {
+  test('handles malformed expressions with appropriate error messages', () => {
     render(<CalculatorApp />);
     const input = screen.getByLabelText(/expression input/i) as HTMLInputElement;
     // Consecutive operators
@@ -62,9 +68,7 @@ describe('CalculatorApp component', () => {
   test('handles numeric overflow for extremely large numbers', () => {
     render(<CalculatorApp />);
     const input = screen.getByLabelText(/expression input/i) as HTMLInputElement;
-    // Use a large number multiplication that exceeds safe integer
     fireEvent.change(input, { target: { value: '9007199254740991 * 10' } }); // MAX_SAFE_INTEGER * 10
     expect(screen.getByRole('alert')).toHaveTextContent('Numeric overflow');
   });
 });
-

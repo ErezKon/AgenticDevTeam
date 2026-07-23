@@ -1,0 +1,1 @@
+// Mock removed: React 18 JSX runtime is handled natively
