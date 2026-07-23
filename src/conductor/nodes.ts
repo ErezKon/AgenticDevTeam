@@ -212,7 +212,12 @@ export async function intakeNode(state: ProjectStateType): Promise<Partial<Proje
         intakeLog.info(`System branch: ${systemBranch} (greenfield)`);
     }
     // Push the system branch to remote
-    gitPush(gitRoot, systemBranch);
+    const pushResult = gitPush(gitRoot, systemBranch);
+    if (pushResult.startsWith('Error:')) {
+        intakeLog.error(`Failed to push system branch ${systemBranch}: ${pushResult}`);
+    } else {
+        intakeLog.info(`Pushed system branch: ${systemBranch}`);
+    }
 
     intakeLog.info(`Workspace: ${workspacePath}`);
     intakeLog.info(`Output: ${outputPath}`);

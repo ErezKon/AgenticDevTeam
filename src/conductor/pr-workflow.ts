@@ -79,11 +79,41 @@ function gitExec(workspacePath: string, args: string): string {
 
 function gitPush(workspacePath: string, branchName: string): string {
     const authUrl = `https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_OWNER}/${GITHUB_REPO}.git`;
-    return gitExec(workspacePath, `push ${authUrl} HEAD:refs/heads/${branchName}`);
+    const result = gitExec(workspacePath, `push ${authUrl} HEAD:refs/heads/${branchName}`);
+    if (result.startsWith('Error:')) {
+        log.error(`Push failed for ${branchName}: ${result}`);
+    } else {
+        log.info(`Pushed branch ${branchName}`);
+    }
+    return result;
 }
 
 function getOctokit(): Octokit {
+    if (!GITHUB_TOKEN) {
+        throw new Error('GITHUB_TOKEN is not set. Cannot perform GitHub API operations.');
+    }
     return new Octokit({ auth: GITHUB_TOKEN });
+}
+
+/**
+ * Create a GitHub PR using curl as a fallback when Octokit fails.
+ * This avoids Node.js HTTP stack issues with corporate SSL proxies.
+ */
+function createPRViaCurl(title: string, body: string, head: string, base: string): { number: number; html_url: string; node_id: string } {
+    const payload = JSON.stringify({ title, body, head, base });
+    const result = execSync(
+        `curl -s -X POST "https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/pulls" `
+        + `-H "Authorization: token ${GITHUB_TOKEN}" `
+        + `-H "Accept: application/vnd.github+json" `
+        + `-H "Content-Type: application/json" `
+        + `--data-binary @-`,
+        { encoding: 'utf-8', timeout: 30_000, input: payload },
+    ).trim();
+    const data = JSON.parse(result);
+    if (data.message) {
+        throw new Error(`GitHub API error: ${data.message} (${JSON.stringify(data.errors ?? [])})`);
+    }
+    return { number: data.number, html_url: data.html_url, node_id: data.node_id };
 }
 
 function slugify(text: string): string {
@@ -313,14 +343,21 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
 
         log.info(`Creating PR: "${prTitle}"`);
         const octokit = getOctokit();
-        const { data: ghPr } = await octokit.pulls.create({
-            owner: GITHUB_OWNER,
-            repo: GITHUB_REPO,
-            title: prTitle,
-            body: prBody,
-            head: branchName,
-            base: baseBranch,
-        });
+        let ghPr: { number: number; html_url: string; node_id: string };
+        try {
+            const { data } = await octokit.pulls.create({
+                owner: GITHUB_OWNER,
+                repo: GITHUB_REPO,
+                title: prTitle,
+                body: prBody,
+                head: branchName,
+                base: baseBranch,
+            });
+            ghPr = { number: data.number, html_url: data.html_url, node_id: data.node_id };
+        } catch (octokitErr: any) {
+            log.warn(`Octokit PR creation failed (${octokitErr.status ?? 'unknown'}), falling back to curl`);
+            ghPr = createPRViaCurl(prTitle, prBody, branchName, baseBranch);
+        }
         log.info(`PR #${ghPr.number} created: ${ghPr.html_url}`);
         allTranscript.push(msg('conductor', `PR #${ghPr.number} created: ${prTitle}`));
 
