@@ -2,13 +2,15 @@
   "name": "initialcalculator",
   "version": "0.0.0",
   "private": true,
+  "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
     "test": "jest --config jest.config.cjs",
-    "lint": "eslint src --ext .ts,.tsx",
-    "format": "prettier --write ."
+    "lint": "eslint --config .eslintrc.cjs src --ext .js,.jsx,.ts,.tsx",
+    "format": "prettier --write .",
+    "type-check": "tsc --noEmit"
   },
   "dependencies": {
     "react": "^18.2.0",
