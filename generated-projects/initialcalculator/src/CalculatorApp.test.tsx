@@ -2,9 +2,13 @@ import { render, screen, fireEvent } from '@testing-library/react';
 import CalculatorApp from './CalculatorApp';
 
 describe('CalculatorApp component', () => {
-  test('matches snapshot on initial render', () => {
-    const { asFragment } = render(<CalculatorApp />);
-    expect(asFragment()).toMatchSnapshot();
+  test('renders CalculatorApp with heading and input', () => {
+    render(<CalculatorApp />);
+    const heading = screen.getByRole('heading', { name: /calculator/i });
+    expect(heading).toBeInTheDocument();
+    const input = screen.getByLabelText('Calculator expression') as HTMLInputElement;
+    expect(input).toBeInTheDocument();
+    expect(input.value).toBe('');
   });
   test('renders input field with correct ARIA label', () => {
     render(<CalculatorApp />);
@@ -14,7 +18,7 @@ describe('CalculatorApp component', () => {
 
   test('evaluates a valid expression and displays result', () => {
     render(<CalculatorApp />);
-    const input = screen.getByLabelText(/expression input/i) as HTMLInputElement;
+    const input = screen.getByLabelText('Calculator expression') as HTMLInputElement;
     fireEvent.change(input, { target: { value: '2+2' } });
     const result = screen.getByLabelText(/result/i);
     expect(result).toHaveTextContent('Result: 4');
