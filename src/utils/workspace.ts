@@ -56,7 +56,27 @@ export function createRunOutputDir(systemName: string): string {
  * Throws if the resolved path escapes the workspace root.
  */
 export function resolveWorkspacePath(workspaceRoot: string, relativePath: string): string {
-    const resolved = path.resolve(workspaceRoot, relativePath);
+    // B7: Strip doubled generated-projects prefix (agents sometimes use the full repo path
+    // from architecture docs even though their CWD is already the project root)
+    let sanitized = relativePath;
+    const gpPrefix = 'generated-projects/';
+    if (sanitized.startsWith(gpPrefix)) {
+        const projectSlug = path.basename(workspaceRoot);
+        const doubledPrefix = `${gpPrefix}${projectSlug}/`;
+        if (sanitized.startsWith(doubledPrefix)) {
+            sanitized = sanitized.slice(doubledPrefix.length);
+            logToolAction(`${TAG} Sanitized doubled path: "${relativePath}" → "${sanitized}"`);
+        } else if (workspaceRoot.includes(gpPrefix)) {
+            // CWD is already inside generated-projects — strip the prefix
+            sanitized = sanitized.slice(gpPrefix.length);
+            // Also strip the project slug if present
+            if (sanitized.startsWith(projectSlug + '/')) {
+                sanitized = sanitized.slice(projectSlug.length + 1);
+            }
+            logToolAction(`${TAG} Sanitized project path: "${relativePath}" → "${sanitized}"`);
+        }
+    }
+    const resolved = path.resolve(workspaceRoot, sanitized);
     if (!resolved.startsWith(path.resolve(workspaceRoot))) {
         throw new Error(`Path escape detected: ${relativePath} resolves outside workspace`);
     }
