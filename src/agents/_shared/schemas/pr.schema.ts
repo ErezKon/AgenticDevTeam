@@ -8,6 +8,7 @@ export const PRReviewCommentSchema = z.object({
     filePath: z.string().describe('File path the comment refers to'),
     line: z.number().optional().describe('Line number'),
     body: z.string().describe('Review comment text'),
+    severity: z.string().default('info').describe('Comment severity: critical, major, minor, suggestion, info'),
     resolved: z.boolean().default(false).describe('Whether the comment has been addressed'),
 });
 export type PRReviewComment = z.infer<typeof PRReviewCommentSchema>;
@@ -34,7 +35,7 @@ export const PullRequestSchema = z.object({
     authorAgentId: z.string().describe('Developer agent who created the PR'),
     reviewerAgentIds: z.array(z.string()).describe('Assigned reviewer agent IDs'),
     reviews: z.array(PRReviewSchema).describe('Review history'),
-    status: z.enum(['open', 'approved', 'merged', 'closed']),
+    status: z.enum(['open', 'approved', 'merged', 'closed', 'escalated_open']),
     assignmentIds: z.array(z.string()).describe('Assignment IDs covered by this PR'),
     taskType: z.enum(['feature', 'bug', 'fix', 'refactor', 'chore']).describe('Type of work'),
     currentState: z.string().optional().describe('For bug/fix/refactor: description of current state before changes'),

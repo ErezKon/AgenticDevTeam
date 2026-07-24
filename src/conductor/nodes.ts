@@ -594,6 +594,19 @@ export async function qaNode(state: ProjectStateType): Promise<Partial<ProjectSt
         transcript.push(msg('qa-e2e', 'qa', 'Skipped — no running services'));
     }
 
+    // B11: Commit QA-generated files to the system branch
+    const systemSlug = path.basename(state.workspacePath);
+    gitExec(state.workspacePath, 'add .');
+    const qaStatus = gitExec(state.workspacePath, 'status --short');
+    if (qaStatus && !qaStatus.includes('nothing to commit')) {
+        gitExec(state.workspacePath, `commit -m "[${systemSlug}]-chore: QA unit test files"`);
+        const currentBranch = gitExec(state.workspacePath, 'rev-parse --abbrev-ref HEAD');
+        if (currentBranch && !currentBranch.startsWith('Error:')) {
+            gitPush(state.workspacePath, currentBranch);
+            qaLog.info(`Committed and pushed QA test files on ${currentBranch}`);
+        }
+    }
+
     const testReports = [unitOutput.testReport, ...(e2eReport ? [e2eReport] : [])].filter(Boolean);
     const artifacts = [leadArtifact, unitArtifact, ...(e2eArtifact ? [e2eArtifact] : [])];
 
@@ -683,6 +696,19 @@ export async function devopsNode(state: ProjectStateType): Promise<Partial<Proje
             `\n## Health Checks\n\n${(output.devops?.healthChecks ?? []).map((h: any) => `- ${h.service}: ${h.status}`).join('\n')}`,
         ].join('\n'),
     });
+
+    // B11: Commit DevOps-generated files to the system branch
+    const devopsSlug = path.basename(state.workspacePath);
+    gitExec(state.workspacePath, 'add .');
+    const devopsStatus = gitExec(state.workspacePath, 'status --short');
+    if (devopsStatus && !devopsStatus.includes('nothing to commit')) {
+        gitExec(state.workspacePath, `commit -m "[${devopsSlug}]-chore: DevOps configuration files"`);
+        const currentBranch = gitExec(state.workspacePath, 'rev-parse --abbrev-ref HEAD');
+        if (currentBranch && !currentBranch.startsWith('Error:')) {
+            gitPush(state.workspacePath, currentBranch);
+            opsLog.info(`Committed and pushed DevOps files on ${currentBranch}`);
+        }
+    }
 
     return {
         devopsPlan: output.devops,
