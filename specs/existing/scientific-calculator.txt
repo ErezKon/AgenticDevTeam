@@ -18,3 +18,11 @@ The calculator should support the following operations:
 - Parentheses ()
 - Decimal numbers (.)
 - Negative numbers (-)
+
+I want the operations to be presented on the screen in a scientific calculator format.
+I want the operations to be grouped in a logical way, such as:
+- Basic operations (addition, subtraction, multiplication, division)
+- Scientific operations (square root, power, logarithm, natural logarithm, sine, cosine, tangent, factorial, pi, e, absolute value, radians to degrees, degrees to radians, percentage)
+- Additional operations (parentheses, decimal numbers, negative numbers)
+
+Also I want them to be represented with their symbol, not their name, and have a tooltip that shows the name when hovered over.
