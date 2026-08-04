@@ -631,7 +631,17 @@ npm run build
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `LLM_BASE_URL` | — | OpenAI-compatible API base URL |
-| `LLM_MODEL` | `gpt-oss-120b` | Model identifier |
+| `LLM_MODEL` | `gpt-oss-120b` | Global fallback model identifier |
+| `ARCHITECT_MODEL` | `gpt-oss-120b` | Architect agent model (system design) |
+| `PRODUCT_MANAGER_MODEL` | `llama-3-3-70b-instruct` | Product Manager agent model (PRDs, user stories, acceptance criteria) |
+| `DBA_MODEL` | `llama-3-3-70b-instruct` | DBA agent model (schema design, migrations, query optimization) |
+| `TEAM_LEADER_MODEL` | `gemma-3-27b-it` | Team Leader agent model (task breakdown, assignments, bug triage) |
+| `DEVOPS_MODEL` | `mistral-small-3-1-24b-instruct-2503` | DevOps agent model (CI/CD, Docker, infra-as-code) |
+| `CODEBASE_ANALYZER_MODEL` | `gpt-oss-120b` | Codebase Analyzer agent model (existing-project analysis) |
+| `PRINCIPAL_DEV_MODEL` | `llama-3-3-70b-instruct` | Principal developer agents model (core frameworks, complex features) |
+| `SENIOR_DEV_MODEL` | `mistral-small-3-1-24b-instruct-2503` | Senior developer agents model (feature modules, refactoring) |
+| `JUNIOR_DEV_MODEL` | `llama-3-2-3b-instruct` | Junior developer agents model (boilerplate, utilities, minor fixes) |
+| `QA_MODEL` | `gpt-oss-20b` | QA agents model (test plans, unit/integration/E2E tests) |
 | `OAUTH_TOKEN_URL` | — | OAuth2 token endpoint URL |
 | `OAUTH_CLIENT_ID` | — | OAuth2 client ID |
 | `OAUTH_CLIENT_SECRET` | — | OAuth2 client secret |

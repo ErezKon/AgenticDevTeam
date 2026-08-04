@@ -6,6 +6,7 @@ import { QaLeadOutputSchema, QaUnitOutputSchema, QaE2eOutputSchema } from './sch
 import { createWorkspaceTools } from '../../tools/fs/workspace-tools';
 import { createShellTool } from '../../tools/shell/shell-tools';
 import { emitMermaidTool } from '../../tools/diagram/diagram-tools';
+import { QA_MODEL } from '../../config';
 
 export const createQaLeadAgent = (apiKey: string) => {
     return buildAgent(apiKey, {
@@ -14,6 +15,7 @@ export const createQaLeadAgent = (apiKey: string) => {
         tools: [emitMermaidTool],
         responseFormat: QaLeadOutputSchema,
         temperature: 0.2,
+        model: QA_MODEL,
     });
 };
 
@@ -27,6 +29,7 @@ export const createQaUnitAgent = (apiKey: string, workspaceRoot: string) => {
         ],
         responseFormat: QaUnitOutputSchema,
         temperature: 0.2,
+        model: QA_MODEL,
     });
 };
 
@@ -43,5 +46,6 @@ export const createQaE2eAgent = (apiKey: string, mcpTools: any[]) => {
         tools: mcpTools,
         responseFormat: QaE2eOutputSchema,
         temperature: 0.1,
+        model: QA_MODEL,
     });
 };

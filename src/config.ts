@@ -11,9 +11,51 @@
 export const LLM_BASE_URL =
     process.env.LLM_BASE_URL;
 
-/** Default chat model name. */
+/** Default chat model name (global fallback). */
 export const LLM_MODEL =
     process.env.LLM_MODEL ?? 'gpt-oss-120b';
+
+// ─── Per-Agent Models ───────────────────────────────────────────────────────
+
+/** Architect agent model. */
+export const ARCHITECT_MODEL =
+    process.env.ARCHITECT_MODEL ?? 'gpt-oss-120b';
+
+/** Product Manager agent model. */
+export const PRODUCT_MANAGER_MODEL =
+    process.env.PRODUCT_MANAGER_MODEL ?? 'llama-3-3-70b-instruct';
+
+/** DBA agent model. */
+export const DBA_MODEL =
+    process.env.DBA_MODEL ?? 'llama-3-3-70b-instruct';
+
+/** Team Leader agent model. */
+export const TEAM_LEADER_MODEL =
+    process.env.TEAM_LEADER_MODEL ?? 'gemma-3-27b-it';
+
+/** DevOps agent model. */
+export const DEVOPS_MODEL =
+    process.env.DEVOPS_MODEL ?? 'mistral-small-3-1-24b-instruct-2503';
+
+/** Codebase Analyzer agent model. */
+export const CODEBASE_ANALYZER_MODEL =
+    process.env.CODEBASE_ANALYZER_MODEL ?? process.env.ARCHITECT_MODEL;
+
+/** Principal Developer agent model (frontend & backend). */
+export const PRINCIPAL_DEV_MODEL =
+    process.env.PRINCIPAL_DEV_MODEL ?? 'llama-3-3-70b-instruct';
+
+/** Senior Developer agent model (frontend & backend). */
+export const SENIOR_DEV_MODEL =
+    process.env.SENIOR_DEV_MODEL ?? 'mistral-small-3-1-24b-instruct-2503';
+
+/** Junior Developer agent model (all specialties). */
+export const JUNIOR_DEV_MODEL =
+    process.env.JUNIOR_DEV_MODEL ?? 'llama-3-2-3b-instruct';
+
+/** QA agent model (Lead, Unit, E2E). */
+export const QA_MODEL =
+    process.env.QA_MODEL ?? 'gpt-oss-20b';
 
 // ─── OAuth2 (client-credentials) ────────────────────────────────────────────
 

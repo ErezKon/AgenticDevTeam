@@ -6,10 +6,21 @@
  */
 import { buildAgent } from '../_shared/agent-factory';
 import { buildReviewerPersona } from '../_shared/persona';
+import type { DevRank } from '../_shared/persona';
 import { ReviewOutputSchema } from './schemas/review-output.schema';
 import { createGitTools } from '../../tools/git/git-tools';
 import { createGitHubTools } from '../../tools/git/github-tools';
+import { PRINCIPAL_DEV_MODEL, SENIOR_DEV_MODEL, JUNIOR_DEV_MODEL } from '../../config';
 import type { DevAgentEntry } from './registry';
+
+/** Resolve the LLM model for a reviewer agent based on rank. */
+function getModelForRank(rank: DevRank): string {
+    switch (rank) {
+        case 'principal': return PRINCIPAL_DEV_MODEL;
+        case 'senior':    return SENIOR_DEV_MODEL;
+        case 'junior':    return JUNIOR_DEV_MODEL;
+    }
+}
 
 /**
  * Build a reviewer agent from a developer registry entry.
@@ -37,5 +48,6 @@ export function buildReviewerAgent(apiKey: string, entry: DevAgentEntry, workspa
         tools,
         responseFormat: ReviewOutputSchema,
         temperature: 0.1,
+        model: getModelForRank(entry.rank),
     });
 }

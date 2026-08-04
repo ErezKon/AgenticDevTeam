@@ -2,6 +2,7 @@ import { buildAgent } from '../_shared/agent-factory';
 import { codebaseAnalyzerSystemPrompt } from './codebase-analyzer.prompt';
 import { CodebaseAnalysisSchema } from '../_shared/base-schemas';
 import { createWorkspaceTools } from '../../tools/fs/workspace-tools';
+import { CODEBASE_ANALYZER_MODEL } from '../../config';
 
 /**
  * Create a Codebase Analyzer agent.
@@ -22,5 +23,6 @@ export const createCodebaseAnalyzerAgent = (apiKey: string, workspacePath: strin
         tools: readOnlyTools,
         responseFormat: CodebaseAnalysisSchema,
         temperature: 0.1,
+        model: CODEBASE_ANALYZER_MODEL,
     });
 };
