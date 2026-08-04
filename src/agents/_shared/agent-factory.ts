@@ -9,6 +9,7 @@ import type { StructuredToolInterface } from '@langchain/core/tools';
 import { z } from 'zod';
 import { LLM_BASE_URL, LLM_MODEL } from '../../config';
 import { getAccessToken } from '../../utils/oauth-auth.util';
+import { TokenUsageCallbackHandler } from '../../utils/token-callback';
 
 export interface AgentConfig {
     /** Unique agent identifier (e.g. "architect", "junior-react"). */
@@ -25,6 +26,8 @@ export interface AgentConfig {
     model?: string;
     /** Timeout in ms per LLM call (default 120000). */
     timeout?: number;
+    /** Pipeline phase for token tracking (e.g. "architect", "development"). */
+    phase?: string;
 }
 
 /**
@@ -43,8 +46,11 @@ export function buildAgent(apiKey: string, cfg: AgentConfig) {
         return globalThis.fetch(url, { ...init, headers });
     };
 
+    const modelName = cfg.model ?? LLM_MODEL;
+    const tokenCallback = new TokenUsageCallbackHandler(cfg.id, modelName, cfg.phase ?? cfg.id);
+
     const model = new ChatOpenAI({
-        model: cfg.model ?? LLM_MODEL,
+        model: modelName,
         temperature: cfg.temperature ?? 0.3,
         maxRetries: 6,
         timeout: cfg.timeout ?? 120000,
@@ -54,6 +60,7 @@ export function buildAgent(apiKey: string, cfg: AgentConfig) {
             baseURL: LLM_BASE_URL,
             fetch: oauthFetch,
         },
+        callbacks: [tokenCallback],
     });
 
     let prompt = cfg.systemPrompt;

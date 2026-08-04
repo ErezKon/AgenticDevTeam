@@ -52,5 +52,6 @@ export function buildDevAgent(apiKey: string, entry: DevAgentEntry, workspaceRoo
         responseFormat: DeveloperOutputSchema,
         temperature: entry.temperature,
         model: getModelForRank(entry.rank),
+        phase: 'development',
     });
 }

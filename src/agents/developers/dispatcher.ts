@@ -8,6 +8,7 @@ import { MAX_CONCURRENT_DEVS, INTER_BATCH_DELAY_MS } from '../../config';
 import { getLogger } from '../../utils/logger';
 import { executePRWorkflow } from '../../conductor/pr-workflow';
 import type { Assignment, FileChange, ArtifactRef, TranscriptMessage, PhaseName, PullRequest } from '../_shared/base-schemas';
+import type { TokenCallRecord } from '../../utils/token-tracker';
 
 const log = getLogger('[Dispatcher]', 226);
 
@@ -16,6 +17,7 @@ export interface DispatchResult {
     artifacts: ArtifactRef[];
     transcript: TranscriptMessage[];
     pullRequests: PullRequest[];
+    tokenUsage: TokenCallRecord[];
 }
 
 /**
@@ -123,6 +125,7 @@ export async function dispatchDevelopers(
     const artifacts: ArtifactRef[] = [];
     const transcript: TranscriptMessage[] = [];
     const pullRequests: PullRequest[] = [];
+    const tokenUsage: TokenCallRecord[] = [];
 
     // ── Group by branch ──────────────────────────────────────────────────
     const branchGroups = groupByBranch(assignments, projectSlug);
@@ -192,6 +195,7 @@ export async function dispatchDevelopers(
                     artifacts.push(...prResult.artifacts);
                     transcript.push(...prResult.transcript);
                     pullRequests.push(prResult.pullRequest);
+                    if (prResult.tokenUsage) tokenUsage.push(...prResult.tokenUsage);
                 } else {
                     log.error(`PR workflow failed: ${r.reason}`);
                     transcript.push({
@@ -212,5 +216,5 @@ export async function dispatchDevelopers(
     }
 
     log.info(`Dispatch complete: ${fileChanges.length} total file changes, ${pullRequests.length} PRs, ${artifacts.length} artifacts`);
-    return { fileChanges, artifacts, transcript, pullRequests };
+    return { fileChanges, artifacts, transcript, pullRequests, tokenUsage };
 }

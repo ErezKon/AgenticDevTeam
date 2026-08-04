@@ -57,6 +57,27 @@ export const JUNIOR_DEV_MODEL =
 export const QA_MODEL =
     process.env.QA_MODEL ?? 'gpt-oss-20b';
 
+// ─── Model Pricing ──────────────────────────────────────────────────────────
+
+/**
+ * Estimated cost per 1K tokens for each configured model.
+ *
+ * These are configurable defaults based on typical provider pricing.
+ * Adjust via the MODEL_PRICING_OVERRIDES env var (JSON string) if needed.
+ */
+export const MODEL_PRICING: Record<string, { inputPer1k: number; outputPer1k: number }> = {
+    'gpt-oss-120b':                      { inputPer1k: 0.006,  outputPer1k: 0.012 },
+    'llama-3-3-70b-instruct':            { inputPer1k: 0.003,  outputPer1k: 0.006 },
+    'gemma-3-27b-it':                    { inputPer1k: 0.001,  outputPer1k: 0.002 },
+    'mistral-small-3-1-24b-instruct-2503': { inputPer1k: 0.001, outputPer1k: 0.002 },
+    'llama-3-2-3b-instruct':             { inputPer1k: 0.0003, outputPer1k: 0.0006 },
+    'gpt-oss-20b':                       { inputPer1k: 0.001,  outputPer1k: 0.002 },
+    // Merge env-based overrides if provided
+    ...(process.env.MODEL_PRICING_OVERRIDES
+        ? JSON.parse(process.env.MODEL_PRICING_OVERRIDES) as Record<string, { inputPer1k: number; outputPer1k: number }>
+        : {}),
+};
+
 // ─── OAuth2 (client-credentials) ────────────────────────────────────────────
 
 /** OAuth2 token endpoint for client-credentials flow. */

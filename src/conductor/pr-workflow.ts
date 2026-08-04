@@ -20,6 +20,7 @@ import {
     GITHUB_TOKEN, GITHUB_OWNER, GITHUB_REPO,
     MAX_REVIEW_ITERATIONS, AGENT_RECURSION_LIMIT,
     GIT_USER_NAME, GIT_USER_EMAIL,
+    PRINCIPAL_DEV_MODEL, SENIOR_DEV_MODEL, JUNIOR_DEV_MODEL,
 } from '../config';
 import type {
     Assignment, FileChange, ArtifactRef, TranscriptMessage,
@@ -27,6 +28,9 @@ import type {
 } from '../agents/_shared/base-schemas';
 import type { DeveloperOutput } from '../agents/developers/schemas/dev-output.schema';
 import type { ReviewOutput } from '../agents/developers/schemas/review-output.schema';
+import { extractTokenUsageFromMessages } from '../utils/token-usage-extractor';
+import type { TokenCallRecord } from '../utils/token-tracker';
+import type { DevRank } from '../agents/_shared/persona';
 
 const log = getLogger('[PR-Workflow]', 135);
 
@@ -50,6 +54,7 @@ export interface PRWorkflowResult {
     fileChanges: FileChange[];
     artifacts: ArtifactRef[];
     transcript: TranscriptMessage[];
+    tokenUsage: TokenCallRecord[];
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -203,22 +208,33 @@ function buildPRDescription(
 
 // ─── Agent invocation helpers ────────────────────────────────────────────────
 
+/** Resolve the LLM model name for a developer/reviewer rank. */
+function getModelForRank(rank: DevRank): string {
+    switch (rank) {
+        case 'principal': return PRINCIPAL_DEV_MODEL;
+        case 'senior':    return SENIOR_DEV_MODEL;
+        case 'junior':    return JUNIOR_DEV_MODEL;
+    }
+}
+
 async function invokeDevAgent(
     agent: any, userMessage: string, threadSuffix: string,
-): Promise<DeveloperOutput> {
+    agentId: string, model: string,
+): Promise<{ output: DeveloperOutput; tokenUsage: TokenCallRecord | null }> {
     return retryWithBackoff(async () => {
         const result = await agent.invoke(
             { messages: [{ role: 'user', content: userMessage }] },
             { configurable: { thread_id: `dev-pr-${threadSuffix}-${Date.now()}` }, recursionLimit: AGENT_RECURSION_LIMIT },
         );
+        const tokenUsage = extractTokenUsageFromMessages(result, agentId, model, 'development');
         const last = result.messages[result.messages.length - 1];
         const raw = typeof last.content === 'string' ? last.content : JSON.stringify(last.content);
         try {
-            return JSON.parse(raw);
+            return { output: JSON.parse(raw), tokenUsage };
         } catch {
             // Try extracting JSON from markdown code fence
             const match = raw.match(/```(?:json)?\s*([\s\S]*?)```/);
-            if (match) return JSON.parse(match[1].trim());
+            if (match) return { output: JSON.parse(match[1].trim()), tokenUsage };
             throw new Error(`Invalid JSON output from dev agent: ${raw.slice(0, 200)}`);
         }
     }, `dev-${threadSuffix}`);
@@ -226,19 +242,21 @@ async function invokeDevAgent(
 
 async function invokeReviewerAgent(
     agent: any, userMessage: string, threadSuffix: string,
-): Promise<ReviewOutput> {
+    agentId: string, model: string,
+): Promise<{ output: ReviewOutput; tokenUsage: TokenCallRecord | null }> {
     return retryWithBackoff(async () => {
         const result = await agent.invoke(
             { messages: [{ role: 'user', content: userMessage }] },
             { configurable: { thread_id: `review-${threadSuffix}-${Date.now()}` }, recursionLimit: AGENT_RECURSION_LIMIT },
         );
+        const tokenUsage = extractTokenUsageFromMessages(result, agentId, model, 'review');
         const last = result.messages[result.messages.length - 1];
         const raw = typeof last.content === 'string' ? last.content : JSON.stringify(last.content);
         try {
-            return JSON.parse(raw);
+            return { output: JSON.parse(raw), tokenUsage };
         } catch {
             const match = raw.match(/```(?:json)?\s*([\s\S]*?)```/);
-            if (match) return JSON.parse(match[1].trim());
+            if (match) return { output: JSON.parse(match[1].trim()), tokenUsage };
             throw new Error(`Invalid JSON output from reviewer agent: ${raw.slice(0, 200)}`);
         }
     }, `review-${threadSuffix}`);
@@ -282,6 +300,7 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
     const allFileChanges: FileChange[] = [];
     const allArtifacts: ArtifactRef[] = [];
     const allTranscript: TranscriptMessage[] = [];
+    const allTokenUsage: TokenCallRecord[] = [];
 
     // ── 0. Create isolated worktree for this branch ─────────────────────
     // Each branch gets its own working directory so parallel agents
@@ -359,7 +378,9 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
             ].join('\n');
 
             try {
-                const output = await invokeDevAgent(agent, message, `${entry.id}-${branchName}`);
+                const devModel = getModelForRank(entry.rank as DevRank);
+                const { output, tokenUsage: devTokenUsage } = await invokeDevAgent(agent, message, `${entry.id}-${branchName}`, entry.id, devModel);
+                if (devTokenUsage) allTokenUsage.push(devTokenUsage);
                 if (output.fileChanges) allFileChanges.push(...output.fileChanges);
 
                 const artifact = writeArtifact({
@@ -512,9 +533,12 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                 ].join('\n');
 
                 try {
-                    const reviewOutput = await invokeReviewerAgent(
-                        reviewerAgent, reviewMsg, `${reviewerId}-pr${ghPr.number}-iter${iteration}`
+                    const reviewerModel = getModelForRank(reviewerEntry.rank as DevRank);
+                    const { output: reviewOutput, tokenUsage: revTokenUsage } = await invokeReviewerAgent(
+                        reviewerAgent, reviewMsg, `${reviewerId}-pr${ghPr.number}-iter${iteration}`,
+                        `${reviewerId}-reviewer`, reviewerModel,
                     );
+                    if (revTokenUsage) allTokenUsage.push(revTokenUsage);
                     // B10: Fallback for undefined status
                     if (!reviewOutput.status) {
                         reviewerLog.warn('Reviewer returned undefined status — treating as approved');
@@ -651,7 +675,9 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                     ].join('\n');
 
                     try {
-                        const fixOutput = await invokeDevAgent(fixAgent, fixMsg, `fix-${primaryEntry.id}-iter${iteration}`);
+                        const fixModel = getModelForRank(primaryEntry.rank as DevRank);
+                        const { output: fixOutput, tokenUsage: fixTokenUsage } = await invokeDevAgent(fixAgent, fixMsg, `fix-${primaryEntry.id}-iter${iteration}`, primaryEntry.id, fixModel);
+                        if (fixTokenUsage) allTokenUsage.push(fixTokenUsage);
                         if (fixOutput.fileChanges) allFileChanges.push(...fixOutput.fileChanges);
                         devLog.info(`Fix complete: ${fixOutput.fileChanges?.length ?? 0} changes`);
                         allTranscript.push(msg(primaryDevId, `Fixed ${fixOutput.fileChanges?.length ?? 0} files based on review comments`));
@@ -721,7 +747,9 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                     ].join('\n');
 
                     try {
-                        const fixOutput = await invokeDevAgent(escalatedDev, escalationMsg, `escalation-${escalatedDevId}`);
+                        const escModel = getModelForRank(escalatedDevEntry.rank as DevRank);
+                        const { output: fixOutput, tokenUsage: escTokenUsage } = await invokeDevAgent(escalatedDev, escalationMsg, `escalation-${escalatedDevId}`, escalatedDevId, escModel);
+                        if (escTokenUsage) allTokenUsage.push(escTokenUsage);
                         if (fixOutput.fileChanges) allFileChanges.push(...fixOutput.fileChanges);
                         gitExec(worktreeWorkspace, 'add .');
                         const st = gitExec(worktreeWorkspace, 'status --short');
@@ -753,9 +781,12 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                             ].join('\n');
 
                             try {
-                                const escalatedReviewOutput = await invokeReviewerAgent(
-                                    escalatedReviewer, escalatedReviewMsg, `escalated-${escalatedReviewerId}-pr${ghPr.number}`
+                                const escRevModel = getModelForRank(escalatedReviewerEntry.rank as DevRank);
+                                const { output: escalatedReviewOutput, tokenUsage: escRevTokenUsage } = await invokeReviewerAgent(
+                                    escalatedReviewer, escalatedReviewMsg, `escalated-${escalatedReviewerId}-pr${ghPr.number}`,
+                                    `${escalatedReviewerId}-reviewer`, escRevModel,
                                 );
+                                if (escRevTokenUsage) allTokenUsage.push(escRevTokenUsage);
 
                                 if (!escalatedReviewOutput.status) {
                                     escalatedReviewOutput.status = 'approved';
@@ -890,6 +921,7 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
             fileChanges: allFileChanges,
             artifacts: allArtifacts,
             transcript: allTranscript,
+            tokenUsage: allTokenUsage,
         };
     } finally {
         // ── Cleanup worktree and local branch ───────────────────────────
