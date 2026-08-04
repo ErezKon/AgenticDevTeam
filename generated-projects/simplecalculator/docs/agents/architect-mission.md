@@ -1,46 +1,43 @@
 # Architect Mission Report
 
 **Agent**: architect  
-**Generated**: 2026-08-04T12:04:27.996Z
+**Generated**: 2026-08-04T14:13:41.643Z
 
 ---
 
 ## Architecture Style
 
-client-side monolith (single-page application)
+client-server (static server + SPA)
 
 ## Components
 
-- **UI** (ui): React single‑page application that captures user input, displays results, and shows validation/error messages.
-- **Expression Evaluator** (library): Pure TypeScript module that parses arithmetic expressions (including parentheses, decimals, negatives) and computes the result.
-- **Static Server** (service): Node.js Express server that serves the compiled SPA assets and provides a simple health‑check endpoint.
+- **NGINX Static Server** (web server): Serves the compiled static assets (HTML, CSS, JS) of the React SPA to browsers.
+- **React UI** (frontend application): Single‑Page Application that provides the calculator UI, captures user input, and displays results.
+- **Expression Evaluator** (client‑side library): JavaScript module that parses and evaluates arithmetic expressions, handling precedence, parentheses, decimals, and negatives. Returns result or validation error to the UI.
 
 ## Tech Stack
 
-- **frontend**: React with TypeScript — React offers a mature ecosystem, strong community support, and excellent TypeScript integration, which speeds development of a dynamic SPA. Vue is comparable but has a smaller pool of developers in many teams, and Svelte, while lightweight, lacks the same level of tooling for large‑scale TS projects.
-- **backend**: Node.js with Express — Express provides a minimal Node runtime that can serve static files and a health‑check endpoint with virtually no configuration, keeping the deployment model simple. Nginx is powerful but adds operational overhead for a single static site, and S3/CloudFront introduces external cloud services that may be unnecessary for an MVP.
-- **database**: None — The calculator is a stateless computation engine; no persistent data is required, so a database would add needless complexity.
-- **infra**: Docker (single‑container) — Docker guarantees environment parity across development, CI, and production while remaining lightweight for a single‑container app. Direct host deployment works but loses reproducibility, and serverless static hosting is an option for later but adds a separate CI/CD workflow.
-- **auth**: None — The calculator does not require user accounts or protected resources, so authentication would be unnecessary overhead.
-- **messaging**: None — All processing is synchronous and in‑process; a message broker would add complexity without any benefit.
-- **testing**: Jest + React Testing Library — Jest integrates tightly with TypeScript and provides fast unit testing. React Testing Library encourages testing from the user’s perspective, ideal for UI validation. Mocha requires additional configuration, and Cypress is great for e2e but overkill for core arithmetic logic.
-- **ci/cd**: GitHub Actions — GitHub Actions runs directly in the same repository host, offers free minutes for open‑source, and can build Docker images, run tests, and push to a container registry with minimal setup. GitLab CI would require a separate GitLab instance, and CircleCI adds another service to maintain.
+- **frontend**: React (with Vite) — React has the broadest ecosystem, mature component libraries, and aligns with the team's existing expertise. Vite provides fast dev server and minimal config compared to Webpack or CRA, keeping the build process lightweight.
+- **static hosting / web server**: NGINX — NGINX is simple to configure for static asset delivery, supports gzip/compression, and can enforce security headers. Apache adds unnecessary complexity for a pure static site, while CloudFront adds cost and external dependency not required for an MVP.
+- **expression evaluation**: Custom JavaScript recursive‑descent parser — A custom parser gives full control over allowed syntax, prevents security risks associated with eval, and keeps bundle size minimal. mathjs is feature‑rich but adds ~200KB to the bundle, which is overkill for basic arithmetic.
+- **testing**: Jest + React Testing Library — Jest integrates seamlessly with Vite and provides fast unit test execution. React Testing Library encourages testing from the user’s perspective, ideal for UI validation. Mocha requires more setup, and Cypress is better suited for end‑to‑end tests which are unnecessary for core logic validation.
+- **CI/CD**: GitHub Actions — The repository is hosted on GitHub; Actions offers native integration, free minutes for open source, and can run lint, test, and build steps without additional infrastructure. GitLab CI would require migration, and CircleCI adds external service overhead.
+- **containerization (optional dev)**: Docker (single‑stage image) — Docker ensures environment parity for developers and CI pipelines with minimal effort. Podman is compatible but less universally adopted; omitting containers would make local setup dependent on host tooling.
 
 ## Epics
 
-- **EPIC-001** Build User Interface: Create a responsive React SPA with an input field, result display, and clear error messaging.
-- **EPIC-002** Implement Expression Evaluator: Develop a TypeScript module that parses arithmetic strings (supporting +, -, *, /, parentheses, decimals, negatives) and returns the computed value.
-- **EPIC-003** Input Validation & Graceful Error Handling: Detect malformed expressions, division by zero, and other invalid inputs; surface clear error messages without crashing the app.
-- **EPIC-004** Responsive Design & Accessibility: Ensure the calculator works on desktop and mobile, follows WCAG contrast guidelines, and is keyboard‑navigable.
-- **EPIC-005** Containerisation & Deployment Pipeline: Dockerise the static server, set up GitHub Actions to build the image, run tests, and push to a container registry for deployment.
-- **EPIC-006** Testing Strategy & CI Integration: Write unit tests for the evaluator, component tests for the UI, and integrate them into the CI pipeline.
+- **EPIC-001** Responsive Calculator UI: Design and implement a clean, mobile‑friendly user interface with buttons for digits, operators, parentheses, and a display area for input and results.
+- **EPIC-002** Expression Parsing & Evaluation: Create a client‑side module that parses arithmetic expressions, respects operator precedence, supports parentheses, decimals, and negative numbers, and returns accurate results or validation errors.
+- **EPIC-003** Input Validation & Graceful Error Handling: Detect malformed expressions (e.g., unmatched parentheses, division by zero, invalid characters) and display user‑friendly error messages without crashing the app.
+- **EPIC-004** Build, Test, and Deploy Pipeline: Set up automated linting, unit testing, build, and deployment to the NGINX static server using GitHub Actions, ensuring every commit results in a verifiable, production‑ready artifact.
 
 ## Architecture Diagram
 
 ```mermaid
-graph TD
-    Browser[Browser] --> UI[UI (React SPA)]
-    UI --> Evaluator[Expression Evaluator (TS)]
-    Evaluator --> UI
-    UI --> StaticServer[Static Server (Node/Express)]
+graph LR
+    Browser[User Browser] -->|HTTP GET| Nginx[NGINX Static Server]
+    Nginx -->|Serves| ReactUI["React UI (SPA)"]
+    ReactUI -->|User Input| Evaluator["Expression Evaluator (JS Module)"]
+    Evaluator -->|Result| ReactUI
+    ReactUI -->|Render Result| Browser
 ```
