@@ -1,36 +1,21 @@
 # DBA Mission Report
 
 **Agent**: dba  
-**Generated**: 2026-08-04T14:15:21.910Z
+**Generated**: 2026-08-04T14:26:09.033Z
 
 ---
 
 ## Database Engine: PostgreSQL
 
-PostgreSQL is chosen for its reliability, data integrity, and ability to handle complex queries, which aligns well with the application's requirements for accurate arithmetic evaluation and secure data storage.
+PostgreSQL is chosen for its reliability, data integrity, and ability to handle complex queries, which aligns with the calculator application's requirements for storing and retrieving user input and results.
 
-## Entities (2)
+## Entities (1)
 
-- **calculations**: 5 columns
-- **errors**: 5 columns
+- **expressions**: 6 columns
 
 ## ERD
 
 ```mermaid
-erDiagram
-    CALCULATIONS ||--o{ ERRORS : has
-    CALCULATIONS { 
-        uuid id
-        text expression
-        numeric result
-        timestamp created_at
-        timestamp updated_at
-    }
-    ERRORS { 
-        uuid id
-        text expression
-        text error_message
-        timestamp created_at
-        timestamp updated_at
-    }
+graph TD
+    A[expressions] -->|one-to-many|> A
 ```
