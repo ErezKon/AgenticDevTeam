@@ -20,10 +20,19 @@ import { dispatchDevelopers } from '../agents/developers/dispatcher';
 import { createQaLeadAgent, createQaUnitAgent, createQaE2eAgent } from '../agents/qa/qa.agents';
 import { createDevOpsAgent } from '../agents/devops/devops.agent';
 import { getPlaywrightMcpTools, closePlaywrightMcp } from '../tools/mcp/playwright-mcp';
-import { MAX_BUGFIX_ITERATIONS, GIT_DEFAULT_BRANCH, AGENT_RECURSION_LIMIT, GITHUB_TOKEN, GITHUB_OWNER, GITHUB_REPO, GIT_USER_NAME, GIT_USER_EMAIL } from '../config';
+import {
+    MAX_BUGFIX_ITERATIONS, GIT_DEFAULT_BRANCH, AGENT_RECURSION_LIMIT,
+    GITHUB_TOKEN, GITHUB_OWNER, GITHUB_REPO, GIT_USER_NAME, GIT_USER_EMAIL,
+    ARCHITECT_MODEL, PRODUCT_MANAGER_MODEL, DBA_MODEL, TEAM_LEADER_MODEL,
+    DEVOPS_MODEL, CODEBASE_ANALYZER_MODEL, QA_MODEL, LLM_MODEL,
+    MODEL_PRICING,
+} from '../config';
 import { execSync } from 'child_process';
 import type { ProjectStateType } from './state';
 import type { PhaseName, TranscriptMessage, Bug, CodebaseAnalysis } from '../agents/_shared/base-schemas';
+import { tokenTracker, type TokenCallRecord } from '../utils/token-tracker';
+import { extractTokenUsageFromMessages } from '../utils/token-usage-extractor';
+import { generateTokenReport } from '../utils/token-report';
 import * as path from 'path';
 import * as fs from 'fs';
 
@@ -81,27 +90,51 @@ function msg(agentId: string, phase: PhaseName, message: string): TranscriptMess
     return { timestamp: ts(), agentId, phase, message };
 }
 
-async function invokeAgent(agent: any, userMessage: string, threadSuffix: string): Promise<any> {
+/** Resolve the configured model name for a pipeline agent. */
+function getModelForAgent(agentId: string): string {
+    const modelMap: Record<string, string | undefined> = {
+        'codebase-analyzer': CODEBASE_ANALYZER_MODEL ?? ARCHITECT_MODEL,
+        'architect': ARCHITECT_MODEL,
+        'product-manager': PRODUCT_MANAGER_MODEL,
+        'dba': DBA_MODEL,
+        'team-leader': TEAM_LEADER_MODEL,
+        'devops': DEVOPS_MODEL,
+        'qa-lead': QA_MODEL,
+        'qa-unit': QA_MODEL,
+        'qa-e2e': QA_MODEL,
+    };
+    return modelMap[agentId] ?? LLM_MODEL;
+}
+
+async function invokeAgent(
+    agent: any, userMessage: string, threadSuffix: string,
+    agentId: string, phase: string,
+): Promise<{ output: any; tokenUsage: TokenCallRecord | null }> {
     return retryWithBackoff(async () => {
         const result = await agent.invoke(
             { messages: [{ role: 'user', content: userMessage }] },
             { configurable: { thread_id: `conductor-${threadSuffix}-${Date.now()}` }, recursionLimit: AGENT_RECURSION_LIMIT },
         );
+
+        // Extract per-invocation token usage from messages (complementary to callback tracking)
+        const model = getModelForAgent(agentId);
+        const tokenUsage = extractTokenUsageFromMessages(result, agentId, model, phase);
+
         const last = result.messages[result.messages.length - 1];
-        if (typeof last.content !== 'string') return last.content;
+        if (typeof last.content !== 'string') return { output: last.content, tokenUsage };
 
         // Try direct JSON parse first
         const raw = last.content.trim();
-        try { return JSON.parse(raw); } catch { /* fall through */ }
+        try { return { output: JSON.parse(raw), tokenUsage }; } catch { /* fall through */ }
 
         // Try to extract JSON from markdown code blocks or raw braces
         const codeBlock = raw.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
         if (codeBlock) {
-            try { return JSON.parse(codeBlock[1].trim()); } catch { /* fall through */ }
+            try { return { output: JSON.parse(codeBlock[1].trim()), tokenUsage }; } catch { /* fall through */ }
         }
         const braces = raw.match(/(\{[\s\S]*\})/);
         if (braces) {
-            try { return JSON.parse(braces[1]); } catch { /* fall through */ }
+            try { return { output: JSON.parse(braces[1]), tokenUsage }; } catch { /* fall through */ }
         }
 
         throw new SyntaxError(
@@ -116,6 +149,7 @@ const intakeLog = getLogger('[Intake]', 255);
 
 export async function intakeNode(state: ProjectStateType): Promise<Partial<ProjectStateType>> {
     intakeLog.info('Starting intake phase...');
+    tokenTracker.reset();
 
     let requirementsText = state.input.requirementsText;
     if (state.input.requirementsDocPath && !requirementsText) {
@@ -254,7 +288,7 @@ export async function codebaseAnalyzerNode(state: ProjectStateType): Promise<Par
     contextParts.push(`## Task\n\nAnalyze the codebase at the workspace root and produce a comprehensive CodebaseAnalysis.`);
 
     const userMsg = contextParts.join('\n\n');
-    const output = await invokeAgent(agent, userMsg, 'codebase-analyzer');
+    const { output, tokenUsage } = await invokeAgent(agent, userMsg, 'codebase-analyzer', 'codebase-analyzer', 'codebase-analyzer');
 
     analyzerLog.info(`Analysis complete: ${output.modules?.length ?? 0} modules, ${output.primaryLanguages?.length ?? 0} languages`);
     analyzerLog.info(`Architecture: ${output.architecture?.style ?? 'unknown'}`);
@@ -286,6 +320,7 @@ export async function codebaseAnalyzerNode(state: ProjectStateType): Promise<Par
         phase: 'architect' as PhaseName,
         artifacts: [artifact],
         transcript: [msg('codebase-analyzer', 'codebase-analyzer', `Analyzed ${output.modules?.length ?? 0} modules across ${output.primaryLanguages?.length ?? 0} languages`)],
+        tokenUsage: tokenUsage ? [tokenUsage] : [],
     };
 }
 
@@ -304,7 +339,7 @@ export async function architectNode(state: ProjectStateType): Promise<Partial<Pr
         userMsgParts.push(`\n## NOTE: This is MAINTAIN mode. Design CHANGES to the existing system, not a new system from scratch.`);
     }
     const userMsg = userMsgParts.join('\n');
-    const output = await invokeAgent(agent, userMsg, 'architect');
+    const { output, tokenUsage } = await invokeAgent(agent, userMsg, 'architect', 'architect', 'architect');
 
     archLog.info(`Architecture: ${output.architecture?.components?.length ?? 0} components`);
     archLog.info(`Tech decisions: ${output.techStack?.length ?? 0}`);
@@ -331,6 +366,7 @@ export async function architectNode(state: ProjectStateType): Promise<Partial<Pr
         phase: 'product-manager' as PhaseName,
         artifacts: [artifact],
         transcript: [msg('architect', 'architect', `Designed ${output.architecture?.components?.length ?? 0} components, ${output.epics?.length ?? 0} epics`)],
+        tokenUsage: tokenUsage ? [tokenUsage] : [],
     };
 }
 
@@ -355,7 +391,7 @@ export async function productManagerNode(state: ProjectStateType): Promise<Parti
     }
     const userMsg = pmParts.join('\n');
 
-    const output = await invokeAgent(agent, userMsg, 'pm');
+    const { output, tokenUsage } = await invokeAgent(agent, userMsg, 'pm', 'product-manager', 'product-manager');
     pmLog.info(`Stories: ${output.userStories?.length ?? 0}, Tasks: ${output.tasks?.length ?? 0}`);
 
     const artifact = writeArtifact({
@@ -377,6 +413,7 @@ export async function productManagerNode(state: ProjectStateType): Promise<Parti
         phase: 'dba' as PhaseName,
         artifacts: [artifact],
         transcript: [msg('product-manager', 'product-manager', `Created ${output.userStories?.length ?? 0} stories, ${output.tasks?.length ?? 0} tasks`)],
+        tokenUsage: tokenUsage ? [tokenUsage] : [],
     };
 }
 
@@ -401,7 +438,7 @@ export async function dbaNode(state: ProjectStateType): Promise<Partial<ProjectS
     }
     const userMsg = dbaParts.join('\n');
 
-    const output = await invokeAgent(agent, userMsg, 'dba');
+    const { output, tokenUsage } = await invokeAgent(agent, userMsg, 'dba', 'dba', 'dba');
     dbaLog.info(`DB engine: ${output.dbDesign?.engine}, Entities: ${output.dbDesign?.entities?.length ?? 0}`);
 
     const artifact = writeArtifact({
@@ -423,6 +460,7 @@ export async function dbaNode(state: ProjectStateType): Promise<Partial<ProjectS
         phase: 'team-leader' as PhaseName,
         artifacts: [artifact],
         transcript: [msg('dba', 'dba', `Designed ${output.dbDesign?.entities?.length ?? 0} entities on ${output.dbDesign?.engine}`)],
+        tokenUsage: tokenUsage ? [tokenUsage] : [],
     };
 }
 
@@ -451,7 +489,7 @@ export async function teamLeaderNode(state: ProjectStateType): Promise<Partial<P
     }
     const userMsg = tlParts.join('\n');
 
-    const output = await invokeAgent(agent, userMsg, 'tl');
+    const { output, tokenUsage } = await invokeAgent(agent, userMsg, 'tl', 'team-leader', 'team-leader');
     tlLog.info(`Assignments: ${output.assignments?.length ?? 0}`);
 
     const artifact = writeArtifact({
@@ -472,6 +510,7 @@ export async function teamLeaderNode(state: ProjectStateType): Promise<Partial<P
         phase: 'development' as PhaseName,
         artifacts: [artifact],
         transcript: [msg('team-leader', 'team-leader', `Created ${output.assignments?.length ?? 0} assignments`)],
+        tokenUsage: tokenUsage ? [tokenUsage] : [],
     };
 }
 
@@ -510,6 +549,7 @@ export async function developmentNode(state: ProjectStateType): Promise<Partial<
             msg('conductor', 'development', `Development phase complete: ${result.fileChanges.length} files changed, ${result.pullRequests.length} PRs merged`),
         ],
         phase: 'qa' as PhaseName,
+        tokenUsage: result.tokenUsage ?? [],
     };
 }
 
@@ -525,6 +565,7 @@ export async function qaNode(state: ProjectStateType): Promise<Partial<ProjectSt
 
     // 7a. QA Lead — create test plan
     qaLog.info('QA Lead creating test plan...');
+    const qaTokenUsage: TokenCallRecord[] = [];
     const qaLeadAgent = createQaLeadAgent(apiKey);
     const leadMsg = [
         `## Architecture\n\n${JSON.stringify(state.architecture, null, 2)}`,
@@ -532,7 +573,8 @@ export async function qaNode(state: ProjectStateType): Promise<Partial<ProjectSt
         `\n## Tech Stack\n\n${JSON.stringify(state.techStack, null, 2)}`,
         `\n## DB Design\n\n${JSON.stringify(state.dbDesign, null, 2)}`,
     ].join('\n');
-    const leadOutput = await invokeAgent(qaLeadAgent, leadMsg, 'qa-lead');
+    const { output: leadOutput, tokenUsage: leadTokenUsage } = await invokeAgent(qaLeadAgent, leadMsg, 'qa-lead', 'qa-lead', 'qa');
+    if (leadTokenUsage) qaTokenUsage.push(leadTokenUsage);
     qaLog.info(`Test plan: ${leadOutput.testPlan?.unit?.length ?? 0} unit, ${leadOutput.testPlan?.e2e?.length ?? 0} e2e`);
 
     const leadArtifact = writeArtifact({
@@ -550,7 +592,8 @@ export async function qaNode(state: ProjectStateType): Promise<Partial<ProjectSt
         `\n## Architecture\n\n${JSON.stringify(state.architecture, null, 2)}`,
         `\n## Tech Stack\n\n${JSON.stringify(state.techStack, null, 2)}`,
     ].join('\n');
-    const unitOutput = await invokeAgent(qaUnitAgent, unitMsg, 'qa-unit');
+    const { output: unitOutput, tokenUsage: unitTokenUsage } = await invokeAgent(qaUnitAgent, unitMsg, 'qa-unit', 'qa-unit', 'qa');
+    if (unitTokenUsage) qaTokenUsage.push(unitTokenUsage);
     qaLog.info(`Unit tests: ${unitOutput.testReport?.passed ?? 0} passed, ${unitOutput.testReport?.failed ?? 0} failed`);
     if (unitOutput.bugs) allBugs.push(...unitOutput.bugs);
 
@@ -573,7 +616,8 @@ export async function qaNode(state: ProjectStateType): Promise<Partial<ProjectSt
                 `## Test Plan (e2e)\n\n${JSON.stringify(leadOutput.testPlan?.e2e, null, 2)}`,
                 `\n## Service URLs\n\n${JSON.stringify(state.devopsPlan.serviceUrls, null, 2)}`,
             ].join('\n');
-            const e2eOutput = await invokeAgent(qaE2eAgent, e2eMsg, 'qa-e2e');
+            const { output: e2eOutput, tokenUsage: e2eTokenUsage } = await invokeAgent(qaE2eAgent, e2eMsg, 'qa-e2e', 'qa-e2e', 'qa');
+            if (e2eTokenUsage) qaTokenUsage.push(e2eTokenUsage);
             e2eReport = e2eOutput.testReport;
             if (e2eOutput.bugs) allBugs.push(...e2eOutput.bugs);
             qaLog.info(`E2E tests: ${e2eReport?.passed ?? 0} passed, ${e2eReport?.failed ?? 0} failed`);
@@ -618,6 +662,7 @@ export async function qaNode(state: ProjectStateType): Promise<Partial<ProjectSt
         artifacts,
         transcript,
         phase: 'qa' as PhaseName,
+        tokenUsage: qaTokenUsage,
     };
 }
 
@@ -651,7 +696,7 @@ export async function bugfixTriageNode(state: ProjectStateType): Promise<Partial
         `\n\nPlease create NEW assignments to fix these bugs. Assign each bug to the most appropriate developer.`,
     ].join('\n');
 
-    const output = await invokeAgent(agent, userMsg, `tl-bugfix-${iteration}`);
+    const { output, tokenUsage } = await invokeAgent(agent, userMsg, `tl-bugfix-${iteration}`, 'team-leader', 'bugfix-triage');
     bugLog.info(`Created ${output.assignments?.length ?? 0} bugfix assignments`);
 
     return {
@@ -659,6 +704,7 @@ export async function bugfixTriageNode(state: ProjectStateType): Promise<Partial
         iteration: { bugfix: iteration },
         phase: 'development' as PhaseName,
         transcript: [msg('team-leader', 'bugfix-triage', `Iteration ${iteration}: reassigned ${output.assignments?.length ?? 0} bug fixes`)],
+        tokenUsage: tokenUsage ? [tokenUsage] : [],
     };
 }
 
@@ -683,7 +729,7 @@ export async function devopsNode(state: ProjectStateType): Promise<Partial<Proje
     }
     const userMsg = devopsParts.join('\n');
 
-    const output = await invokeAgent(agent, userMsg, 'devops');
+    const { output, tokenUsage } = await invokeAgent(agent, userMsg, 'devops', 'devops', 'devops');
     opsLog.info(`Build: ${output.devops?.buildStatus}, Run: ${output.devops?.runStatus}`);
 
     const artifact = writeArtifact({
@@ -716,6 +762,7 @@ export async function devopsNode(state: ProjectStateType): Promise<Partial<Proje
         phase: 'finalize' as PhaseName,
         artifacts: [artifact],
         transcript: [msg('devops', 'devops', `Build: ${output.devops?.buildStatus}, Run: ${output.devops?.runStatus}`)],
+        tokenUsage: tokenUsage ? [tokenUsage] : [],
     };
 }
 
@@ -726,6 +773,10 @@ const finalLog = getLogger('[Finalize]', 46);
 export async function finalizeNode(state: ProjectStateType): Promise<Partial<ProjectStateType>> {
     finalLog.info('Finalizing run...');
 
+    // ── Token usage summary ─────────────────────────────────────────────
+    const usageSummary = tokenTracker.getRunSummary();
+    const usageSnapshot = tokenTracker.getSnapshot();
+
     const summary = [
         `System: ${state.input.systemName}`,
         `Architecture: ${state.architecture?.style} with ${state.architecture?.components?.length ?? 0} components`,
@@ -735,6 +786,13 @@ export async function finalizeNode(state: ProjectStateType): Promise<Partial<Pro
         `Test reports: ${state.testReports.length}`,
         `Bugs: ${state.bugs.length}`,
         `Artifacts: ${state.artifacts.length}`,
+        ``,
+        `── Token Usage ──`,
+        `Total LLM calls: ${usageSummary.totalCalls}`,
+        `Total input tokens: ${usageSummary.totalInputTokens.toLocaleString()}`,
+        `Total output tokens: ${usageSummary.totalOutputTokens.toLocaleString()}`,
+        `Total tokens: ${usageSummary.totalTokens.toLocaleString()}`,
+        `Estimated cost: see Token Usage Report for per-model breakdown`,
     ].join('\n');
 
     finalLog.info(`\n${summary}`);
@@ -748,8 +806,104 @@ export async function finalizeNode(state: ProjectStateType): Promise<Partial<Pro
         content: summary,
     });
 
+    // ── Cost estimation helper ────────────────────────────────────────────
+    function estimateCost(model: string, inputTokens: number, outputTokens: number): number {
+        const pricing = MODEL_PRICING[model];
+        if (!pricing) return 0;
+        return (inputTokens / 1000) * pricing.inputPer1k + (outputTokens / 1000) * pricing.outputPer1k;
+    }
+
+    // ── Token usage report artifact ─────────────────────────────────────
+    let totalEstimatedCost = 0;
+    for (const a of usageSummary.byAgent) {
+        totalEstimatedCost += estimateCost(a.model, a.inputTokens, a.outputTokens);
+    }
+
+    const usageReportLines: string[] = [
+        `# Token Usage Report`,
+        ``,
+        `**Run:** ${state.input.systemName}`,
+        `**Date:** ${new Date().toISOString()}`,
+        ``,
+        `## Totals`,
+        ``,
+        `| Metric | Value |`,
+        `|--------|-------|`,
+        `| Total LLM Calls | ${usageSummary.totalCalls} |`,
+        `| Input Tokens | ${usageSummary.totalInputTokens.toLocaleString()} |`,
+        `| Output Tokens | ${usageSummary.totalOutputTokens.toLocaleString()} |`,
+        `| **Total Tokens** | **${usageSummary.totalTokens.toLocaleString()}** |`,
+        `| **Estimated Cost** | **$${totalEstimatedCost.toFixed(4)}** |`,
+        ``,
+        `## By Agent`,
+        ``,
+        `| Agent | Model | Calls | Input | Output | Total | Est. Cost |`,
+        `|-------|-------|------:|------:|-------:|------:|----------:|`,
+    ];
+    for (const a of usageSummary.byAgent) {
+        const cost = estimateCost(a.model, a.inputTokens, a.outputTokens);
+        usageReportLines.push(
+            `| ${a.agentId} | ${a.model} | ${a.callCount} | ${a.inputTokens.toLocaleString()} | ${a.outputTokens.toLocaleString()} | ${a.totalTokens.toLocaleString()} | $${cost.toFixed(4)} |`,
+        );
+    }
+    usageReportLines.push(
+        ``,
+        `## By Phase`,
+        ``,
+        `| Phase | Calls | Input | Output | Total |`,
+        `|-------|------:|------:|-------:|------:|`,
+    );
+    for (const p of usageSummary.byPhase) {
+        usageReportLines.push(
+            `| ${p.phase} | ${p.callCount} | ${p.inputTokens.toLocaleString()} | ${p.outputTokens.toLocaleString()} | ${p.totalTokens.toLocaleString()} |`,
+        );
+    }
+    usageReportLines.push(
+        ``,
+        `## By Model`,
+        ``,
+        `| Model | Calls | Input | Output | Total | Est. Cost |`,
+        `|-------|------:|------:|-------:|------:|----------:|`,
+    );
+    for (const m of usageSummary.byModel) {
+        const cost = estimateCost(m.model, m.inputTokens, m.outputTokens);
+        usageReportLines.push(
+            `| ${m.model} | ${m.callCount} | ${m.inputTokens.toLocaleString()} | ${m.outputTokens.toLocaleString()} | ${m.totalTokens.toLocaleString()} | $${cost.toFixed(4)} |`,
+        );
+    }
+    usageReportLines.push(
+        ``,
+        `## Pricing Rates`,
+        ``,
+        `| Model | Input ($/1K tokens) | Output ($/1K tokens) |`,
+        `|-------|--------------------:|---------------------:|`,
+    );
+    for (const [model, pricing] of Object.entries(MODEL_PRICING)) {
+        usageReportLines.push(
+            `| ${model} | $${pricing.inputPer1k.toFixed(4)} | $${pricing.outputPer1k.toFixed(4)} |`,
+        );
+    }
+
+    writeArtifact({
+        agentId: 'conductor',
+        colorCode: 220,
+        workspacePath: state.workspacePath,
+        title: 'Token Usage Report',
+        content: usageReportLines.join('\n'),
+    });
+
+    // ── HTML token usage report + raw JSON ──────────────────────────────
+    const { jsonPath, htmlPath } = generateTokenReport(
+        usageSnapshot,
+        state.outputPath,
+        state.input.systemName,
+    );
+    finalLog.info(`Token usage JSON: ${jsonPath}`);
+    finalLog.info(`Token usage HTML report: ${htmlPath}`);
+
     return {
         phase: 'finalize' as PhaseName,
-        transcript: [msg('conductor', 'finalize', 'Run complete')],
+        tokenUsage: usageSnapshot,
+        transcript: [msg('conductor', 'finalize', `Run complete. Total tokens: ${usageSummary.totalTokens.toLocaleString()} across ${usageSummary.totalCalls} LLM calls. Reports: ${htmlPath}`)],
     };
 }

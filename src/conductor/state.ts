@@ -26,6 +26,7 @@ import type {
     CodebaseAnalysis,
     PullRequest,
     BranchAssignment,
+    TokenCallRecord,
 } from '../agents/_shared/base-schemas';
 
 // ─── Reducers ───────────────────────────────────────────────────────────────
@@ -172,6 +173,12 @@ export const ProjectState = Annotation.Root({
 
     // ── Transcript (human-readable event log) ────────────────────────────
     transcript: Annotation<TranscriptMessage[]>({
+        reducer: appendReducer,
+        default: () => [],
+    }),
+
+    // ── Token usage tracking ─────────────────────────────────────────────
+    tokenUsage: Annotation<TokenCallRecord[]>({
         reducer: appendReducer,
         default: () => [],
     }),

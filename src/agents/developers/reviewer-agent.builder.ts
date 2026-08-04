@@ -49,5 +49,6 @@ export function buildReviewerAgent(apiKey: string, entry: DevAgentEntry, workspa
         responseFormat: ReviewOutputSchema,
         temperature: 0.1,
         model: getModelForRank(entry.rank),
+        phase: 'review',
     });
 }
