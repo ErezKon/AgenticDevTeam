@@ -10,28 +10,30 @@ import { Octokit } from '@octokit/rest';
 import { GITHUB_TOKEN, GITHUB_OWNER, GITHUB_REPO, GIT_DEFAULT_BRANCH } from '../../config';
 import { LogColors, color256 } from '../../utils/log-colors.util';
 import {logToolAction} from '../../utils/logger';
+import type { GitContext } from '../../agents/_shared/base-schemas';
 
 const TAG_COLOR = 240;
 const TAG = `${color256(TAG_COLOR)}[GitHub]${LogColors.RESET}`;
 
-function getOctokit(): Octokit {
-    if (!GITHUB_TOKEN) {
+function getOctokit(gitContext?: GitContext | null): Octokit {
+    const token = gitContext?.token ?? GITHUB_TOKEN;
+    if (!token) {
         throw new Error('GITHUB_TOKEN is not set. Cannot perform GitHub API operations.');
     }
-    return new Octokit({ auth: GITHUB_TOKEN });
+    return new Octokit({ auth: token });
 }
 
 /**
  * Create GitHub API tools for PR management.
  */
-export function createGitHubTools() {
-    const owner = GITHUB_OWNER;
-    const repo = GITHUB_REPO;
+export function createGitHubTools(gitContext?: GitContext | null) {
+    const owner = gitContext?.owner ?? GITHUB_OWNER;
+    const repo = gitContext?.repo ?? GITHUB_REPO;
 
     const githubCreatePrTool = tool(
         async ({ title, body, head, base }) => {
             logToolAction(`${TAG} Creating PR: "${title}" (${head} → ${base ?? GIT_DEFAULT_BRANCH})`);
-            const octokit = getOctokit();
+            const octokit = getOctokit(gitContext);
             const { data } = await octokit.pulls.create({
                 owner,
                 repo,
@@ -62,7 +64,7 @@ export function createGitHubTools() {
     const githubGetPrStatusTool = tool(
         async ({ prNumber }) => {
             logToolAction(`${TAG} Getting status of PR #${prNumber}`);
-            const octokit = getOctokit();
+            const octokit = getOctokit(gitContext);
             const { data: pr } = await octokit.pulls.get({ owner, repo, pull_number: prNumber });
             const { data: reviews } = await octokit.pulls.listReviews({ owner, repo, pull_number: prNumber });
 
@@ -92,7 +94,7 @@ export function createGitHubTools() {
     const githubListPrCommentsTool = tool(
         async ({ prNumber }) => {
             logToolAction(`${TAG} Listing comments on PR #${prNumber}`);
-            const octokit = getOctokit();
+            const octokit = getOctokit(gitContext);
             const { data: reviewComments } = await octokit.pulls.listReviewComments({
                 owner, repo, pull_number: prNumber,
             });
@@ -131,7 +133,7 @@ export function createGitHubTools() {
     const githubPostPrReviewTool = tool(
         async ({ prNumber, body, event, comments }) => {
             logToolAction(`${TAG} Posting ${event} review on PR #${prNumber}`);
-            const octokit = getOctokit();
+            const octokit = getOctokit(gitContext);
 
             const reviewParams: any = {
                 owner,
@@ -178,7 +180,7 @@ export function createGitHubTools() {
     const githubPostPrCommentTool = tool(
         async ({ prNumber, body }) => {
             logToolAction(`${TAG} Posting comment on PR #${prNumber}`);
-            const octokit = getOctokit();
+            const octokit = getOctokit(gitContext);
             const { data } = await octokit.issues.createComment({
                 owner, repo, issue_number: prNumber, body,
             });
@@ -198,7 +200,7 @@ export function createGitHubTools() {
         async ({ prNumber, mergeMethod }) => {
             const method = mergeMethod ?? 'squash';
             logToolAction(`${TAG} Merging PR #${prNumber} (method: ${method})`);
-            const octokit = getOctokit();
+            const octokit = getOctokit(gitContext);
             const { data } = await octokit.pulls.merge({
                 owner, repo, pull_number: prNumber,
                 merge_method: method,

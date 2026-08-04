@@ -14,6 +14,7 @@
 - [Run Modes](#run-modes)
 - [Bug-Fix Loop](#bug-fix-loop)
 - [Git Branching & PR Workflow](#git-branching--pr-workflow)
+- [Multi-Repo Project Targeting](#multi-repo-project-targeting)
 - [Project Structure](#project-structure)
 - [Prerequisites](#prerequisites)
 - [Installation & Setup](#installation--setup)
@@ -381,6 +382,55 @@ Set these environment variables in `.env` to enable the PR workflow:
 
 ---
 
+## Multi-Repo Project Targeting
+
+By default, all generated projects live as subdirectories within the AgenticDevTeam repository. The **multi-repo targeting** feature lets you host each greenfield project in its own dedicated GitHub repository instead.
+
+### How It Works
+
+When starting a greenfield run (CLI or dashboard), you choose one of three hosting options:
+
+| Option | Behavior |
+|--------|----------|
+| **Same repository** | Default. Project lives inside `generated-projects/` in this repo (original behavior). |
+| **New GitHub repository** | Creates a new repo under `GITHUB_PROJECT_OWNER`, initializes it, and pushes all code there. |
+| **Existing GitHub repository** | Validates that the repo exists, then pushes code to it. |
+
+All downstream operations (branches, commits, PRs, code reviews, merges) automatically use the correct token, owner, and repo for the chosen target.
+
+### Configuration
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `GITHUB_PROJECT_TOKEN` | No | Separate PAT for project-specific repos. Falls back to `GITHUB_TOKEN` if unset. |
+| `GITHUB_PROJECT_OWNER` | No | Owner (org or user) for project-specific repos. Falls back to `GITHUB_OWNER` if unset. |
+
+Add these to your `.env` file when you want to target a different GitHub account or organization for generated projects.
+
+### CLI Usage
+
+When starting a greenfield run, the CLI will prompt:
+
+```
+Where should this project be hosted?
+  1) Same repository (AgenticDevTeam)
+  2) New GitHub repository
+  3) Existing GitHub repository
+```
+
+Choosing option 2 or 3 will ask for additional details (repo name, visibility).
+
+### Dashboard Usage
+
+In the New Run form, a **Project Hosting** dropdown appears when the run type is set to "greenfield". Select "New GitHub repository" or "Existing GitHub repository" and fill in the repository name.
+
+### Limitations
+
+- Multi-repo targeting is **greenfield only**. Maintain mode always operates on the existing project's repository.
+- If `GITHUB_PROJECT_TOKEN` is not set, the system falls back to `GITHUB_TOKEN`. Ensure the token has `repo` scope for creating new repositories.
+
+---
+
 ## Project Structure
 
 ```
@@ -573,7 +623,8 @@ Starts the orchestrator and Playwright MCP server in containers.
   "requirementsText": "...",
   "mode": "human",
   "runType": "greenfield",
-  "existingProjectPath": null
+  "existingProjectPath": null,
+  "repoTarget": { "type": "same-repo" }
 }
 ```
 
@@ -585,6 +636,7 @@ Starts the orchestrator and Playwright MCP server in containers.
 | `mode` | No | `"autonomous"` or `"human"` (default: `"human"`) |
 | `runType` | No | `"greenfield"` (default) or `"maintain"` |
 | `existingProjectPath` | Maintain only | Absolute path to the existing project directory |
+| `repoTarget` | No | `{ type: "same-repo" \| "new-repo" \| "existing-repo", repoName?, isPrivate? }` — where to host the project (greenfield only) |
 
 ### WebSocket Events
 
@@ -658,6 +710,8 @@ npm run build
 | `GITHUB_REPO` | — | GitHub repository name |
 | `GIT_DEFAULT_BRANCH` | `main` | Default branch name for merging PRs |
 | `MAX_REVIEW_ITERATIONS` | `5` | Max PR review rounds before escalation |
+| `GITHUB_PROJECT_TOKEN` | — | Separate PAT for project-specific repos (falls back to `GITHUB_TOKEN`) |
+| `GITHUB_PROJECT_OWNER` | — | Owner for project-specific repos (falls back to `GITHUB_OWNER`) |
 | `DASHBOARD_PORT` | `3000` | HTTP/WS server port |
 
 See [`.env.example`](.env.example) for the full template.

@@ -12,6 +12,7 @@ import { createGitTools } from '../../tools/git/git-tools';
 import { createShellTool } from '../../tools/shell/shell-tools';
 import { emitMermaidTool } from '../../tools/diagram/diagram-tools';
 import { PRINCIPAL_DEV_MODEL, SENIOR_DEV_MODEL, JUNIOR_DEV_MODEL } from '../../config';
+import type { GitContext } from '../_shared/base-schemas';
 import type { DevAgentEntry } from './registry';
 
 /** Resolve the LLM model for a developer agent based on rank. */
@@ -30,7 +31,7 @@ function getModelForRank(rank: DevRank): string {
  * @param entry   Developer registry entry (rank, domain, languages, etc.)
  * @param workspaceRoot  The generated-project workspace directory
  */
-export function buildDevAgent(apiKey: string, entry: DevAgentEntry, workspaceRoot: string) {
+export function buildDevAgent(apiKey: string, entry: DevAgentEntry, workspaceRoot: string, gitContext?: GitContext | null) {
     const systemPrompt = buildDevPersona({
         rank: entry.rank,
         domain: entry.domain,
@@ -40,7 +41,7 @@ export function buildDevAgent(apiKey: string, entry: DevAgentEntry, workspaceRoo
 
     const tools = [
         ...createWorkspaceTools(workspaceRoot),
-        ...createGitTools(workspaceRoot),
+        ...createGitTools(workspaceRoot, gitContext),
         createShellTool(workspaceRoot),
         emitMermaidTool,
     ];

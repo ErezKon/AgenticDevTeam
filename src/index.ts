@@ -67,7 +67,7 @@ app.get('/api/agents', (_req, res) => {
 
 app.post('/api/run', async (req, res) => {
     try {
-        const { systemName, requirementsText, requirementsDocPath, mode, runType, existingProjectPath } = req.body;
+        const { systemName, requirementsText, requirementsDocPath, mode, runType, existingProjectPath, repoTarget } = req.body;
 
         if (!systemName) {
             res.status(400).json({ error: 'systemName is required' });
@@ -103,7 +103,7 @@ app.post('/api/run', async (req, res) => {
             broadcast('run:started', { systemName, mode: 'autonomous' });
 
             // Fire and forget — results come via WebSocket
-            runAutonomous({ systemName, requirementsText: text, mode: 'autonomous', runType: resolvedRunType, existingProjectPath })
+            runAutonomous({ systemName, requirementsText: text, mode: 'autonomous', runType: resolvedRunType, existingProjectPath, repoTarget })
                 .then((state) => {
                     states.set(systemName, state);
                     broadcast('run:complete', { systemName, state });
@@ -120,6 +120,7 @@ app.post('/api/run', async (req, res) => {
                 mode: 'human',
                 runType: resolvedRunType,
                 existingProjectPath,
+                repoTarget,
             });
 
             sessions.set(session.threadId, session);

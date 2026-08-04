@@ -159,6 +159,14 @@ export const GIT_USER_EMAIL = process.env.GIT_USER_EMAIL ?? 'agenticdevteam@nore
 export const MAX_REVIEW_ITERATIONS =
     parseInt(process.env.MAX_REVIEW_ITERATIONS ?? '5', 10);
 
+// ─── GitHub Project (multi-repo targeting) ──────────────────────────────────
+
+/** Separate PAT for project-specific repos (falls back to GITHUB_TOKEN). */
+export const GITHUB_PROJECT_TOKEN = process.env.GITHUB_PROJECT_TOKEN ?? '';
+
+/** Owner for project-specific repos (falls back to GITHUB_OWNER). */
+export const GITHUB_PROJECT_OWNER = process.env.GITHUB_PROJECT_OWNER ?? '';
+
 // ─── Dashboard ──────────────────────────────────────────────────────────────
 
 /** Port for the Express + WebSocket server. */

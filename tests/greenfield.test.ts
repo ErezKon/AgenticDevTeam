@@ -28,6 +28,7 @@ describe('Greenfield Autonomous Flow', () => {
                     requirementsDocPath: spec.filePath,
                     mode: 'autonomous',
                     runType: 'greenfield',
+                    repoTarget: { type: 'same-repo', isPrivate: true },
                 });
 
                 // Pipeline should reach finalize phase
@@ -52,6 +53,11 @@ describe('Greenfield Autonomous Flow', () => {
 
                 // QA outputs
                 expect(finalState.testReports.length).toBeGreaterThan(0);
+
+                // Git context should be populated after intake
+                expect(finalState.gitContext).not.toBeNull();
+                expect(finalState.gitContext?.owner).toBeTruthy();
+                expect(finalState.gitContext?.repo).toBeTruthy();
 
                 // Artifacts and transcript
                 expect(finalState.artifacts.length).toBeGreaterThan(0);

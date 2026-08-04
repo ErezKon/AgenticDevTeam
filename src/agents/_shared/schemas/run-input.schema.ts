@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { RepoTargetSchema } from './git-context.schema';
 
 // ─── Run Input ──────────────────────────────────────────────────────────────
 
@@ -11,5 +12,7 @@ export const RunInputSchema = z.object({
         .describe('Whether this is a new project build or maintenance of an existing codebase'),
     existingProjectPath: z.string().optional()
         .describe('Absolute path to the existing project root (required for maintain mode)'),
+    repoTarget: RepoTargetSchema.optional()
+        .describe('Where the generated project should be hosted (greenfield only)'),
 });
 export type RunInput = z.infer<typeof RunInputSchema>;

@@ -11,6 +11,7 @@ import { execSync } from 'child_process';
 import { LogColors, color256 } from '../../utils/log-colors.util';
 import { logToolAction } from '../../utils/logger';
 import { GIT_DEFAULT_BRANCH, GITHUB_TOKEN, GITHUB_OWNER, GITHUB_REPO, GIT_USER_NAME, GIT_USER_EMAIL } from '../../config';
+import type { GitContext } from '../../agents/_shared/base-schemas';
 
 const TAG_COLOR = 202;
 const TAG = `${color256(TAG_COLOR)}[git]${LogColors.RESET}`;
@@ -44,7 +45,7 @@ function git(workspaceRoot: string, args: string): string {
 /**
  * Create workspace-scoped Git CLI tools.
  */
-export function createGitTools(workspaceRoot: string) {
+export function createGitTools(workspaceRoot: string, gitContext?: GitContext | null) {
     const gitCheckoutBranchTool = tool(
         async ({ branchName, fromBranch }) => {
             const base = fromBranch ?? GIT_DEFAULT_BRANCH;
@@ -115,7 +116,10 @@ export function createGitTools(workspaceRoot: string) {
         async ({ branchName }) => {
             const branch = branchName ?? git(workspaceRoot, 'rev-parse --abbrev-ref HEAD');
             logToolAction(`${TAG} push ${branch}`);
-            const authUrl = `https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_OWNER}/${GITHUB_REPO}.git`;
+            const token = gitContext?.token ?? GITHUB_TOKEN;
+            const owner = gitContext?.owner ?? GITHUB_OWNER;
+            const repo = gitContext?.repo ?? GITHUB_REPO;
+            const authUrl = `https://x-access-token:${token}@github.com/${owner}/${repo}.git`;
             const result = git(workspaceRoot, `push ${authUrl} HEAD:refs/heads/${branch}`);
             return result || `Pushed branch '${branch}' to origin`;
         },

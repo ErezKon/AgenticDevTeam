@@ -24,7 +24,7 @@ import {
 } from '../config';
 import type {
     Assignment, FileChange, ArtifactRef, TranscriptMessage,
-    PhaseName, PullRequest, PRReview,
+    PhaseName, PullRequest, PRReview, GitContext,
 } from '../agents/_shared/base-schemas';
 import type { DeveloperOutput } from '../agents/developers/schemas/dev-output.schema';
 import type { ReviewOutput } from '../agents/developers/schemas/review-output.schema';
@@ -47,6 +47,7 @@ export interface PRWorkflowInput {
     contextPrompt: string;
     currentState?: string;
     projectSlug: string;
+    gitContext?: GitContext | null;
 }
 
 export interface PRWorkflowResult {
@@ -82,8 +83,11 @@ function gitExec(workspacePath: string, args: string): string {
     }
 }
 
-function gitPush(workspacePath: string, branchName: string): string {
-    const authUrl = `https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_OWNER}/${GITHUB_REPO}.git`;
+function gitPush(workspacePath: string, branchName: string, gitContext?: GitContext | null): string {
+    const token = gitContext?.token ?? GITHUB_TOKEN;
+    const owner = gitContext?.owner ?? GITHUB_OWNER;
+    const repo = gitContext?.repo ?? GITHUB_REPO;
+    const authUrl = `https://x-access-token:${token}@github.com/${owner}/${repo}.git`;
     const result = gitExec(workspacePath, `push ${authUrl} HEAD:refs/heads/${branchName}`);
     if (result.startsWith('Error:')) {
         log.error(`Push failed for ${branchName}: ${result}`);
@@ -93,22 +97,26 @@ function gitPush(workspacePath: string, branchName: string): string {
     return result;
 }
 
-function getOctokit(): Octokit {
-    if (!GITHUB_TOKEN) {
+function getOctokit(gitContext?: GitContext | null): Octokit {
+    const token = gitContext?.token ?? GITHUB_TOKEN;
+    if (!token) {
         throw new Error('GITHUB_TOKEN is not set. Cannot perform GitHub API operations.');
     }
-    return new Octokit({ auth: GITHUB_TOKEN });
+    return new Octokit({ auth: token });
 }
 
 /**
  * Create a GitHub PR using curl as a fallback when Octokit fails.
  * This avoids Node.js HTTP stack issues with corporate SSL proxies.
  */
-function createPRViaCurl(title: string, body: string, head: string, base: string): { number: number; html_url: string; node_id: string } {
+function createPRViaCurl(title: string, body: string, head: string, base: string, gitContext?: GitContext | null): { number: number; html_url: string; node_id: string } {
+    const token = gitContext?.token ?? GITHUB_TOKEN;
+    const owner = gitContext?.owner ?? GITHUB_OWNER;
+    const repo = gitContext?.repo ?? GITHUB_REPO;
     const payload = JSON.stringify({ title, body, head, base });
     const result = execSync(
-        `curl -s -X POST "https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/pulls" `
-        + `-H "Authorization: token ${GITHUB_TOKEN}" `
+        `curl -s -X POST "https://api.github.com/repos/${owner}/${repo}/pulls" `
+        + `-H "Authorization: token ${token}" `
         + `-H "Accept: application/vnd.github+json" `
         + `-H "Content-Type: application/json" `
         + `--data-binary @-`,
@@ -292,8 +300,12 @@ function findEscalationAgent(
 export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkflowResult> {
     const {
         branchName, baseBranch, assignments, reviewerAgentIds, taskType,
-        workspacePath, apiKey, contextPrompt, currentState, projectSlug,
+        workspacePath, apiKey, contextPrompt, currentState, projectSlug, gitContext,
     } = input;
+
+    // Resolve owner/repo from gitContext (falls back to config constants)
+    const ghOwner = gitContext?.owner ?? GITHUB_OWNER;
+    const ghRepo = gitContext?.repo ?? GITHUB_REPO;
 
     const primaryStoryId = assignments[0]?.storyId ?? 'CLEANUP';
 
@@ -360,7 +372,7 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
             const devLog = getLogger(entry.tag, entry.colorCode);
             devLog.info(`Working on branch ${branchName}: ${devAssignments.length} assignment(s)`);
 
-            const agent = buildDevAgent(apiKey, entry, worktreeWorkspace);
+            const agent = buildDevAgent(apiKey, entry, worktreeWorkspace, gitContext);
 
             const assignmentText = devAssignments.map(a =>
                 `Assignment ${a.id} [${a.priority}/${a.complexity}]: ${a.description}`
@@ -413,19 +425,19 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
         if (statusOutput && !statusOutput.includes('nothing to commit')) {
             gitExec(worktreeWorkspace, `commit -m "[${projectSlug}]-[${primaryStoryId}]-chore: final cleanup for ${branchName}"`);
         }
-        gitPush(worktreeWorkspace, branchName);
+        gitPush(worktreeWorkspace, branchName, gitContext);
 
         // ── 2. Create GitHub PR ─────────────────────────────────────────
         const prTitle = buildPRTitle(assignments, taskType, projectSlug);
         const prBody = buildPRDescription(assignments, allFileChanges, taskType, currentState, assignments[0].devAgentId);
 
         log.info(`Creating PR: "${prTitle}"`);
-        const octokit = getOctokit();
+        const octokit = getOctokit(gitContext);
         let ghPr: { number: number; html_url: string; node_id: string };
         try {
             const { data } = await octokit.pulls.create({
-                owner: GITHUB_OWNER,
-                repo: GITHUB_REPO,
+                owner: ghOwner,
+                repo: ghRepo,
                 title: prTitle,
                 body: prBody,
                 head: branchName,
@@ -434,7 +446,7 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
             ghPr = { number: data.number, html_url: data.html_url, node_id: data.node_id };
         } catch (octokitErr: any) {
             log.warn(`Octokit PR creation failed (${octokitErr.status ?? 'unknown'}), falling back to curl`);
-            ghPr = createPRViaCurl(prTitle, prBody, branchName, baseBranch);
+            ghPr = createPRViaCurl(prTitle, prBody, branchName, baseBranch, gitContext);
         }
         log.info(`PR #${ghPr.number} created: ${ghPr.html_url}`);
         allTranscript.push(msg('conductor', `PR #${ghPr.number} created: ${prTitle}`));
@@ -448,7 +460,7 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                 .map(e => `${e!.name} (${e!.id})`);
             const requestBody = `[REVIEW_REQUEST] ${authorEntry?.name ?? assignments[0].devAgentId} requested review from ${reviewerNames.join(' and ')}.`;
             await octokit.issues.createComment({
-                owner: GITHUB_OWNER, repo: GITHUB_REPO,
+                owner: ghOwner, repo: ghRepo,
                 issue_number: ghPr.number, body: requestBody,
             });
         } catch (reqErr: any) {
@@ -495,7 +507,7 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                 const reviewerLog = getLogger(`${reviewerEntry.tag} [REVIEW]`, reviewerEntry.colorCode);
                 reviewerLog.info(`Reviewing PR #${ghPr.number} (iteration ${iteration})`);
 
-                const reviewerAgent = buildReviewerAgent(apiKey, reviewerEntry, worktreeWorkspace);
+                const reviewerAgent = buildReviewerAgent(apiKey, reviewerEntry, worktreeWorkspace, gitContext);
 
                 // B6: Context-aware diff truncation
                 const MAX_DIFF_CHARS = 30_000;
@@ -577,7 +589,7 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
 
                     try {
                         await octokit.issues.createComment({
-                            owner: GITHUB_OWNER, repo: GITHUB_REPO,
+                            owner: ghOwner, repo: ghRepo,
                             issue_number: ghPr.number, body: commentParts.join('\n'),
                         });
                     } catch (commentErr: any) {
@@ -656,7 +668,7 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                     const devLog = getLogger(primaryEntry.tag, primaryEntry.colorCode);
                     devLog.info(`Fixing ${allComments.length} review comments...`);
 
-                    const fixAgent = buildDevAgent(apiKey, primaryEntry, worktreeWorkspace);
+                    const fixAgent = buildDevAgent(apiKey, primaryEntry, worktreeWorkspace, gitContext);
                     const fixMsg = [
                         contextPrompt,
                         `\n## Project Slug: ${projectSlug}`,
@@ -688,7 +700,7 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                         if (fixStatus && !fixStatus.includes('nothing to commit')) {
                             gitExec(worktreeWorkspace, `commit -m "[${projectSlug}]-[${primaryStoryId}]-fix: address review comments (iteration ${iteration})"`);
                         }
-                        gitPush(worktreeWorkspace, branchName);
+                        gitPush(worktreeWorkspace, branchName, gitContext);
                     } catch (err: any) {
                         log.error(`Fix attempt failed: ${err.message}`);
                         // B5: Don't consume the iteration if rate-limited
@@ -726,7 +738,7 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                     log.info(`Escalated dev: ${escalatedDevEntry.name} (${escalatedDevId})`);
 
                     // Escalated dev fixes CRITICALs + reviews overall quality
-                    const escalatedDev = buildDevAgent(apiKey, escalatedDevEntry, worktreeWorkspace);
+                    const escalatedDev = buildDevAgent(apiKey, escalatedDevEntry, worktreeWorkspace, gitContext);
                     const criticalComments = lastReviews.flatMap(r =>
                         r.comments.filter((c: any) => c.severity === 'critical' || c.body?.includes('[CRITICAL]'))
                     );
@@ -756,7 +768,7 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                         if (st && !st.includes('nothing to commit')) {
                             gitExec(worktreeWorkspace, `commit -m "[${projectSlug}]-[${primaryStoryId}]-fix: escalated dev fixes"`);
                         }
-                        gitPush(worktreeWorkspace, branchName);
+                        gitPush(worktreeWorkspace, branchName, gitContext);
                         log.info(`Escalated dev ${escalatedDevId} completed fixes`);
                         allTranscript.push(msg(escalatedDevId, `Escalated dev fixes applied`));
 
@@ -771,7 +783,7 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                             const escalatedReviewerLog = getLogger(`${escalatedReviewerEntry.tag} [ESCALATED REVIEW]`, escalatedReviewerEntry.colorCode);
                             escalatedReviewerLog.info(`Escalated review of PR #${ghPr.number}`);
 
-                            const escalatedReviewer = buildReviewerAgent(apiKey, escalatedReviewerEntry, worktreeWorkspace);
+                            const escalatedReviewer = buildReviewerAgent(apiKey, escalatedReviewerEntry, worktreeWorkspace, gitContext);
                             const escalatedDiff = gitExec(worktreeWorkspace, `diff ${baseBranch}...${branchName}`);
                             const escalatedReviewMsg = [
                                 `## Escalated Review — Pull Request #${ghPr.number}: ${prTitle}`,
@@ -855,10 +867,10 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                     prStatus = 'open';
                     allTranscript.push(msg('conductor', `Merge blocked: unresolvable conflicts on ${branchName}`));
                 } else {
-                    gitPush(worktreeWorkspace, branchName);
+                    gitPush(worktreeWorkspace, branchName, gitContext);
                 }
             } else {
-                gitPush(worktreeWorkspace, branchName);
+                gitPush(worktreeWorkspace, branchName, gitContext);
             }
 
             // Verify branch exists on remote before merging
@@ -871,8 +883,8 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
             if (prStatus === 'approved' || prStatus === 'open') {
                 try {
                     await octokit.pulls.merge({
-                        owner: GITHUB_OWNER,
-                        repo: GITHUB_REPO,
+                        owner: ghOwner,
+                        repo: ghRepo,
                         pull_number: ghPr.number,
                         merge_method: 'squash',
                     });
@@ -883,8 +895,8 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                     // Delete the remote feature branch
                     try {
                         await octokit.git.deleteRef({
-                            owner: GITHUB_OWNER,
-                            repo: GITHUB_REPO,
+                            owner: ghOwner,
+                            repo: ghRepo,
                             ref: `heads/${branchName}`,
                         });
                         log.info(`Deleted remote branch: ${branchName}`);

@@ -23,13 +23,15 @@ import { getPlaywrightMcpTools, closePlaywrightMcp } from '../tools/mcp/playwrig
 import {
     MAX_BUGFIX_ITERATIONS, GIT_DEFAULT_BRANCH, AGENT_RECURSION_LIMIT,
     GITHUB_TOKEN, GITHUB_OWNER, GITHUB_REPO, GIT_USER_NAME, GIT_USER_EMAIL,
+    GITHUB_PROJECT_TOKEN, GITHUB_PROJECT_OWNER,
     ARCHITECT_MODEL, PRODUCT_MANAGER_MODEL, DBA_MODEL, TEAM_LEADER_MODEL,
     DEVOPS_MODEL, CODEBASE_ANALYZER_MODEL, QA_MODEL, LLM_MODEL,
     MODEL_PRICING,
 } from '../config';
+import { createGitHubRepo, validateGitHubRepo, initializeRepoLocally } from '../utils/github-repo-manager';
 import { execSync } from 'child_process';
 import type { ProjectStateType } from './state';
-import type { PhaseName, TranscriptMessage, Bug, CodebaseAnalysis } from '../agents/_shared/base-schemas';
+import type { PhaseName, TranscriptMessage, Bug, CodebaseAnalysis, GitContext } from '../agents/_shared/base-schemas';
 import { tokenTracker, type TokenCallRecord } from '../utils/token-tracker';
 import { extractTokenUsageFromMessages } from '../utils/token-usage-extractor';
 import { generateTokenReport } from '../utils/token-report';
@@ -81,8 +83,11 @@ function gitExec(workspacePath: string, args: string): string {
     }
 }
 
-function gitPush(workspacePath: string, branchName: string): string {
-    const authUrl = `https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_OWNER}/${GITHUB_REPO}.git`;
+function gitPush(workspacePath: string, branchName: string, gitContext?: GitContext | null): string {
+    const token = gitContext?.token ?? GITHUB_TOKEN;
+    const owner = gitContext?.owner ?? GITHUB_OWNER;
+    const repo = gitContext?.repo ?? GITHUB_REPO;
+    const authUrl = `https://x-access-token:${token}@github.com/${owner}/${repo}.git`;
     return gitExec(workspacePath, `push ${authUrl} HEAD:refs/heads/${branchName}`);
 }
 
@@ -177,27 +182,120 @@ export async function intakeNode(state: ProjectStateType): Promise<Partial<Proje
     const outputPath = createRunOutputDir(state.input.systemName);
     setRunLogPath(path.join(outputPath, 'run.log'));
 
-    // Validate workspace lives inside a git repo (required for PR workflow).
-    // Walk up from workspacePath to find the nearest .git directory.
-    let gitRoot: string | null = null;
-    let search = workspacePath;
-    while (true) {
-        if (fs.existsSync(path.join(search, '.git'))) {
-            gitRoot = search;
-            break;
+    // ── Resolve GitContext based on repoTarget ───────────────────────────
+    const repoTarget = state.input.repoTarget;
+    const isSeparateRepo =
+        state.input.runType !== 'maintain' &&
+        (repoTarget?.type === 'new-repo' || repoTarget?.type === 'existing-repo');
+
+    let gitRoot: string;
+    let defaultBranch: string;
+    let gitContext: GitContext;
+
+    if (isSeparateRepo) {
+        // ── Separate repo: create or validate, initialize locally ────────
+        const projectToken = GITHUB_PROJECT_TOKEN || GITHUB_TOKEN;
+        const projectOwner = GITHUB_PROJECT_OWNER || GITHUB_OWNER;
+
+        if (!projectToken) {
+            throw new Error(
+                'No GitHub token available for project repo. ' +
+                'Set GITHUB_PROJECT_TOKEN or GITHUB_TOKEN in your environment.',
+            );
         }
-        const parent = path.dirname(search);
-        if (parent === search) break; // reached filesystem root
-        search = parent;
+        if (!projectOwner) {
+            throw new Error(
+                'No GitHub owner available for project repo. ' +
+                'Set GITHUB_PROJECT_OWNER or GITHUB_OWNER in your environment.',
+            );
+        }
+
+        const repoName = repoTarget!.repoName ?? state.input.systemName
+            .toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 100);
+
+        if (repoTarget!.type === 'new-repo') {
+            // Create a new GitHub repository
+            intakeLog.info(`Creating new GitHub repo: ${projectOwner}/${repoName}`);
+            const created = await createGitHubRepo(
+                projectToken, projectOwner, repoName, repoTarget!.isPrivate ?? true,
+            );
+            defaultBranch = created.defaultBranch;
+
+            // Initialize local workspace as a standalone git repo
+            initializeRepoLocally(workspacePath, created.cloneUrl, defaultBranch, projectToken);
+            // Fetch remote content (auto-initialized README)
+            gitExec(workspacePath, 'fetch origin');
+            // Align local branch with remote default branch
+            const resetResult = gitExec(workspacePath, `reset --hard origin/${defaultBranch}`);
+            if (resetResult.startsWith('Error:')) {
+                intakeLog.warn(`Could not reset to origin/${defaultBranch} (remote may be empty): ${resetResult}`);
+            }
+
+            intakeLog.info(`New repo created: ${created.fullName} (${created.htmlUrl})`);
+        } else {
+            // Validate an existing GitHub repository
+            intakeLog.info(`Validating existing repo: ${projectOwner}/${repoName}`);
+            const validated = await validateGitHubRepo(projectToken, projectOwner, repoName);
+            if (!validated.exists) {
+                throw new Error(
+                    `Repository ${projectOwner}/${repoName} not found or not accessible. ` +
+                    `Ensure the repo exists and GITHUB_PROJECT_TOKEN has access.`,
+                );
+            }
+            defaultBranch = validated.defaultBranch;
+
+            // Initialize local workspace with remote
+            initializeRepoLocally(workspacePath, validated.cloneUrl, defaultBranch, projectToken);
+            // Fetch remote content
+            gitExec(workspacePath, 'fetch origin');
+            // Align local branch with remote default branch
+            const resetResult = gitExec(workspacePath, `reset --hard origin/${defaultBranch}`);
+            if (resetResult.startsWith('Error:')) {
+                intakeLog.warn(`Could not reset to origin/${defaultBranch}: ${resetResult}`);
+            }
+
+            intakeLog.info(`Existing repo validated: ${validated.fullName}`);
+        }
+
+        gitRoot = workspacePath;
+        gitContext = {
+            token: projectToken,
+            owner: projectOwner,
+            repo: repoName,
+            defaultBranch,
+        };
+    } else {
+        // ── Same-repo: existing behavior ─────────────────────────────────
+        // Walk up from workspacePath to find the nearest .git directory.
+        let foundGitRoot: string | null = null;
+        let search = workspacePath;
+        while (true) {
+            if (fs.existsSync(path.join(search, '.git'))) {
+                foundGitRoot = search;
+                break;
+            }
+            const parent = path.dirname(search);
+            if (parent === search) break; // reached filesystem root
+            search = parent;
+        }
+        if (!foundGitRoot) {
+            throw new Error(
+                `Workspace is not inside a Git repository: ${workspacePath}. ` +
+                `Initialize with 'git init' in a parent directory and configure a GitHub remote before running.`
+            );
+        }
+        gitRoot = foundGitRoot;
+        defaultBranch = detectDefaultBranch(gitRoot);
+
+        gitContext = {
+            token: GITHUB_TOKEN,
+            owner: GITHUB_OWNER,
+            repo: GITHUB_REPO,
+            defaultBranch,
+        };
     }
-    if (!gitRoot) {
-        throw new Error(
-            `Workspace is not inside a Git repository: ${workspacePath}. ` +
-            `Initialize with 'git init' in a parent directory and configure a GitHub remote before running.`
-        );
-    }
-    const defaultBranch = detectDefaultBranch(gitRoot);
-    intakeLog.info(`Git repo validated. Default branch: ${defaultBranch}`);
+
+    intakeLog.info(`Git repo validated. Default branch: ${defaultBranch}, separate repo: ${isSeparateRepo}`);
 
     // ── Create or checkout the system branch (project/<system-name>) ─────
     const systemSlug = state.input.systemName
@@ -246,7 +344,7 @@ export async function intakeNode(state: ProjectStateType): Promise<Partial<Proje
         intakeLog.info(`System branch: ${systemBranch} (greenfield)`);
     }
     // Push the system branch to remote
-    const pushResult = gitPush(gitRoot, systemBranch);
+    const pushResult = gitPush(gitRoot, systemBranch, gitContext);
     if (pushResult.startsWith('Error:')) {
         intakeLog.error(`Failed to push system branch ${systemBranch}: ${pushResult}`);
     } else {
@@ -264,8 +362,9 @@ export async function intakeNode(state: ProjectStateType): Promise<Partial<Proje
         workspacePath,
         outputPath,
         systemBranch,
+        gitContext,
         phase: nextPhase as PhaseName,
-        transcript: [msg('conductor', 'intake', `Intake complete (${state.input.runType ?? 'greenfield'}). System branch: ${systemBranch}. Requirements: ${requirementsText.length} chars`)],
+        transcript: [msg('conductor', 'intake', `Intake complete (${state.input.runType ?? 'greenfield'}). System branch: ${systemBranch}. Repo: ${gitContext.owner}/${gitContext.repo}. Requirements: ${requirementsText.length} chars`)],
     };
 }
 
@@ -536,7 +635,7 @@ export async function developmentNode(state: ProjectStateType): Promise<Partial<
     const contextPrompt = devParts.join('\n');
     const projectSlug = state.systemBranch.replace(/^project\//, '');
 
-    const result = await dispatchDevelopers(apiKey, state.assignments, state.workspacePath, contextPrompt, state.systemBranch, projectSlug);
+    const result = await dispatchDevelopers(apiKey, state.assignments, state.workspacePath, contextPrompt, state.systemBranch, projectSlug, state.gitContext);
 
     devLog.info(`Development complete: ${result.fileChanges.length} file changes, ${result.pullRequests.length} PRs`);
 
@@ -646,7 +745,7 @@ export async function qaNode(state: ProjectStateType): Promise<Partial<ProjectSt
         gitExec(state.workspacePath, `commit -m "[${systemSlug}]-chore: QA unit test files"`);
         const currentBranch = gitExec(state.workspacePath, 'rev-parse --abbrev-ref HEAD');
         if (currentBranch && !currentBranch.startsWith('Error:')) {
-            gitPush(state.workspacePath, currentBranch);
+            gitPush(state.workspacePath, currentBranch, state.gitContext);
             qaLog.info(`Committed and pushed QA test files on ${currentBranch}`);
         }
     }
@@ -751,7 +850,7 @@ export async function devopsNode(state: ProjectStateType): Promise<Partial<Proje
         gitExec(state.workspacePath, `commit -m "[${devopsSlug}]-chore: DevOps configuration files"`);
         const currentBranch = gitExec(state.workspacePath, 'rev-parse --abbrev-ref HEAD');
         if (currentBranch && !currentBranch.startsWith('Error:')) {
-            gitPush(state.workspacePath, currentBranch);
+            gitPush(state.workspacePath, currentBranch, state.gitContext);
             opsLog.info(`Committed and pushed DevOps files on ${currentBranch}`);
         }
     }

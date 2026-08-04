@@ -11,6 +11,7 @@ import { ReviewOutputSchema } from './schemas/review-output.schema';
 import { createGitTools } from '../../tools/git/git-tools';
 import { createGitHubTools } from '../../tools/git/github-tools';
 import { PRINCIPAL_DEV_MODEL, SENIOR_DEV_MODEL, JUNIOR_DEV_MODEL } from '../../config';
+import type { GitContext } from '../_shared/base-schemas';
 import type { DevAgentEntry } from './registry';
 
 /** Resolve the LLM model for a reviewer agent based on rank. */
@@ -29,7 +30,7 @@ function getModelForRank(rank: DevRank): string {
  * @param entry         Developer registry entry (rank, domain, languages, etc.)
  * @param workspaceRoot The generated-project workspace directory
  */
-export function buildReviewerAgent(apiKey: string, entry: DevAgentEntry, workspaceRoot: string) {
+export function buildReviewerAgent(apiKey: string, entry: DevAgentEntry, workspaceRoot: string, gitContext?: GitContext | null) {
     const systemPrompt = buildReviewerPersona({
         rank: entry.rank,
         domain: entry.domain,
@@ -38,8 +39,8 @@ export function buildReviewerAgent(apiKey: string, entry: DevAgentEntry, workspa
     });
 
     const tools = [
-        ...createGitTools(workspaceRoot),
-        ...createGitHubTools(),
+        ...createGitTools(workspaceRoot, gitContext),
+        ...createGitHubTools(gitContext),
     ];
 
     return buildAgent(apiKey, {

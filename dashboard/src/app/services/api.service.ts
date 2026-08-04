@@ -10,12 +10,19 @@ export interface AgentEntry {
   category: string;
 }
 
+export interface RepoTarget {
+  type: 'same-repo' | 'new-repo' | 'existing-repo';
+  repoName?: string;
+  isPrivate?: boolean;
+}
+
 export interface RunRequest {
   systemName: string;
   requirementsText: string;
   mode: 'autonomous' | 'human';
   runType?: 'greenfield' | 'maintain';
   existingProjectPath?: string;
+  repoTarget?: RepoTarget;
 }
 
 export interface RunResponse {

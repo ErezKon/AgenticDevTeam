@@ -27,6 +27,7 @@ import type {
     PullRequest,
     BranchAssignment,
     TokenCallRecord,
+    GitContext,
 } from '../agents/_shared/base-schemas';
 
 // ─── Reducers ───────────────────────────────────────────────────────────────
@@ -69,6 +70,12 @@ export const ProjectState = Annotation.Root({
     systemBranch: Annotation<string>({
         reducer: replaceReducer,
         default: () => '',
+    }),
+
+    // ── Git context (multi-repo targeting) ───────────────────────────────
+    gitContext: Annotation<GitContext | null>({
+        reducer: replaceReducer,
+        default: () => null,
     }),
 
     // ── Codebase analysis (maintain mode only) ───────────────────────────

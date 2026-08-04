@@ -3,7 +3,7 @@
  */
 import { createConductor } from './graph';
 import { getLogger } from '../utils/logger';
-import type { RunInput } from '../agents/_shared/base-schemas';
+import type { RunInput, RepoTarget } from '../agents/_shared/base-schemas';
 import type { ProjectStateType } from './state';
 
 const log = getLogger('[Run]', 46);
@@ -21,6 +21,8 @@ export interface RunOptions {
     runType?: 'greenfield' | 'maintain';
     /** Absolute path to the existing project root (required for maintain mode). */
     existingProjectPath?: string;
+    /** Where the generated project should be hosted (greenfield only). */
+    repoTarget?: RepoTarget;
 }
 
 /**
@@ -41,6 +43,7 @@ export async function runAutonomous(opts: RunOptions): Promise<ProjectStateType>
             mode: 'autonomous',
             runType: opts.runType ?? 'greenfield',
             existingProjectPath: opts.existingProjectPath,
+            repoTarget: opts.repoTarget,
         },
     };
 
@@ -81,6 +84,7 @@ export async function runHumanInTheLoop(opts: RunOptions): Promise<RunSession> {
             mode: 'human',
             runType: opts.runType ?? 'greenfield',
             existingProjectPath: opts.existingProjectPath,
+            repoTarget: opts.repoTarget,
         },
     };
 

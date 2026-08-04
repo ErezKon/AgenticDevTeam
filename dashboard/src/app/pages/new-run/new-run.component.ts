@@ -2,7 +2,7 @@ import { Component } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { Router } from '@angular/router';
-import { ApiService } from '../../services/api.service';
+import { ApiService, type RepoTarget } from '../../services/api.service';
 
 @Component({
   selector: 'app-new-run',
@@ -26,6 +26,27 @@ import { ApiService } from '../../services/api.service';
           <input id="existingProjectPath" [(ngModel)]="existingProjectPath"
             placeholder="e.g. C:\\Code\\MyProject or /home/user/myproject" />
           <small class="hint">Absolute path to the existing project directory</small>
+        </div>
+
+        <div class="form-group" *ngIf="runType === 'greenfield'">
+          <label for="repoTargetType">Project Hosting</label>
+          <select id="repoTargetType" [(ngModel)]="repoTargetType">
+            <option value="same-repo">Same repository (AgenticDevTeam)</option>
+            <option value="new-repo">New GitHub repository</option>
+            <option value="existing-repo">Existing GitHub repository</option>
+          </select>
+        </div>
+
+        <div class="form-group" *ngIf="runType === 'greenfield' && (repoTargetType === 'new-repo' || repoTargetType === 'existing-repo')">
+          <label for="repoName">Repository Name</label>
+          <input id="repoName" [(ngModel)]="repoName" placeholder="e.g. my-new-project" />
+        </div>
+
+        <div class="form-group" *ngIf="runType === 'greenfield' && repoTargetType === 'new-repo'">
+          <label class="checkbox-label">
+            <input type="checkbox" [(ngModel)]="repoIsPrivate" />
+            Private repository
+          </label>
         </div>
 
         <div class="form-group">
@@ -73,6 +94,8 @@ import { ApiService } from '../../services/api.service';
     .success-msg { margin-top: 1rem; color: var(--accent-green); font-size: 0.9rem; }
     textarea { resize: vertical; min-height: 200px; }
     .hint { display: block; margin-top: 0.25rem; font-size: 0.8rem; color: var(--text-secondary); opacity: 0.7; }
+    .checkbox-label { display: flex; align-items: center; gap: 0.5rem; cursor: pointer; font-weight: 600; font-size: 0.9rem; color: var(--text-secondary); }
+    .checkbox-label input[type="checkbox"] { width: auto; margin: 0; }
   `],
 })
 export class NewRunComponent {
@@ -81,6 +104,9 @@ export class NewRunComponent {
   mode: 'autonomous' | 'human' = 'human';
   runType: 'greenfield' | 'maintain' = 'greenfield';
   existingProjectPath = '';
+  repoTargetType: 'same-repo' | 'new-repo' | 'existing-repo' = 'same-repo';
+  repoName = '';
+  repoIsPrivate = true;
   loading = false;
   error = '';
   success = false;
@@ -88,10 +114,23 @@ export class NewRunComponent {
 
   constructor(private api: ApiService, private router: Router) {}
 
+  private buildRepoTarget(): RepoTarget | undefined {
+    if (this.runType !== 'greenfield' || this.repoTargetType === 'same-repo') {
+      return undefined;
+    }
+    return {
+      type: this.repoTargetType,
+      ...(this.repoName ? { repoName: this.repoName } : {}),
+      ...(this.repoTargetType === 'new-repo' ? { isPrivate: this.repoIsPrivate } : {}),
+    };
+  }
+
   startRun() {
     this.loading = true;
     this.error = '';
     this.success = false;
+
+    const repoTarget = this.buildRepoTarget();
 
     this.api.startRun({
       systemName: this.systemName,
@@ -99,6 +138,7 @@ export class NewRunComponent {
       mode: this.mode,
       runType: this.runType,
       ...(this.runType === 'maintain' ? { existingProjectPath: this.existingProjectPath } : {}),
+      ...(repoTarget ? { repoTarget } : {}),
     }).subscribe({
       next: (res) => {
         this.loading = false;

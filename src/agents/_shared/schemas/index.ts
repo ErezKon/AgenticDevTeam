@@ -2,6 +2,7 @@
  * Barrel export for all domain schemas.
  */
 export * from './run-input.schema';
+export * from './git-context.schema';
 export * from './phase.schema';
 export * from './architecture.schema';
 export * from './tech-stack.schema';

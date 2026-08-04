@@ -20,8 +20,17 @@ import { AGENT_REGISTRY } from './agents/registry';
 import { runAutonomous, runHumanInTheLoop, type RunSession } from './conductor/run';
 import { parseRequirementsFile } from './tools/requirements/parse-requirements';
 import type { ProjectStateType } from './conductor/state';
+import type { RepoTarget } from './agents/_shared/base-schemas';
+import { GITHUB_PROJECT_OWNER, GITHUB_OWNER } from './config';
 
 const TAG = `${color256(46)}[CLI]${LogColors.RESET}`;
+
+/** Redact sensitive fields (tokens) from state before printing. */
+function redactState(state: any): any {
+    const copy = JSON.parse(JSON.stringify(state));
+    if (copy.gitContext?.token) copy.gitContext.token = '***REDACTED***';
+    return copy;
+}
 
 // ─── Readline setup ─────────────────────────────────────────────────────────
 
@@ -144,6 +153,44 @@ async function getRequirements(): Promise<{ systemName: string; requirementsText
     }
 }
 
+// ─── Repo target selection ──────────────────────────────────────────────────
+
+async function getRepoTarget(systemName: string): Promise<RepoTarget | undefined> {
+    console.log(`\n${TAG} Where should this project be hosted?`);
+    console.log('  1) Same repository (AgenticDevTeam)');
+    console.log('  2) New GitHub repository');
+    console.log('  3) Existing GitHub repository');
+
+    const choice = await ask('Choose [1-3]: ');
+
+    switch (choice) {
+        case '1':
+            return { type: 'same-repo', isPrivate: true };
+
+        case '2': {
+            const defaultName = systemName.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-');
+            const repoName = (await ask(`Repository name [${defaultName}]: `)) || defaultName;
+            const privateAnswer = await ask('Private repository? [Y/n]: ');
+            const isPrivate = !privateAnswer || privateAnswer.toLowerCase() !== 'n';
+            return { type: 'new-repo', repoName, isPrivate };
+        }
+
+        case '3': {
+            const defaultOwner = GITHUB_PROJECT_OWNER || GITHUB_OWNER;
+            const repoName = await ask('Repository name: ');
+            if (!repoName) {
+                console.log(`${TAG} Repository name is required.`);
+                return getRepoTarget(systemName);
+            }
+            return { type: 'existing-repo', repoName, isPrivate: true };
+        }
+
+        default:
+            console.log(`${TAG} Invalid choice. Defaulting to same repository.`);
+            return undefined;
+    }
+}
+
 // ─── Autonomous run ─────────────────────────────────────────────────────────
 
 async function startAutonomousRun() {
@@ -155,6 +202,9 @@ async function startAutonomousRun() {
         requirementsText = await parseRequirementsFile(reqs.requirementsDocPath);
     }
 
+    // Ask where to host the project (greenfield only)
+    const repoTarget = await getRepoTarget(reqs.systemName);
+
     console.log(`\n${TAG} Starting autonomous run for "${reqs.systemName}"...`);
     console.log(`${TAG} The full pipeline will run without interruption.\n`);
 
@@ -164,6 +214,7 @@ async function startAutonomousRun() {
             requirementsText,
             requirementsDocPath: reqs.requirementsDocPath,
             mode: 'autonomous',
+            repoTarget,
         });
 
         console.log(`\n${color256(46)}═══ Run Complete ═══${LogColors.RESET}`);
@@ -194,6 +245,9 @@ async function startHitlRun() {
         requirementsText = await parseRequirementsFile(reqs.requirementsDocPath);
     }
 
+    // Ask where to host the project (greenfield only)
+    const repoTarget = await getRepoTarget(reqs.systemName);
+
     console.log(`\n${TAG} Starting human-in-the-loop run for "${reqs.systemName}"...`);
     console.log(`${TAG} You will be asked to approve each phase before continuing.\n`);
 
@@ -204,6 +258,7 @@ async function startHitlRun() {
             requirementsText,
             requirementsDocPath: reqs.requirementsDocPath,
             mode: 'human',
+            repoTarget,
         });
     } catch (err: any) {
         console.error(`\n${TAG} ${LogColors.RED}Failed to start run: ${err.message}${LogColors.RESET}`);
@@ -269,7 +324,7 @@ async function startHitlRun() {
                 break;
             }
             case 's': {
-                console.log(JSON.stringify(state, null, 2));
+                console.log(JSON.stringify(redactState(state), null, 2));
                 break;
             }
             default:
@@ -406,7 +461,7 @@ async function startMaintainRun() {
                         break;
                     }
                     case 's': {
-                        console.log(JSON.stringify(state, null, 2));
+                        console.log(JSON.stringify(redactState(state), null, 2));
                         break;
                     }
                     default:

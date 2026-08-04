@@ -7,7 +7,7 @@
 import { MAX_CONCURRENT_DEVS, INTER_BATCH_DELAY_MS } from '../../config';
 import { getLogger } from '../../utils/logger';
 import { executePRWorkflow } from '../../conductor/pr-workflow';
-import type { Assignment, FileChange, ArtifactRef, TranscriptMessage, PhaseName, PullRequest } from '../_shared/base-schemas';
+import type { Assignment, FileChange, ArtifactRef, TranscriptMessage, PhaseName, PullRequest, GitContext } from '../_shared/base-schemas';
 import type { TokenCallRecord } from '../../utils/token-tracker';
 
 const log = getLogger('[Dispatcher]', 226);
@@ -120,6 +120,7 @@ export async function dispatchDevelopers(
     contextPrompt: string,
     baseBranch: string,
     projectSlug: string,
+    gitContext?: GitContext | null,
 ): Promise<DispatchResult> {
     const fileChanges: FileChange[] = [];
     const artifacts: ArtifactRef[] = [];
@@ -184,6 +185,7 @@ export async function dispatchDevelopers(
                     apiKey,
                     contextPrompt,
                     projectSlug,
+                    gitContext,
                 });
             });
 
