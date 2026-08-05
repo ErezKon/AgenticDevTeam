@@ -146,6 +146,10 @@ export const REVIEWER_MAX_TOOL_CALLS =
 export const AGENT_RECURSION_LIMIT =
     parseInt(process.env.AGENT_RECURSION_LIMIT ?? '30', 10);
 
+/** Max file-change entries injected into the dev context prompt. */
+export const DEV_CONTEXT_FILE_CHANGES_LIMIT =
+    parseInt(process.env.DEV_CONTEXT_FILE_CHANGES_LIMIT ?? '60', 10);
+
 /** Max parallel developer agents during fan-out. */
 export const MAX_CONCURRENT_DEVS =
     parseInt(process.env.MAX_CONCURRENT_DEVS ?? '2', 10);
@@ -171,6 +175,54 @@ export const OUTPUTS_DIR =
 /** Docker Engine host (defaults to local socket). */
 export const DOCKER_HOST =
     process.env.DOCKER_HOST ?? undefined;
+
+// ─── DevOps Verification ────────────────────────────────────────────────────
+
+/** Actually build/run Docker artifacts and health-check them after the DevOps agent finishes. */
+export const DEVOPS_VERIFY_ENABLED =
+    (process.env.DEVOPS_VERIFY_ENABLED ?? 'true') === 'true';
+
+/** Timeout (ms) for each shell step during deployment verification. */
+export const DEVOPS_VERIFY_TIMEOUT_MS =
+    parseInt(process.env.DEVOPS_VERIFY_TIMEOUT_MS ?? '600000', 10);
+
+/** First host port for mapping container EXPOSE ports during Dockerfile-mode verification. */
+export const DEVOPS_VERIFY_BASE_PORT =
+    parseInt(process.env.DEVOPS_VERIFY_BASE_PORT ?? '18080', 10);
+
+/** Number of retries for each health-check URL. */
+export const DEVOPS_HEALTH_RETRIES =
+    parseInt(process.env.DEVOPS_HEALTH_RETRIES ?? '5', 10);
+
+/** Delay (ms) between health-check retries. */
+export const DEVOPS_HEALTH_DELAY_MS =
+    parseInt(process.env.DEVOPS_HEALTH_DELAY_MS ?? '3000', 10);
+
+/** Tear down containers started by verifyDeployment during finalize. */
+export const DEVOPS_TEARDOWN =
+    (process.env.DEVOPS_TEARDOWN ?? 'true') === 'true';
+
+/** Allow E2E test failures to trigger a bugfix loop (default: false to preserve cost profile). */
+export const E2E_BUGFIX_ENABLED =
+    (process.env.E2E_BUGFIX_ENABLED ?? 'false') === 'true';
+
+// ─── Quality Gates ──────────────────────────────────────────────────────────
+
+/** Enable multi-language quality gates (install/build/lint/test) in PR workflow and QA. */
+export const QUALITY_GATES_ENABLED =
+    (process.env.QUALITY_GATES_ENABLED ?? 'true') === 'true';
+
+/** Which gate steps to run (comma-separated). */
+export const QUALITY_GATE_STEPS =
+    (process.env.QUALITY_GATE_STEPS ?? 'install,build,lint,test').split(',') as ('install' | 'build' | 'lint' | 'test')[];
+
+/** Timeout (ms) for each quality gate step (default 5 min). */
+export const QUALITY_GATE_TIMEOUT_MS =
+    parseInt(process.env.QUALITY_GATE_TIMEOUT_MS ?? '300000', 10);
+
+/** Fail the gate when a stack's toolchain is missing (default: false — missing tools produce 'skipped'). */
+export const QUALITY_GATE_STRICT_TOOLCHAIN =
+    (process.env.QUALITY_GATE_STRICT_TOOLCHAIN ?? 'false') === 'true';
 
 // ─── Playwright MCP ─────────────────────────────────────────────────────────
 

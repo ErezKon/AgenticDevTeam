@@ -13,6 +13,7 @@ export const PhaseNameSchema = z.enum([
     'qa',
     'bugfix-triage',
     'devops',
+    'e2e',
     'finalize',
 ]);
 export type PhaseName = z.infer<typeof PhaseNameSchema>;

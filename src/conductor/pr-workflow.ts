@@ -26,6 +26,8 @@ import {
     PR_TEST_INSTALL_TIMEOUT_MS, PR_TEST_TIMEOUT_MS, PR_TEST_REPAIR_ATTEMPTS,
 } from '../config';
 import { isBlockingReview, evaluateProgress, MAX_NO_PROGRESS_ITERATIONS } from './review-policy';
+import { runQualityGates, gateReportToMarkdown } from './quality-gates';
+import type { GateReport } from './quality-gates';
 import type {
     Assignment, FileChange, ArtifactRef, TranscriptMessage,
     PhaseName, PullRequest, PRReview, GitContext, TechDecision,
@@ -113,64 +115,7 @@ function slugify(text: string): string {
         .slice(0, 50);
 }
 
-/**
- * Install dependencies (once) and run the project's test script.
- *
- * Runs 5 & 6 produced a stream of `npm test` exit-code-1 failures and review
- * comments like "Cannot find module" simply because node_modules was missing.
- *
- * Returns null if no test script exists or the project is not Node-based.
- */
-function ensureDepsAndRunTests(workspacePath: string): { passed: boolean; output: string } | null {
-    const pkgPath = path.join(workspacePath, 'package.json');
-    if (!fs.existsSync(pkgPath)) return null;
-
-    let pkg: any;
-    try {
-        pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
-    } catch {
-        return null;
-    }
-
-    const testScript = pkg?.scripts?.test;
-    if (!testScript || testScript.includes('no test specified')) return null;
-
-    // Install dependencies if node_modules is missing and there are deps
-    const hasDeps = pkg.dependencies || pkg.devDependencies;
-    const nodeModulesPath = path.join(workspacePath, 'node_modules');
-    if (hasDeps && !fs.existsSync(nodeModulesPath)) {
-        log.info('Installing dependencies before running tests...');
-        try {
-            execSync('npm install --no-audit --no-fund --loglevel=error 2>&1', {
-                cwd: workspacePath,
-                encoding: 'utf-8',
-                timeout: PR_TEST_INSTALL_TIMEOUT_MS,
-                maxBuffer: 1024 * 1024 * 5,
-                env: { ...process.env, CI: 'true' },
-            });
-            log.info('Dependencies installed successfully');
-        } catch (installErr: any) {
-            const installOutput = (installErr.stdout ?? installErr.stderr ?? installErr.message ?? '').toString().trim();
-            log.warn(`npm install failed (non-fatal): ${installOutput.slice(-500)}`);
-        }
-    }
-
-    // Run the test script
-    try {
-        const result = execSync('npm test --silent 2>&1', {
-            cwd: workspacePath,
-            encoding: 'utf-8',
-            timeout: PR_TEST_TIMEOUT_MS,
-            maxBuffer: 1024 * 1024 * 2,
-            env: { ...process.env, CI: 'true', NODE_ENV: 'test' },
-        });
-        return { passed: true, output: result.trim().slice(-2000) };
-    } catch (err: any) {
-        // execSync throws on non-zero exit code
-        const output = (err.stdout ?? err.stderr ?? err.message ?? '').toString().trim();
-        return { passed: false, output: output.slice(-2000) };
-    }
-}
+// ensureDepsAndRunTests removed — replaced by runQualityGates (fixes A6)
 
 // findGitRoot imported from ../utils/git-exec
 
@@ -526,22 +471,28 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
         }
         gitPush(worktreeWorkspace, branchName, gitContext);
 
-        // ── 1a. Post-development test verification ────────────────────
-        // Install deps (once) and run project tests to detect failures early.
-        // If tests fail and PR_TEST_REPAIR_ATTEMPTS > 0, give the dev agent
-        // one repair attempt before opening the PR (Sub-Plan 5, Change 5).
-        let testResult: { passed: boolean; output: string } | null = null;
+        // ── 1a. Post-development quality gate verification (fixes A6) ──
+        // Run multi-language quality gates (install/build/lint/test) to detect
+        // failures early. If gates fail and PR_TEST_REPAIR_ATTEMPTS > 0, give
+        // the dev agent a repair attempt before opening the PR.
+        let gateReport: GateReport | null = null;
         try {
-            testResult = ensureDepsAndRunTests(worktreeWorkspace);
-            if (testResult) {
-                if (testResult.passed) {
-                    log.info(`Tests passed on branch ${branchName}`);
-                    allTranscript.push(msg('conductor', `Tests passed on branch ${branchName}`));
+            gateReport = runQualityGates(worktreeWorkspace, {
+                timeoutMs: PR_TEST_TIMEOUT_MS,
+                installTimeoutMs: PR_TEST_INSTALL_TIMEOUT_MS,
+            });
+            if (gateReport && gateReport.results.length > 0) {
+                if (gateReport.passed) {
+                    log.info(`Quality gates passed on branch ${branchName}`);
+                    allTranscript.push(msg('conductor', `Quality gates passed on branch ${branchName}`));
                 } else {
-                    log.warn(`Tests FAILED on branch ${branchName} — giving dev agent a repair attempt`);
-                    allTranscript.push(msg('conductor', `WARNING: Tests failed on branch ${branchName}:\n${testResult.output.slice(0, 500)}`));
+                    const failingSteps = gateReport.results
+                        .filter(r => !r.passed && !r.skipped)
+                        .map(r => `${r.step}: ${r.output.slice(0, 200)}`);
+                    log.warn(`Quality gates FAILED on branch ${branchName} — giving dev agent a repair attempt`);
+                    allTranscript.push(msg('conductor', `WARNING: Quality gates failed on branch ${branchName}:\n${failingSteps.join('\n').slice(0, 500)}`));
 
-                    // Automated repair: re-invoke the primary dev agent with test output
+                    // Automated repair: re-invoke the primary dev agent with failing step output
                     if (PR_TEST_REPAIR_ATTEMPTS > 0) {
                         for (let repair = 0; repair < PR_TEST_REPAIR_ATTEMPTS; repair++) {
                             try {
@@ -551,6 +502,13 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
 
                                 const repairConventions = resolveConventionFiles(primaryEntry.languages, techStack);
                                 const repairAgent = buildDevAgent(apiKey, primaryEntry, worktreeWorkspace, gitContext, baseBranch, repairConventions);
+
+                                // Feed only the failing steps to the repair agent
+                                const failDetails = gateReport.results
+                                    .filter(r => !r.passed && !r.skipped)
+                                    .map(r => `### ${r.step} (\`${r.command}\`)\n\`\`\`\n${r.output.slice(-1000)}\n\`\`\``)
+                                    .join('\n\n');
+
                                 const repairMsg = [
                                     contextPrompt,
                                     `\n## Project Slug: ${projectSlug}`,
@@ -559,12 +517,12 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                                     `\n## IMPORTANT: Workspace Context`,
                                     `Your current working directory IS the project root.`,
                                     `Do NOT prefix paths with "generated-projects/${projectSlug}/" — all file operations are relative to the project root.`,
-                                    `\n## Test Failure Output\n\n\`\`\`\n${testResult!.output.slice(-1500)}\n\`\`\``,
+                                    `\n## Failing Quality Gate Steps\n\n${failDetails}`,
                                     `\n## Instructions`,
-                                    `Fix the failing tests. Do not disable or delete tests to make them pass. Commit and push.`,
+                                    `Fix the failing tests. Do not disable or delete tests to make them pass. Do not weaken lint rules or skip build steps. Commit and push.`,
                                 ].join('\n');
 
-                                log.info(`Test repair attempt ${repair + 1}/${PR_TEST_REPAIR_ATTEMPTS}`);
+                                log.info(`Quality gate repair attempt ${repair + 1}/${PR_TEST_REPAIR_ATTEMPTS}`);
                                 const repairModel = getModelForRank(primaryEntry.rank as DevRank);
                                 const { output: repairOutput, tokenUsage: repairTokenUsage } = await invokeDevAgent(
                                     repairAgent, repairMsg, `repair-${primaryEntry.id}-${branchName}`, primaryEntry.id, repairModel,
@@ -576,26 +534,29 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                                 gitExec(worktreeWorkspace, 'add .');
                                 const repairStatus = gitExec(worktreeWorkspace, 'status --short');
                                 if (repairStatus && !repairStatus.includes('nothing to commit')) {
-                                    gitExec(worktreeWorkspace, `commit -m "[${projectSlug}]-[${primaryStoryId}]-fix: repair failing tests"`);
+                                    gitExec(worktreeWorkspace, `commit -m "[${projectSlug}]-[${primaryStoryId}]-fix: repair failing quality gates"`);
                                 }
                                 gitPush(worktreeWorkspace, branchName, gitContext);
 
-                                // Re-run tests
-                                testResult = ensureDepsAndRunTests(worktreeWorkspace);
-                                if (testResult?.passed) {
-                                    log.info(`Tests passed after repair attempt ${repair + 1}`);
-                                    allTranscript.push(msg('conductor', `Tests passed after repair attempt ${repair + 1}`));
+                                // Re-run quality gates
+                                gateReport = runQualityGates(worktreeWorkspace, {
+                                    timeoutMs: PR_TEST_TIMEOUT_MS,
+                                    installTimeoutMs: PR_TEST_INSTALL_TIMEOUT_MS,
+                                });
+                                if (gateReport?.passed) {
+                                    log.info(`Quality gates passed after repair attempt ${repair + 1}`);
+                                    allTranscript.push(msg('conductor', `Quality gates passed after repair attempt ${repair + 1}`));
                                     break;
                                 }
                             } catch (repairErr: any) {
-                                log.warn(`Test repair attempt failed (non-fatal): ${repairErr.message}`);
+                                log.warn(`Quality gate repair attempt failed (non-fatal): ${repairErr.message}`);
                             }
                         }
                     }
                 }
             }
         } catch (testErr: any) {
-            log.warn(`Post-dev test check error: ${testErr.message}`);
+            log.warn(`Post-dev quality gate error: ${testErr.message}`);
         }
 
         // ── 1b. Check for actual commits before creating PR ─────────────
@@ -633,13 +594,9 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
         // ── 2. Create GitHub PR ─────────────────────────────────────────
         const prTitle = buildPRTitle(assignments, taskType, projectSlug);
         let prBody = buildPRDescription(assignments, allFileChanges, taskType, currentState, assignments[0].devAgentId);
-        // Append test results to the PR description
-        if (testResult) {
-            if (testResult.passed) {
-                prBody += '\n\n## Tests\n\n:white_check_mark: All tests passed.';
-            } else {
-                prBody += `\n\n## Tests\n\n:warning: **Tests failed.** Review output:\n\n\`\`\`\n${testResult.output.slice(0, 1000)}\n\`\`\``;
-            }
+        // Append quality gate results to the PR description
+        if (gateReport && gateReport.results.length > 0) {
+            prBody += `\n\n## Quality Gates\n\n${gateReportToMarkdown(gateReport)}`;
         }
 
         log.info(`Creating PR: "${prTitle}"`);

@@ -120,6 +120,12 @@ export const ProjectState = Annotation.Root({
         default: () => [],
     }),
 
+    // ── Completed assignment ids (prevents bug-fix loop re-runs) ──────────
+    completedAssignmentIds: Annotation<string[]>({
+        reducer: appendReducer,
+        default: () => [],
+    }),
+
     // ── Developer outputs ────────────────────────────────────────────────
     fileChanges: Annotation<FileChange[]>({
         reducer: appendReducer,
@@ -139,11 +145,21 @@ export const ProjectState = Annotation.Root({
         reducer: appendReducer,
         default: () => [],
     }),
+    fixedBugIds: Annotation<string[]>({
+        reducer: appendReducer,
+        default: () => [],
+    }),
 
     // ── DevOps outputs ───────────────────────────────────────────────────
     devopsPlan: Annotation<DevOpsPlan | null>({
         reducer: replaceReducer,
         default: () => null,
+    }),
+
+    // ── Running containers (for teardown in finalize) ────────────────────
+    runningContainers: Annotation<string[]>({
+        reducer: replaceReducer,
+        default: () => [],
     }),
 
     // ── PR & branching ────────────────────────────────────────────────────

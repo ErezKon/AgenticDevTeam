@@ -2,11 +2,11 @@
  * Conductor Graph — the LangGraph state machine that orchestrates
  * all agents through the pipeline phases.
  *
- * Phases: intake → architect → PM → DBA → TL → development → QA → bugfix? → devops → finalize
+ * Phases: intake → architect → PM → DBA → TL → development → QA → bugfix? → devops → e2e → finalize
  */
 import { StateGraph, END } from '@langchain/langgraph';
 import { ProjectState } from './state';
-import { RUN_MODE, MAX_BUGFIX_ITERATIONS } from '../config';
+import { RUN_MODE, MAX_BUGFIX_ITERATIONS, E2E_BUGFIX_ENABLED } from '../config';
 import {
     intakeNode,
     codebaseAnalyzerNode,
@@ -18,6 +18,7 @@ import {
     qaNode,
     bugfixTriageNode,
     devopsNode,
+    e2eNode,
     finalizeNode,
 } from './nodes';
 import type { ProjectStateType } from './state';
@@ -34,11 +35,12 @@ const HITL_PHASES: PhaseName[] = [
     'development',
     'qa',
     'devops',
+    'e2e',
 ];
 
 // ─── Conditional edges ──────────────────────────────────────────────────────
 
-function afterQaRouter(state: ProjectStateType): string {
+export function afterQaRouter(state: ProjectStateType): string {
     const hasFailures = (state.testReports ?? []).some(r => r.status === 'fail');
     if (hasFailures && (state.iteration?.bugfix ?? 0) < MAX_BUGFIX_ITERATIONS) {
         return 'bugfix-triage';
@@ -46,12 +48,30 @@ function afterQaRouter(state: ProjectStateType): string {
     return 'devops';
 }
 
+/**
+ * After E2E, route to bugfix-triage only when ALL of:
+ * - E2E_BUGFIX_ENABLED is true (default false — keeps today's cost profile)
+ * - an E2E report has status === 'fail'
+ * - bugfix iterations remaining
+ *
+ * Otherwise route to finalize.
+ */
+export function afterE2eRouter(state: ProjectStateType): string {
+    if (E2E_BUGFIX_ENABLED) {
+        const hasE2eFailures = (state.testReports ?? []).some(r => r.status === 'fail');
+        if (hasE2eFailures && (state.iteration?.bugfix ?? 0) < MAX_BUGFIX_ITERATIONS) {
+            return 'bugfix-triage';
+        }
+    }
+    return 'finalize';
+}
+
 function afterBugfixRouter(state: ProjectStateType): string {
     // After bugfix triage reassigns work, go back to development
     return 'development';
 }
 
-function afterIntakeRouter(state: ProjectStateType): string {
+export function afterIntakeRouter(state: ProjectStateType): string {
     if (state.input.runType === 'maintain') {
         return 'codebase-analyzer';
     }
@@ -73,6 +93,7 @@ export function buildConductorGraph() {
         .addNode('qa', qaNode)
         .addNode('bugfix-triage', bugfixTriageNode)
         .addNode('devops', devopsNode)
+        .addNode('e2e', e2eNode)
         .addNode('finalize', finalizeNode)
 
         // Linear edges for the main pipeline
@@ -101,8 +122,14 @@ export function buildConductorGraph() {
         // After bugfix, back to development
         .addEdge('bugfix-triage', 'development')
 
-        // After devops, finalize
-        .addEdge('devops', 'finalize')
+        // After devops, E2E testing
+        .addEdge('devops', 'e2e')
+
+        // After E2E: either bugfix (if enabled and failures) or finalize
+        .addConditionalEdges('e2e', afterE2eRouter, {
+            'bugfix-triage': 'bugfix-triage',
+            'finalize': 'finalize',
+        })
 
         // Finalize is the end
         .addEdge('finalize', END);

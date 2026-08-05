@@ -1,7 +1,7 @@
 # Codebase Analyzer Mission Report
 
 **Agent**: codebase-analyzer  
-**Generated**: 2026-08-05T18:31:00.774Z
+**Generated**: 2026-08-05T19:41:22.475Z
 
 ---
 
@@ -27,10 +27,7 @@ flowchart LR
     style Browser fill:#f9f,stroke:#333,stroke-width:2px
 ```
 
-## Modules (3)
-- **frontend** (`src`): React UI components, routing (if any), and integration with the calculator engine.
-- **calculatorEngine** (`src/engine`): Pure TypeScript module that parses arithmetic expressions (including parentheses, decimals, negatives) and evaluates them using a shunting‑yard algorithm.
-- **staticServer** (`docker`): Docker configuration that builds the Vite output and serves it with Nginx.
+## Modules (0)
 
 ## Known Issues (4)
 - Source code directories (e.g., src/, docker/) are not present in the repository snapshot; analysis is based solely on documentation.

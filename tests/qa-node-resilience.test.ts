@@ -56,6 +56,19 @@ jest.mock('../src/tools/mcp/playwright-mcp', () => ({
     closePlaywrightMcp: jest.fn().mockResolvedValue(undefined),
 }));
 
+// Mock devops-verify (no Docker required in tests)
+jest.mock('../src/conductor/devops-verify', () => ({
+    verifyDeployment: jest.fn().mockResolvedValue({
+        buildStatus: 'skipped',
+        runStatus: 'skipped',
+        serviceUrls: [],
+        healthChecks: [],
+        containerNames: [],
+        logs: '',
+    }),
+    teardownDeployment: jest.fn().mockResolvedValue(undefined),
+}));
+
 // Mock retryWithBackoff to just call the function directly (no retries in tests)
 jest.mock('../src/utils/retry', () => ({
     retryWithBackoff: jest.fn(async (fn: () => Promise<any>) => fn()),
@@ -94,6 +107,7 @@ jest.mock('../src/utils/logger', () => ({
         error: jest.fn(),
     })),
     setRunLogPath: jest.fn(),
+    logToolAction: jest.fn(),
 }));
 
 // ─── Minimal state fixture ──────────────────────────────────────────────────
@@ -118,11 +132,14 @@ function makeMinimalState(overrides: Partial<ProjectStateType> = {}): ProjectSta
         userStories: [],
         tasks: [],
         assignments: [],
+        completedAssignmentIds: [],
         fileChanges: [],
         testPlan: null,
         testReports: [],
         bugs: [],
+        fixedBugIds: [],
         devopsPlan: null,
+        runningContainers: [],
         pullRequests: [],
         branchAssignments: [],
         phase: 'qa' as any,
@@ -165,8 +182,8 @@ describe('QA Node Resilience', () => {
         // devopsNode must NOT throw — it should catch the error gracefully
         const result = await devopsNode(state);
 
-        // Must still transition to finalize so the token report is written
-        expect(result.phase).toBe('finalize');
+        // Must still transition to e2e (then e2e → finalize) so the token report is written
+        expect(result.phase).toBe('e2e');
 
         // Should have a transcript entry about the failure
         expect(result.transcript).toBeDefined();

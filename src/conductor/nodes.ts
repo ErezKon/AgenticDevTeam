@@ -28,12 +28,16 @@ import {
     GITHUB_PROJECT_TOKEN, GITHUB_PROJECT_OWNER,
     ARCHITECT_MODEL, PRODUCT_MANAGER_MODEL, DBA_MODEL, TEAM_LEADER_MODEL,
     DEVOPS_MODEL, CODEBASE_ANALYZER_MODEL, QA_MODEL, LLM_MODEL,
-    MODEL_PRICING,
+    MODEL_PRICING, DEV_CONTEXT_FILE_CHANGES_LIMIT,
+    DEVOPS_VERIFY_ENABLED, DEVOPS_TEARDOWN,
 } from '../config';
 import { sanitizeMermaidLabels } from '../tools/diagram/diagram-tools';
 import { createGitHubRepo, validateGitHubRepo, initializeRepoLocally } from '../utils/github-repo-manager';
 import { gitExec, gitPush, findGitRoot } from '../utils/git-exec';
 import { syncWorkspaceToBranch, looksSourceless } from './workspace-sync';
+import { selectPendingAssignments, dedupeBugs, namespaceBugfixAssignments } from './assignment-policy';
+import { verifyDeployment, teardownDeployment } from './devops-verify';
+import { runQualityGates, gateReportToTestReport, synthesiseGateBugs } from './quality-gates';
 import { execSync } from 'child_process';
 import type { ProjectStateType } from './state';
 import type { PhaseName, TranscriptMessage, Bug, CodebaseAnalysis, GitContext } from '../agents/_shared/base-schemas';
@@ -690,17 +694,33 @@ const devLog = getLogger('[Development]', 226);
 
 export async function developmentNode(state: ProjectStateType): Promise<Partial<ProjectStateType>> {
     devLog.info(`Starting development with ${state.assignments.length} assignments...`);
+
+    // ── Filter to only pending assignments (fixes A2) ────────────────────
+    const pending = selectPendingAssignments(state.assignments, state.completedAssignmentIds);
+    devLog.info(`Development: ${pending.length} pending of ${state.assignments.length} total assignments (${state.completedAssignmentIds.length} already complete)`);
+    if (pending.length === 0) {
+        devLog.warn('No pending assignments — skipping development phase');
+        return { phase: 'qa' as PhaseName, transcript: [msg('conductor', 'development', 'No pending assignments')] };
+    }
+
     const apiKey = await getAccessToken();
 
     // Deploy coding convention files to the workspace for agents to read
     deployAllConventionsToWorkspace(state.workspacePath);
+
+    // ── Cap the fileChanges blob (fixes A2 cost) ─────────────────────────
+    const recent = state.fileChanges.slice(-DEV_CONTEXT_FILE_CHANGES_LIMIT);
+    const fileChangesSummary = recent.length > 0
+        ? `\n## Files Already Written (${state.fileChanges.length} total, showing last ${recent.length})\n\n`
+          + recent.map(c => `- ${(c as any).action ?? 'modify'} ${(c as any).path}`).join('\n')
+        : '';
 
     const devParts = [
         `## Architecture\n\n${JSON.stringify(state.architecture, null, 2)}`,
         `\n## Tech Stack\n\n${JSON.stringify(state.techStack, null, 2)}`,
         `\n## DB Design\n\n${JSON.stringify(state.dbDesign, null, 2)}`,
         `\n## User Stories\n\n${JSON.stringify(state.userStories, null, 2)}`,
-        `\n## Existing File Changes\n\n${JSON.stringify(state.fileChanges, null, 2)}`,
+        fileChangesSummary,
     ];
     if (state.codebaseAnalysis) {
         devParts.unshift(`## Existing Codebase Analysis\n\n${JSON.stringify(state.codebaseAnalysis, null, 2)}`);
@@ -709,7 +729,7 @@ export async function developmentNode(state: ProjectStateType): Promise<Partial<
     const contextPrompt = devParts.join('\n');
     const projectSlug = state.systemBranch.replace(/^project\//, '');
 
-    const result = await dispatchDevelopers(apiKey, state.assignments, state.workspacePath, contextPrompt, state.systemBranch, projectSlug, state.gitContext, state.techStack);
+    const result = await dispatchDevelopers(apiKey, pending, state.workspacePath, contextPrompt, state.systemBranch, projectSlug, state.gitContext, state.techStack, state.completedAssignmentIds);
 
     devLog.info(`Development complete: ${result.fileChanges.length} file changes, ${result.pullRequests.length} PRs`);
 
@@ -737,6 +757,7 @@ export async function developmentNode(state: ProjectStateType): Promise<Partial<
         fileChanges: result.fileChanges,
         artifacts: result.artifacts,
         pullRequests: result.pullRequests,
+        completedAssignmentIds: result.completedAssignmentIds,
         transcript: [
             ...result.transcript,
             msg('conductor', 'development', `Development phase complete: ${result.fileChanges.length} files changed, ${result.pullRequests.length} PRs merged. Sync: ${syncResult.details}`),
@@ -831,40 +852,6 @@ export async function qaNode(state: ProjectStateType): Promise<Partial<ProjectSt
         transcript.push(msg('qa-unit', 'qa', `QA Unit failed: ${err.message}`));
     }
 
-    // 7c. QA E2E — Playwright MCP testing (only if services are running)
-    let e2eReport = null;
-    let e2eArtifact = null;
-    if (state.devopsPlan?.serviceUrls && state.devopsPlan.serviceUrls.length > 0) {
-        qaLog.info('QA E2E running Playwright tests...');
-        try {
-            const mcpTools = await getPlaywrightMcpTools();
-            const qaE2eAgent = createQaE2eAgent(apiKey, mcpTools, qaConventionFiles);
-            const e2eMsg = [
-                `## Test Plan (e2e)\n\n${JSON.stringify(leadOutput.testPlan?.e2e ?? [], null, 2)}`,
-                `\n## Service URLs\n\n${JSON.stringify(state.devopsPlan.serviceUrls, null, 2)}`,
-            ].join('\n');
-            const { output: e2eOutput, tokenUsage: e2eTokenUsage } = await invokeAgent(qaE2eAgent, e2eMsg, 'qa-e2e', 'qa-e2e', 'qa', { recursionLimit: TOOL_PIPELINE_RECURSION_LIMIT });
-            if (e2eTokenUsage) qaTokenUsage.push(e2eTokenUsage);
-            e2eReport = e2eOutput.testReport;
-            if (e2eOutput.bugs) allBugs.push(...e2eOutput.bugs);
-            qaLog.info(`E2E tests: ${e2eReport?.passed ?? 0} passed, ${e2eReport?.failed ?? 0} failed`);
-
-            e2eArtifact = writeArtifact({
-                agentId: 'qa-e2e', colorCode: 118, workspacePath: state.workspacePath,
-                title: 'QA E2E — Test Report',
-                content: `## Results\n\n${JSON.stringify(e2eReport, null, 2)}`,
-            });
-            transcript.push(msg('qa-e2e', 'qa', `E2E tests: ${e2eReport?.passed ?? 0}/${e2eReport?.total ?? 0} passed`));
-            await closePlaywrightMcp();
-        } catch (err: any) {
-            qaLog.error(`E2E testing failed: ${err.message}`);
-            transcript.push(msg('qa-e2e', 'qa', `E2E testing failed: ${err.message}`));
-        }
-    } else {
-        qaLog.info('Skipping E2E tests — no running services');
-        transcript.push(msg('qa-e2e', 'qa', 'Skipped — no running services'));
-    }
-
     // Commit QA-generated files via the shared helper (includes sync + retry)
     const systemSlug = path.basename(state.workspacePath);
     commitAndPushArtifacts(
@@ -874,8 +861,39 @@ export async function qaNode(state: ProjectStateType): Promise<Partial<ProjectSt
         qaLog,
     );
 
-    const testReports = [unitOutput?.testReport, ...(e2eReport ? [e2eReport] : [])].filter(Boolean);
-    const artifacts = [...(leadArtifact ? [leadArtifact] : []), ...(unitArtifact ? [unitArtifact] : []), ...(e2eArtifact ? [e2eArtifact] : [])];
+    const testReports = [unitOutput?.testReport].filter(Boolean);
+    const artifacts = [...(leadArtifact ? [leadArtifact] : []), ...(unitArtifact ? [unitArtifact] : [])];
+
+    // ── Deterministic quality gate (fixes A6) ────────────────────────────
+    // Run the real build/lint/test pipeline and compare with the agent's
+    // self-report. The gate report drives afterQaRouter, so a hallucinated
+    // 'pass' from qa-unit can no longer suppress the bug-fix loop.
+    try {
+        const gateReport = runQualityGates(state.workspacePath);
+        const gateTestReport = gateReportToTestReport(gateReport, 'quality-gates');
+        if (gateTestReport) {
+            testReports.push(gateTestReport);
+
+            // Warn when the agent claimed pass but the gate failed
+            const agentClaimedPass = unitOutput?.testReport?.status === 'pass';
+            if (agentClaimedPass && gateTestReport.status === 'fail') {
+                qaLog.warn(`QA agent reported status='pass' but quality gates FAILED — keeping both reports (gate report drives bug-fix loop)`);
+                transcript.push(msg('quality-gates', 'qa', `WARNING: QA agent self-reported pass but quality gates failed — deterministic gate overrides`));
+            }
+
+            // Synthesise bugs for failing gate steps
+            const gateBugs = synthesiseGateBugs(gateReport);
+            if (gateBugs.length > 0) {
+                allBugs.push(...gateBugs);
+                qaLog.info(`Quality gates synthesised ${gateBugs.length} bug(s): ${gateBugs.map(b => b.id).join(', ')}`);
+            }
+
+            transcript.push(msg('quality-gates', 'qa',
+                `Quality gates: ${gateReport.passed ? 'PASSED' : 'FAILED'} — ${gateReport.stacks.join(',')} — ${gateReport.results.filter(r => !r.skipped).length} steps executed, ${gateReport.results.filter(r => !r.passed && !r.skipped).length} failed`));
+        }
+    } catch (gateErr: any) {
+        qaLog.warn(`Quality gate execution error (non-fatal): ${gateErr.message}`);
+    }
 
     return {
         testPlan: leadOutput?.testPlan,
@@ -897,7 +915,12 @@ export async function bugfixTriageNode(state: ProjectStateType): Promise<Partial
     const iteration = state.iteration.bugfix + 1;
     bugLog.info(`Bug-fix triage iteration ${iteration}/${MAX_BUGFIX_ITERATIONS}`);
 
-    const openBugs = state.bugs.filter(b => b.severity === 'critical' || b.severity === 'major');
+    // ── Deduplicate and filter already-fixed bugs ────────────────────────
+    const fixedSet = new Set(state.fixedBugIds ?? []);
+    const openBugs = dedupeBugs(state.bugs)
+        .filter(b => !fixedSet.has(b.id))
+        .filter(b => b.severity === 'critical' || b.severity === 'major');
+
     if (openBugs.length === 0) {
         bugLog.info('No critical/major bugs — skipping to DevOps');
         return {
@@ -920,13 +943,21 @@ export async function bugfixTriageNode(state: ProjectStateType): Promise<Partial
     ].join('\n');
 
     const { output, tokenUsage } = await invokeAgent(agent, userMsg, `tl-bugfix-${iteration}`, 'team-leader', 'bugfix-triage');
-    bugLog.info(`Created ${output.assignments?.length ?? 0} bugfix assignments`);
+
+    // ── Namespace bugfix assignment ids to avoid collisions ──────────────
+    const rawAssignments = output.assignments ?? [];
+    const namespacedAssignments = namespaceBugfixAssignments(rawAssignments, iteration);
+    bugLog.info(`Created ${namespacedAssignments.length} bugfix assignments (iteration ${iteration})`);
+
+    // Track which bugs are being addressed in this iteration
+    const bugIdsBeingFixed = openBugs.map(b => b.id);
 
     return {
-        assignments: output.assignments ?? [],
+        assignments: namespacedAssignments,
+        fixedBugIds: bugIdsBeingFixed,
         iteration: { bugfix: iteration },
         phase: 'development' as PhaseName,
-        transcript: [msg('team-leader', 'bugfix-triage', `Iteration ${iteration}: reassigned ${output.assignments?.length ?? 0} bug fixes`)],
+        transcript: [msg('team-leader', 'bugfix-triage', `Iteration ${iteration}: reassigned ${namespacedAssignments.length} bug fixes for ${bugIdsBeingFixed.length} bugs`)],
         tokenUsage: tokenUsage ? [tokenUsage] : [],
     };
 }
@@ -958,6 +989,7 @@ export async function devopsNode(state: ProjectStateType): Promise<Partial<Proje
     let output: any = { devops: { buildStatus: 'failed', runStatus: 'failed', serviceUrls: [], healthChecks: [] }, fileChanges: [] };
     let tokenUsage: TokenCallRecord | null = null;
     const transcript: TranscriptMessage[] = [];
+    let verifiedContainers: string[] = [];
 
     try {
         const agent = createDevOpsAgent(apiKey, state.workspacePath, devopsConventionFiles);
@@ -984,15 +1016,33 @@ export async function devopsNode(state: ProjectStateType): Promise<Partial<Proje
         transcript.push(msg('devops', 'devops', `DevOps agent failed: ${err.message}`));
     }
 
+    // ── Verify deployment for real (fixes A5) ────────────────────────────
+    if (DEVOPS_VERIFY_ENABLED) {
+        const verified = await verifyDeployment(state.workspacePath, path.basename(state.workspacePath));
+        if (verified.buildStatus !== 'skipped') {
+            if (output.devops?.buildStatus !== verified.buildStatus) {
+                opsLog.warn(`DevOps agent reported buildStatus='${output.devops?.buildStatus}' but the real build was '${verified.buildStatus}' — using the verified value`);
+            }
+            output.devops = { ...output.devops, ...verified };
+        }
+        verifiedContainers = verified.containerNames;
+        transcript.push(msg('devops', 'devops', `Deployment verification: build=${verified.buildStatus}, run=${verified.runStatus}, services=${verified.serviceUrls.length}`));
+    }
+
+    const artifactContent = [
+        `## Build Status: ${output.devops?.buildStatus ?? 'unknown'}`,
+        `## Run Status: ${output.devops?.runStatus ?? 'unknown'}`,
+        `\n## Services\n\n${(output.devops?.serviceUrls ?? []).map((s: any) => `- **${s.service}**: ${s.url}`).join('\n')}`,
+        `\n## Health Checks\n\n${(output.devops?.healthChecks ?? []).map((h: any) => `- ${h.service}: ${h.status}`).join('\n')}`,
+    ];
+    if (DEVOPS_VERIFY_ENABLED && output.devops?.logs) {
+        artifactContent.push(`\n## Verification Logs\n\n\`\`\`\n${output.devops.logs}\n\`\`\``);
+    }
+
     const artifact = writeArtifact({
         agentId: 'devops', colorCode: 33, workspacePath: state.workspacePath,
         title: 'DevOps Mission Report',
-        content: [
-            `## Build Status: ${output.devops?.buildStatus ?? 'unknown'}`,
-            `## Run Status: ${output.devops?.runStatus ?? 'unknown'}`,
-            `\n## Services\n\n${(output.devops?.serviceUrls ?? []).map((s: any) => `- **${s.service}**: ${s.url}`).join('\n')}`,
-            `\n## Health Checks\n\n${(output.devops?.healthChecks ?? []).map((h: any) => `- ${h.service}: ${h.status}`).join('\n')}`,
-        ].join('\n'),
+        content: artifactContent.join('\n'),
     });
 
     // Commit DevOps-generated files via the shared helper (includes sync + retry)
@@ -1009,11 +1059,82 @@ export async function devopsNode(state: ProjectStateType): Promise<Partial<Proje
     return {
         devopsPlan: output.devops,
         fileChanges: output.fileChanges ?? [],
-        phase: 'finalize' as PhaseName,
+        runningContainers: verifiedContainers,
+        phase: 'e2e' as PhaseName,
         artifacts: [artifact],
         transcript,
         tokenUsage: tokenUsage ? [tokenUsage] : [],
     };
+}
+
+// ─── 9b. E2E Testing ────────────────────────────────────────────────────────
+
+const e2eLog = getLogger('[QA E2E]', 118);
+
+export async function e2eNode(state: ProjectStateType): Promise<Partial<ProjectStateType>> {
+    e2eLog.info('Starting E2E testing phase...');
+    const transcript: TranscriptMessage[] = [];
+    const e2eTokenUsage: TokenCallRecord[] = [];
+
+    // Gate: only run if DevOps produced service URLs
+    if (!state.devopsPlan?.serviceUrls || state.devopsPlan.serviceUrls.length === 0) {
+        const reason = !DEVOPS_VERIFY_ENABLED
+            ? 'DEVOPS_VERIFY_ENABLED=false — no services were started'
+            : 'no service URLs from DevOps — deployment did not produce running services';
+        e2eLog.info(`Skipping E2E tests — ${reason}`);
+        transcript.push(msg('qa-e2e', 'e2e', `Skipped — ${reason}`));
+        return {
+            phase: 'finalize' as PhaseName,
+            transcript,
+            tokenUsage: e2eTokenUsage,
+        };
+    }
+
+    e2eLog.info(`Running E2E tests against ${state.devopsPlan.serviceUrls.length} service(s)...`);
+    let e2eReport = null;
+    const allBugs: Bug[] = [];
+
+    try {
+        const apiKey = await getAccessToken();
+        const qaConventionFiles = resolveConventionFiles([], state.techStack);
+        const mcpTools = await getPlaywrightMcpTools();
+        const qaE2eAgent = createQaE2eAgent(apiKey, mcpTools, qaConventionFiles);
+        const e2eMsg = [
+            `## Test Plan (e2e)\n\n${JSON.stringify(state.testPlan?.e2e ?? [], null, 2)}`,
+            `\n## Service URLs\n\n${JSON.stringify(state.devopsPlan.serviceUrls, null, 2)}`,
+        ].join('\n');
+        const { output: e2eOutput, tokenUsage: e2eTU } = await invokeAgent(qaE2eAgent, e2eMsg, 'qa-e2e', 'qa-e2e', 'e2e', { recursionLimit: TOOL_PIPELINE_RECURSION_LIMIT });
+        if (e2eTU) e2eTokenUsage.push(e2eTU);
+        e2eReport = e2eOutput.testReport;
+        if (e2eOutput.bugs) allBugs.push(...e2eOutput.bugs);
+        e2eLog.info(`E2E tests: ${e2eReport?.passed ?? 0} passed, ${e2eReport?.failed ?? 0} failed`);
+
+        const e2eArtifact = writeArtifact({
+            agentId: 'qa-e2e', colorCode: 118, workspacePath: state.workspacePath,
+            title: 'QA E2E — Test Report',
+            content: `## Results\n\n${JSON.stringify(e2eReport, null, 2)}`,
+        });
+        transcript.push(msg('qa-e2e', 'e2e', `E2E tests: ${e2eReport?.passed ?? 0}/${e2eReport?.total ?? 0} passed`));
+        await closePlaywrightMcp();
+
+        return {
+            testReports: e2eReport ? [e2eReport] : [],
+            bugs: allBugs,
+            artifacts: [e2eArtifact],
+            phase: 'finalize' as PhaseName,
+            transcript,
+            tokenUsage: e2eTokenUsage,
+        };
+    } catch (err: any) {
+        e2eLog.error(`E2E testing failed: ${err.message}`);
+        if (err?.stack) e2eLog.error(err.stack);
+        transcript.push(msg('qa-e2e', 'e2e', `E2E testing failed: ${err.message}`));
+        return {
+            phase: 'finalize' as PhaseName,
+            transcript,
+            tokenUsage: e2eTokenUsage,
+        };
+    }
 }
 
 // ─── 10. Finalize ───────────────────────────────────────────────────────────
@@ -1022,6 +1143,16 @@ const finalLog = getLogger('[Finalize]', 46);
 
 export async function finalizeNode(state: ProjectStateType): Promise<Partial<ProjectStateType>> {
     finalLog.info('Finalizing run...');
+
+    // ── Tear down containers started by deployment verification ──────────
+    if (DEVOPS_TEARDOWN && state.runningContainers && state.runningContainers.length > 0) {
+        try {
+            await teardownDeployment(state.workspacePath, state.runningContainers);
+            finalLog.info(`Tore down ${state.runningContainers.length} container(s)`);
+        } catch (err: any) {
+            finalLog.warn(`Container teardown failed: ${err.message}`);
+        }
+    }
 
     // ── Mark run as completed ────────────────────────────────────────────
     tokenTracker.setRunStatus('completed');
