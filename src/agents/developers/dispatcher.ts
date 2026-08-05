@@ -9,7 +9,7 @@ import { getLogger } from '../../utils/logger';
 import { executePRWorkflow } from '../../conductor/pr-workflow';
 import { completedIdsFromPullRequests } from '../../conductor/assignment-policy';
 import { getDevAgent } from './registry';
-import type { Assignment, FileChange, ArtifactRef, TranscriptMessage, PhaseName, PullRequest, GitContext, TechDecision } from '../_shared/base-schemas';
+import type { Assignment, FileChange, ArtifactRef, TranscriptMessage, PhaseName, PullRequest, GitContext, TechDecision, UserStory } from '../_shared/base-schemas';
 import type { TokenCallRecord } from '../../utils/token-tracker';
 
 const log = getLogger('[Dispatcher]', 226);
@@ -166,6 +166,7 @@ export async function dispatchDevelopers(
     gitContext?: GitContext | null,
     techStack?: TechDecision[],
     completedAssignmentIds?: string[],
+    userStories?: UserStory[],
 ): Promise<DispatchResult> {
     const fileChanges: FileChange[] = [];
     const artifacts: ArtifactRef[] = [];
@@ -237,6 +238,7 @@ export async function dispatchDevelopers(
                     projectSlug,
                     gitContext,
                     techStack,
+                    userStories,
                 });
             });
 

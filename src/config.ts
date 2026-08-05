@@ -206,6 +206,31 @@ export const DEVOPS_TEARDOWN =
 export const E2E_BUGFIX_ENABLED =
     (process.env.E2E_BUGFIX_ENABLED ?? 'false') === 'true';
 
+// ─── Agent Output Validation ────────────────────────────────────────────────
+
+/** Number of repair attempts when agent output fails schema validation (0 disables). */
+export const AGENT_OUTPUT_REPAIR_ATTEMPTS =
+    parseInt(process.env.AGENT_OUTPUT_REPAIR_ATTEMPTS ?? '1', 10);
+
+// ─── Context Budget ─────────────────────────────────────────────────────────
+
+/** Use compact summarisers instead of raw JSON.stringify dumps (default: true).
+ *  Set to false to restore the old verbatim behaviour for A/B testing. */
+export const CONTEXT_COMPACT =
+    (process.env.CONTEXT_COMPACT ?? 'true') === 'true';
+
+/** Hard character budget for assembled context per agent prompt. */
+export const CONTEXT_MAX_CHARS =
+    parseInt(process.env.CONTEXT_MAX_CHARS ?? '24000', 10);
+
+/** Max characters for clipped descriptions in architecture summaries. */
+export const CONTEXT_MAX_DESC_CHARS =
+    parseInt(process.env.CONTEXT_MAX_DESC_CHARS ?? '200', 10);
+
+/** Strip deep description fields from injected JSON Schema to save tokens (default: true). */
+export const RESPONSE_SCHEMA_COMPACT =
+    (process.env.RESPONSE_SCHEMA_COMPACT ?? 'true') === 'true';
+
 // ─── Quality Gates ──────────────────────────────────────────────────────────
 
 /** Enable multi-language quality gates (install/build/lint/test) in PR workflow and QA. */

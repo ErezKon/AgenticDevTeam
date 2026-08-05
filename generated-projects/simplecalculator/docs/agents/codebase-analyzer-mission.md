@@ -1,19 +1,19 @@
 # Codebase Analyzer Mission Report
 
 **Agent**: codebase-analyzer  
-**Generated**: 2026-08-05T19:41:22.475Z
+**Generated**: 2026-08-05T20:15:29.365Z
 
 ---
 
 ## Project: Calculator Web App (web app)
 
-## Languages: TypeScript, HTML, CSS
+## Languages: 
 
-## Frameworks: React, Vite, Jest, Docker, Nginx
+## Frameworks: 
 
 ## Architecture: client-server (static web app)
 
-A single‑page React UI runs in the browser and uses a pure TypeScript calculator engine module for expression parsing and evaluation. The built assets are served as static files by an Nginx container. Development uses Vite for fast bundling, Jest for unit testing, and GitHub Actions for CI/CD.
+A single‑page React UI (intended) runs in the browser and uses a TypeScript calculator engine. Assets are served statically by Nginx in a Docker container. Development uses Vite for bundling and Jest for testing.
 
 ```mermaid
 flowchart LR

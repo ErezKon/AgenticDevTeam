@@ -24,13 +24,18 @@ import {
     GIT_USER_NAME, GIT_USER_EMAIL,
     PRINCIPAL_DEV_MODEL, SENIOR_DEV_MODEL, JUNIOR_DEV_MODEL,
     PR_TEST_INSTALL_TIMEOUT_MS, PR_TEST_TIMEOUT_MS, PR_TEST_REPAIR_ATTEMPTS,
+    CONTEXT_COMPACT,
 } from '../config';
+import { storiesForIds } from './context-builder';
 import { isBlockingReview, evaluateProgress, MAX_NO_PROGRESS_ITERATIONS } from './review-policy';
 import { runQualityGates, gateReportToMarkdown } from './quality-gates';
+import { parseAgentJson, validateAgentOutput } from '../utils/structured-output';
+import { DeveloperOutputSchema } from '../agents/developers/schemas/dev-output.schema';
+import { ReviewOutputSchema } from '../agents/developers/schemas/review-output.schema';
 import type { GateReport } from './quality-gates';
 import type {
     Assignment, FileChange, ArtifactRef, TranscriptMessage,
-    PhaseName, PullRequest, PRReview, GitContext, TechDecision,
+    PhaseName, PullRequest, PRReview, GitContext, TechDecision, UserStory,
 } from '../agents/_shared/base-schemas';
 import type { DeveloperOutput } from '../agents/developers/schemas/dev-output.schema';
 import type { ReviewOutput } from '../agents/developers/schemas/review-output.schema';
@@ -55,6 +60,9 @@ export interface PRWorkflowInput {
     projectSlug: string;
     gitContext?: GitContext | null;
     techStack?: TechDecision[];
+    /** User stories from the PM — when present, only the stories for this branch's
+     *  assignments are injected into the dev prompt (fixes A8: every dev got all stories). */
+    userStories?: UserStory[];
 }
 
 export interface PRWorkflowResult {
@@ -221,29 +229,17 @@ async function invokeDevAgent(
         }
 
         const raw = typeof last.content === 'string' ? last.content : JSON.stringify(last.content);
-        try {
-            return { output: JSON.parse(raw), tokenUsage };
-        } catch {
-            // Try extracting JSON from markdown code fence
-            const match = raw.match(/```(?:json)?\s*([\s\S]*?)```/);
-            if (match) {
-                try {
-                    return { output: JSON.parse(match[1].trim()), tokenUsage };
-                } catch {
-                    // Fall through to error below
-                }
-            }
-            // Try extracting any JSON object from the response
-            const objMatch = raw.match(/\{[\s\S]*\}/);
-            if (objMatch) {
-                try {
-                    return { output: JSON.parse(objMatch[0]), tokenUsage };
-                } catch {
-                    // Fall through to error below
-                }
-            }
-            throw new Error(`Invalid JSON output from dev agent: ${raw.slice(0, 200)}`);
+        const parseResult = parseAgentJson(raw);
+        if (!parseResult.ok) {
+            throw new Error(`Invalid JSON output from dev agent: ${parseResult.error}`);
         }
+
+        // Validate against DeveloperOutputSchema — log issues but return the object
+        const validation = validateAgentOutput(DeveloperOutputSchema, parseResult.value);
+        if (!validation.ok) {
+            log.warn(`Dev agent ${agentId} output schema issues:\n${validation.issues}`);
+        }
+        return { output: (validation.ok ? validation.value : parseResult.value) as DeveloperOutput, tokenUsage };
     }, `dev-${threadSuffix}`);
 }
 
@@ -284,27 +280,18 @@ async function invokeReviewerAgent(
         }
 
         const raw = typeof last.content === 'string' ? last.content : JSON.stringify(last.content);
-        try {
-            return { output: JSON.parse(raw), tokenUsage };
-        } catch {
-            const match = raw.match(/```(?:json)?\s*([\s\S]*?)```/);
-            if (match) {
-                try {
-                    return { output: JSON.parse(match[1].trim()), tokenUsage };
-                } catch {
-                    // Fall through
-                }
-            }
-            const objMatch = raw.match(/\{[\s\S]*\}/);
-            if (objMatch) {
-                try {
-                    return { output: JSON.parse(objMatch[0]), tokenUsage };
-                } catch {
-                    // Fall through
-                }
-            }
-            throw new Error(`Invalid JSON output from reviewer agent: ${raw.slice(0, 200)}`);
+        const parseResult = parseAgentJson(raw);
+        if (!parseResult.ok) {
+            throw new Error(`Invalid JSON output from reviewer agent: ${parseResult.error}`);
         }
+
+        // Validate against ReviewOutputSchema — log issues, default to approved on garbage
+        const validation = validateAgentOutput(ReviewOutputSchema, parseResult.value);
+        if (!validation.ok) {
+            log.warn(`Reviewer ${agentId} output schema issues (defaulting to approved):\n${validation.issues}`);
+            return { output: { status: 'approved', summary: `Reviewer returned invalid schema: ${validation.issues}`, comments: [] }, tokenUsage };
+        }
+        return { output: validation.value as ReviewOutput, tokenUsage };
     }, `review-${threadSuffix}`);
 }
 
@@ -339,7 +326,7 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
     const {
         branchName, baseBranch, assignments, reviewerAgentIds, taskType,
         workspacePath, apiKey, contextPrompt, currentState, projectSlug, gitContext,
-        techStack,
+        techStack, userStories,
     } = input;
 
     // Resolve owner/repo from gitContext (falls back to config constants)
@@ -422,8 +409,15 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                 `Assignment ${a.id} [${a.priority}/${a.complexity}]: ${a.description}`
             ).join('\n\n');
 
+            // Build the per-branch story section (fixes A8: every dev got all stories)
+            const branchStoryIds = [...new Set(devAssignments.map(a => a.storyId).filter(Boolean))] as string[];
+            const storySection = (CONTEXT_COMPACT && userStories?.length && branchStoryIds.length)
+                ? `\n## User Stories for This Branch\n\n${storiesForIds(userStories, branchStoryIds)}`
+                : '';
+
             const message = [
                 contextPrompt,
+                storySection,
                 `\n## Project Slug: ${projectSlug}`,
                 `\n## Your Branch: ${branchName}`,
                 `\nYou are already on this branch. Do NOT create or switch branches — your workspace is isolated for this branch.`,

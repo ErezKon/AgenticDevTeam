@@ -30,6 +30,8 @@ import {
     DEVOPS_MODEL, CODEBASE_ANALYZER_MODEL, QA_MODEL, LLM_MODEL,
     MODEL_PRICING, DEV_CONTEXT_FILE_CHANGES_LIMIT,
     DEVOPS_VERIFY_ENABLED, DEVOPS_TEARDOWN,
+    AGENT_OUTPUT_REPAIR_ATTEMPTS,
+    CONTEXT_COMPACT, CONTEXT_MAX_CHARS,
 } from '../config';
 import { sanitizeMermaidLabels } from '../tools/diagram/diagram-tools';
 import { createGitHubRepo, validateGitHubRepo, initializeRepoLocally } from '../utils/github-repo-manager';
@@ -38,6 +40,26 @@ import { syncWorkspaceToBranch, looksSourceless } from './workspace-sync';
 import { selectPendingAssignments, dedupeBugs, namespaceBugfixAssignments } from './assignment-policy';
 import { verifyDeployment, teardownDeployment } from './devops-verify';
 import { runQualityGates, gateReportToTestReport, synthesiseGateBugs } from './quality-gates';
+import {
+    summariseArchitecture, summariseTechStack, summariseDbDesign,
+    summariseStories, storiesForIds, summariseTasks,
+    summariseFileChanges, summariseCodebaseAnalysis,
+    buildContext, recordContextChars, getContextStats,
+} from './context-builder';
+import type { ContextSection } from './context-builder';
+import {
+    parseAgentJson, validateAgentOutput, buildRepairMessage,
+    getValidationStats, logValidationStats,
+    _recordValidated, _recordRepaired, _recordFailed,
+} from '../utils/structured-output';
+import { z } from 'zod';
+import { CodebaseAnalysisSchema } from '../agents/_shared/base-schemas';
+import { ArchitectOutputSchema } from '../agents/architect/schemas/architect-output.schema';
+import { ProductManagerOutputSchema } from '../agents/product-manager/schemas/pm-output.schema';
+import { DbaOutputSchema } from '../agents/dba/schemas/dba-output.schema';
+import { TeamLeaderOutputSchema } from '../agents/team-leader/schemas/tl-output.schema';
+import { QaLeadOutputSchema, QaUnitOutputSchema, QaE2eOutputSchema } from '../agents/qa/schemas/qa-output.schema';
+import { DevOpsOutputSchema } from '../agents/devops/schemas/devops-output.schema';
 import { execSync } from 'child_process';
 import type { ProjectStateType } from './state';
 import type { PhaseName, TranscriptMessage, Bug, CodebaseAnalysis, GitContext } from '../agents/_shared/base-schemas';
@@ -149,16 +171,19 @@ function getModelForAgent(agentId: string): string {
     return modelMap[agentId] ?? LLM_MODEL;
 }
 
+const invokeLog = getLogger('[InvokeAgent]', 183);
+
 async function invokeAgent(
     agent: any, userMessage: string, threadSuffix: string,
     agentId: string, phase: string,
-    opts?: { recursionLimit?: number },
+    opts?: { recursionLimit?: number; schema?: z.ZodTypeAny },
 ): Promise<{ output: any; tokenUsage: TokenCallRecord | null }> {
     const recursionLimit = opts?.recursionLimit ?? PIPELINE_RECURSION_LIMIT;
     return retryWithBackoff(async () => {
+        const threadId = `conductor-${threadSuffix}-${Date.now()}`;
         const result = await agent.invoke(
             { messages: [{ role: 'user', content: userMessage }] },
-            { configurable: { thread_id: `conductor-${threadSuffix}-${Date.now()}` }, recursionLimit },
+            { configurable: { thread_id: threadId }, recursionLimit },
         );
 
         // Extract per-invocation token usage from messages (complementary to callback tracking)
@@ -168,23 +193,62 @@ async function invokeAgent(
         const last = result.messages[result.messages.length - 1];
         if (typeof last.content !== 'string') return { output: last.content, tokenUsage };
 
-        // Try direct JSON parse first
+        // Extract JSON from the response using the shared parser
         const raw = last.content.trim();
-        try { return { output: JSON.parse(raw), tokenUsage }; } catch { /* fall through */ }
-
-        // Try to extract JSON from markdown code blocks or raw braces
-        const codeBlock = raw.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
-        if (codeBlock) {
-            try { return { output: JSON.parse(codeBlock[1].trim()), tokenUsage }; } catch { /* fall through */ }
-        }
-        const braces = raw.match(/(\{[\s\S]*\})/);
-        if (braces) {
-            try { return { output: JSON.parse(braces[1]), tokenUsage }; } catch { /* fall through */ }
+        const parseResult = parseAgentJson(raw);
+        if (!parseResult.ok) {
+            throw new SyntaxError(
+                `Agent "${threadSuffix}" did not return valid JSON. ${parseResult.error}`
+            );
         }
 
-        throw new SyntaxError(
-            `Agent "${threadSuffix}" did not return valid JSON. Response starts with: ${raw.substring(0, 200)}`
-        );
+        let parsed = parseResult.value;
+
+        // ── Schema validation with repair loop (fixes A7) ────────────────
+        if (opts?.schema) {
+            _recordValidated();
+            const validation = validateAgentOutput(opts.schema, parsed);
+            if (validation.ok) {
+                return { output: validation.value, tokenUsage };
+            }
+
+            // Attempt repair: re-invoke the agent with the issue summary
+            invokeLog.warn(`Agent "${threadSuffix}" output failed schema validation:\n${validation.issues}`);
+            for (let attempt = 0; attempt < AGENT_OUTPUT_REPAIR_ATTEMPTS; attempt++) {
+                invokeLog.info(`Repair attempt ${attempt + 1}/${AGENT_OUTPUT_REPAIR_ATTEMPTS} for "${threadSuffix}"...`);
+                const repairMsg = buildRepairMessage(validation.issues, userMessage);
+                const repairResult = await agent.invoke(
+                    { messages: [{ role: 'user', content: repairMsg }] },
+                    { configurable: { thread_id: threadId }, recursionLimit },
+                );
+                const repairLast = repairResult.messages[repairResult.messages.length - 1];
+                if (typeof repairLast.content !== 'string') {
+                    // Non-string content — try validating it directly
+                    const rv = validateAgentOutput(opts.schema, repairLast.content);
+                    if (rv.ok) {
+                        _recordRepaired();
+                        invokeLog.info(`Agent "${threadSuffix}" repaired on attempt ${attempt + 1}`);
+                        return { output: rv.value, tokenUsage };
+                    }
+                    continue;
+                }
+                const repairParse = parseAgentJson(repairLast.content.trim());
+                if (!repairParse.ok) continue;
+                const rv = validateAgentOutput(opts.schema, repairParse.value);
+                if (rv.ok) {
+                    _recordRepaired();
+                    invokeLog.info(`Agent "${threadSuffix}" repaired on attempt ${attempt + 1}`);
+                    return { output: rv.value, tokenUsage };
+                }
+            }
+
+            // All repair attempts failed — log ERROR and return the unvalidated object
+            _recordFailed();
+            invokeLog.error(`Agent "${threadSuffix}" output still invalid after ${AGENT_OUTPUT_REPAIR_ATTEMPTS} repair attempt(s):\n${validation.issues}`);
+            return { output: parsed, tokenUsage };
+        }
+
+        return { output: parsed, tokenUsage };
     }, threadSuffix);
 }
 
@@ -422,7 +486,7 @@ export async function codebaseAnalyzerNode(state: ProjectStateType): Promise<Par
     contextParts.push(`## Task\n\nAnalyze the codebase at the workspace root and produce a comprehensive CodebaseAnalysis.`);
 
     const userMsg = contextParts.join('\n\n');
-    const { output, tokenUsage } = await invokeAgent(agent, userMsg, 'codebase-analyzer', 'codebase-analyzer', 'codebase-analyzer', { recursionLimit: TOOL_PIPELINE_RECURSION_LIMIT });
+    const { output, tokenUsage } = await invokeAgent(agent, userMsg, 'codebase-analyzer', 'codebase-analyzer', 'codebase-analyzer', { recursionLimit: TOOL_PIPELINE_RECURSION_LIMIT, schema: CodebaseAnalysisSchema });
 
     analyzerLog.info(`Analysis complete: ${output.modules?.length ?? 0} modules, ${output.primaryLanguages?.length ?? 0} languages`);
     analyzerLog.info(`Architecture: ${output.architecture?.style ?? 'unknown'}`);
@@ -475,13 +539,27 @@ export async function architectNode(state: ProjectStateType): Promise<Partial<Pr
     const apiKey = await getAccessToken();
     const agent = createArchitectAgent(apiKey);
 
-    const userMsgParts = [`## System Requirements\n\n${state.input.requirementsText}`];
-    if (state.codebaseAnalysis) {
-        userMsgParts.unshift(`## Existing Codebase Analysis\n\n${JSON.stringify(state.codebaseAnalysis, null, 2)}`);
-        userMsgParts.push(`\n## NOTE: This is MAINTAIN mode. Design CHANGES to the existing system, not a new system from scratch.`);
+    let userMsg: string;
+    if (CONTEXT_COMPACT) {
+        const sections: ContextSection[] = [
+            { title: 'System Requirements', body: state.input.requirementsText, priority: 1 },
+        ];
+        if (state.codebaseAnalysis) {
+            sections.unshift({ title: 'Existing Codebase Analysis', body: summariseCodebaseAnalysis(state.codebaseAnalysis), priority: 2 });
+            sections.push({ title: 'NOTE', body: 'This is MAINTAIN mode. Design CHANGES to the existing system, not a new system from scratch.', priority: 1 });
+        }
+        userMsg = buildContext(sections, CONTEXT_MAX_CHARS);
+    } else {
+        const userMsgParts = [`## System Requirements\n\n${state.input.requirementsText}`];
+        if (state.codebaseAnalysis) {
+            userMsgParts.unshift(`## Existing Codebase Analysis\n\n${JSON.stringify(state.codebaseAnalysis, null, 2)}`);
+            userMsgParts.push(`\n## NOTE: This is MAINTAIN mode. Design CHANGES to the existing system, not a new system from scratch.`);
+        }
+        userMsg = userMsgParts.join('\n');
     }
-    const userMsg = userMsgParts.join('\n');
-    const { output, tokenUsage } = await invokeAgent(agent, userMsg, 'architect', 'architect', 'architect');
+    archLog.info(`Context [architect]: ${userMsg.length} chars`);
+    recordContextChars('architect', userMsg.length);
+    const { output, tokenUsage } = await invokeAgent(agent, userMsg, 'architect', 'architect', 'architect', { schema: ArchitectOutputSchema });
 
     archLog.info(`Architecture: ${output.architecture?.components?.length ?? 0} components`);
     archLog.info(`Tech decisions: ${output.techStack?.length ?? 0}`);
@@ -529,19 +607,36 @@ export async function productManagerNode(state: ProjectStateType): Promise<Parti
     const apiKey = await getAccessToken();
     const agent = createProductManagerAgent(apiKey);
 
-    const pmParts = [
-        `## Architecture\n\n${JSON.stringify(state.architecture, null, 2)}`,
-        `\n## Tech Stack\n\n${JSON.stringify(state.techStack, null, 2)}`,
-        `\n## Epics\n\n${JSON.stringify(state.epics, null, 2)}`,
-        `\n## Original Requirements\n\n${state.input.requirementsText}`,
-    ];
-    if (state.codebaseAnalysis) {
-        pmParts.unshift(`## Existing Codebase Analysis\n\n${JSON.stringify(state.codebaseAnalysis, null, 2)}`);
-        pmParts.push(`\n## NOTE: This is MAINTAIN mode. Create stories/tasks for CHANGES to the existing system.`);
+    let userMsg: string;
+    if (CONTEXT_COMPACT) {
+        const sections: ContextSection[] = [
+            { title: 'Architecture', body: summariseArchitecture(state.architecture), priority: 2 },
+            { title: 'Tech Stack', body: summariseTechStack(state.techStack), priority: 2 },
+            { title: 'Epics', body: JSON.stringify(state.epics, null, 2), priority: 1 },
+            { title: 'Original Requirements', body: state.input.requirementsText, priority: 1 },
+        ];
+        if (state.codebaseAnalysis) {
+            sections.unshift({ title: 'Existing Codebase Analysis', body: summariseCodebaseAnalysis(state.codebaseAnalysis), priority: 3 });
+            sections.push({ title: 'NOTE', body: 'This is MAINTAIN mode. Create stories/tasks for CHANGES to the existing system.', priority: 1 });
+        }
+        userMsg = buildContext(sections, CONTEXT_MAX_CHARS);
+    } else {
+        const pmParts = [
+            `## Architecture\n\n${JSON.stringify(state.architecture, null, 2)}`,
+            `\n## Tech Stack\n\n${JSON.stringify(state.techStack, null, 2)}`,
+            `\n## Epics\n\n${JSON.stringify(state.epics, null, 2)}`,
+            `\n## Original Requirements\n\n${state.input.requirementsText}`,
+        ];
+        if (state.codebaseAnalysis) {
+            pmParts.unshift(`## Existing Codebase Analysis\n\n${JSON.stringify(state.codebaseAnalysis, null, 2)}`);
+            pmParts.push(`\n## NOTE: This is MAINTAIN mode. Create stories/tasks for CHANGES to the existing system.`);
+        }
+        userMsg = pmParts.join('\n');
     }
-    const userMsg = pmParts.join('\n');
+    pmLog.info(`Context [product-manager]: ${userMsg.length} chars`);
+    recordContextChars('product-manager', userMsg.length);
 
-    const { output, tokenUsage } = await invokeAgent(agent, userMsg, 'pm', 'product-manager', 'product-manager');
+    const { output, tokenUsage } = await invokeAgent(agent, userMsg, 'pm', 'product-manager', 'product-manager', { schema: ProductManagerOutputSchema });
     pmLog.info(`Stories: ${output.userStories?.length ?? 0}, Tasks: ${output.tasks?.length ?? 0}`);
 
     const artifact = writeArtifact({
@@ -584,19 +679,36 @@ export async function dbaNode(state: ProjectStateType): Promise<Partial<ProjectS
     const apiKey = await getAccessToken();
     const agent = createDbaAgent(apiKey);
 
-    const dbaParts = [
-        `## Architecture\n\n${JSON.stringify(state.architecture, null, 2)}`,
-        `\n## Tech Stack\n\n${JSON.stringify(state.techStack, null, 2)}`,
-        `\n## User Stories\n\n${JSON.stringify(state.userStories, null, 2)}`,
-        `\n## Tasks\n\n${JSON.stringify(state.tasks, null, 2)}`,
-    ];
-    if (state.codebaseAnalysis) {
-        dbaParts.unshift(`## Existing Codebase Analysis\n\n${JSON.stringify(state.codebaseAnalysis, null, 2)}`);
-        dbaParts.push(`\n## NOTE: This is MAINTAIN mode. Design only the DB CHANGES needed, not the full schema from scratch.`);
+    let userMsg: string;
+    if (CONTEXT_COMPACT) {
+        const sections: ContextSection[] = [
+            { title: 'Architecture', body: summariseArchitecture(state.architecture), priority: 3 },
+            { title: 'Tech Stack', body: summariseTechStack(state.techStack), priority: 2 },
+            { title: 'User Stories', body: summariseStories(state.userStories), priority: 2 },
+            { title: 'Tasks', body: summariseTasks(state.tasks), priority: 3 },
+        ];
+        if (state.codebaseAnalysis) {
+            sections.unshift({ title: 'Existing Codebase Analysis', body: summariseCodebaseAnalysis(state.codebaseAnalysis), priority: 3 });
+            sections.push({ title: 'NOTE', body: 'This is MAINTAIN mode. Design only the DB CHANGES needed, not the full schema from scratch.', priority: 1 });
+        }
+        userMsg = buildContext(sections, CONTEXT_MAX_CHARS);
+    } else {
+        const dbaParts = [
+            `## Architecture\n\n${JSON.stringify(state.architecture, null, 2)}`,
+            `\n## Tech Stack\n\n${JSON.stringify(state.techStack, null, 2)}`,
+            `\n## User Stories\n\n${JSON.stringify(state.userStories, null, 2)}`,
+            `\n## Tasks\n\n${JSON.stringify(state.tasks, null, 2)}`,
+        ];
+        if (state.codebaseAnalysis) {
+            dbaParts.unshift(`## Existing Codebase Analysis\n\n${JSON.stringify(state.codebaseAnalysis, null, 2)}`);
+            dbaParts.push(`\n## NOTE: This is MAINTAIN mode. Design only the DB CHANGES needed, not the full schema from scratch.`);
+        }
+        userMsg = dbaParts.join('\n');
     }
-    const userMsg = dbaParts.join('\n');
+    dbaLog.info(`Context [dba]: ${userMsg.length} chars`);
+    recordContextChars('dba', userMsg.length);
 
-    const { output, tokenUsage } = await invokeAgent(agent, userMsg, 'dba', 'dba', 'dba');
+    const { output, tokenUsage } = await invokeAgent(agent, userMsg, 'dba', 'dba', 'dba', { schema: DbaOutputSchema });
     dbaLog.info(`DB engine: ${output.dbDesign?.engine}, Entities: ${output.dbDesign?.entities?.length ?? 0}`);
 
     const artifact = writeArtifact({
@@ -641,21 +753,40 @@ export async function teamLeaderNode(state: ProjectStateType): Promise<Partial<P
 
     const projectSlug = state.systemBranch.replace(/^project\//, '');
 
-    const tlParts = [
-        `## Architecture\n\n${JSON.stringify(state.architecture, null, 2)}`,
-        `\n## Tech Stack\n\n${JSON.stringify(state.techStack, null, 2)}`,
-        `\n## DB Design\n\n${JSON.stringify(state.dbDesign, null, 2)}`,
-        `\n## User Stories\n\n${JSON.stringify(state.userStories, null, 2)}`,
-        `\n## Tasks\n\n${JSON.stringify(state.tasks, null, 2)}`,
-        `\n## Project Slug: ${projectSlug}\nUse this slug as the prefix for all branch names (e.g., "${projectSlug}/feature/US-001-description").`,
-    ];
-    if (state.codebaseAnalysis) {
-        tlParts.unshift(`## Existing Codebase Analysis\n\n${JSON.stringify(state.codebaseAnalysis, null, 2)}`);
-        tlParts.push(`\n## NOTE: This is MAINTAIN mode. Assignments may involve modifying existing files.`);
+    let userMsg: string;
+    if (CONTEXT_COMPACT) {
+        const sections: ContextSection[] = [
+            { title: 'Architecture', body: summariseArchitecture(state.architecture), priority: 2 },
+            { title: 'Tech Stack', body: summariseTechStack(state.techStack), priority: 2 },
+            { title: 'DB Design', body: summariseDbDesign(state.dbDesign, 'compact'), priority: 3 },
+            { title: 'User Stories', body: summariseStories(state.userStories), priority: 1 },
+            { title: 'Tasks', body: summariseTasks(state.tasks), priority: 1 },
+            { title: 'Project Slug', body: `${projectSlug}\nUse this slug as the prefix for all branch names (e.g., "${projectSlug}/feature/US-001-description").`, priority: 1 },
+        ];
+        if (state.codebaseAnalysis) {
+            sections.unshift({ title: 'Existing Codebase Analysis', body: summariseCodebaseAnalysis(state.codebaseAnalysis), priority: 3 });
+            sections.push({ title: 'NOTE', body: 'This is MAINTAIN mode. Assignments may involve modifying existing files.', priority: 1 });
+        }
+        userMsg = buildContext(sections, CONTEXT_MAX_CHARS);
+    } else {
+        const tlParts = [
+            `## Architecture\n\n${JSON.stringify(state.architecture, null, 2)}`,
+            `\n## Tech Stack\n\n${JSON.stringify(state.techStack, null, 2)}`,
+            `\n## DB Design\n\n${JSON.stringify(state.dbDesign, null, 2)}`,
+            `\n## User Stories\n\n${JSON.stringify(state.userStories, null, 2)}`,
+            `\n## Tasks\n\n${JSON.stringify(state.tasks, null, 2)}`,
+            `\n## Project Slug: ${projectSlug}\nUse this slug as the prefix for all branch names (e.g., "${projectSlug}/feature/US-001-description").`,
+        ];
+        if (state.codebaseAnalysis) {
+            tlParts.unshift(`## Existing Codebase Analysis\n\n${JSON.stringify(state.codebaseAnalysis, null, 2)}`);
+            tlParts.push(`\n## NOTE: This is MAINTAIN mode. Assignments may involve modifying existing files.`);
+        }
+        userMsg = tlParts.join('\n');
     }
-    const userMsg = tlParts.join('\n');
+    tlLog.info(`Context [team-leader]: ${userMsg.length} chars`);
+    recordContextChars('team-leader', userMsg.length);
 
-    const { output, tokenUsage } = await invokeAgent(agent, userMsg, 'tl', 'team-leader', 'team-leader');
+    const { output, tokenUsage } = await invokeAgent(agent, userMsg, 'tl', 'team-leader', 'team-leader', { schema: TeamLeaderOutputSchema });
     tlLog.info(`Assignments: ${output.assignments?.length ?? 0}`);
 
     const artifact = writeArtifact({
@@ -708,28 +839,46 @@ export async function developmentNode(state: ProjectStateType): Promise<Partial<
     // Deploy coding convention files to the workspace for agents to read
     deployAllConventionsToWorkspace(state.workspacePath);
 
-    // ── Cap the fileChanges blob (fixes A2 cost) ─────────────────────────
-    const recent = state.fileChanges.slice(-DEV_CONTEXT_FILE_CHANGES_LIMIT);
-    const fileChangesSummary = recent.length > 0
-        ? `\n## Files Already Written (${state.fileChanges.length} total, showing last ${recent.length})\n\n`
-          + recent.map(c => `- ${(c as any).action ?? 'modify'} ${(c as any).path}`).join('\n')
-        : '';
+    let contextPrompt: string;
+    if (CONTEXT_COMPACT) {
+        // Build the shared context sections (stories are added per-branch in the dispatcher)
+        const sections: ContextSection[] = [
+            { title: 'Architecture', body: summariseArchitecture(state.architecture), priority: 2 },
+            { title: 'Tech Stack', body: summariseTechStack(state.techStack), priority: 1 },
+            { title: 'DB Design', body: summariseDbDesign(state.dbDesign, 'compact'), priority: 3 },
+            { title: 'Files Already Written', body: summariseFileChanges(state.fileChanges, DEV_CONTEXT_FILE_CHANGES_LIMIT), priority: 3 },
+        ];
+        if (state.codebaseAnalysis) {
+            sections.unshift({ title: 'Existing Codebase Analysis', body: summariseCodebaseAnalysis(state.codebaseAnalysis), priority: 3 });
+            sections.push({ title: 'NOTE', body: 'This is MAINTAIN mode. Modify existing files where appropriate rather than creating new ones.', priority: 1 });
+        }
+        contextPrompt = buildContext(sections, CONTEXT_MAX_CHARS);
+    } else {
+        // ── Cap the fileChanges blob (fixes A2 cost) ─────────────────────────
+        const recent = state.fileChanges.slice(-DEV_CONTEXT_FILE_CHANGES_LIMIT);
+        const fileChangesSummary = recent.length > 0
+            ? `\n## Files Already Written (${state.fileChanges.length} total, showing last ${recent.length})\n\n`
+              + recent.map(c => `- ${(c as any).action ?? 'modify'} ${(c as any).path}`).join('\n')
+            : '';
 
-    const devParts = [
-        `## Architecture\n\n${JSON.stringify(state.architecture, null, 2)}`,
-        `\n## Tech Stack\n\n${JSON.stringify(state.techStack, null, 2)}`,
-        `\n## DB Design\n\n${JSON.stringify(state.dbDesign, null, 2)}`,
-        `\n## User Stories\n\n${JSON.stringify(state.userStories, null, 2)}`,
-        fileChangesSummary,
-    ];
-    if (state.codebaseAnalysis) {
-        devParts.unshift(`## Existing Codebase Analysis\n\n${JSON.stringify(state.codebaseAnalysis, null, 2)}`);
-        devParts.push(`\n## NOTE: This is MAINTAIN mode. Modify existing files where appropriate rather than creating new ones.`);
+        const devParts = [
+            `## Architecture\n\n${JSON.stringify(state.architecture, null, 2)}`,
+            `\n## Tech Stack\n\n${JSON.stringify(state.techStack, null, 2)}`,
+            `\n## DB Design\n\n${JSON.stringify(state.dbDesign, null, 2)}`,
+            `\n## User Stories\n\n${JSON.stringify(state.userStories, null, 2)}`,
+            fileChangesSummary,
+        ];
+        if (state.codebaseAnalysis) {
+            devParts.unshift(`## Existing Codebase Analysis\n\n${JSON.stringify(state.codebaseAnalysis, null, 2)}`);
+            devParts.push(`\n## NOTE: This is MAINTAIN mode. Modify existing files where appropriate rather than creating new ones.`);
+        }
+        contextPrompt = devParts.join('\n');
     }
-    const contextPrompt = devParts.join('\n');
+    devLog.info(`Context [development]: ${contextPrompt.length} chars`);
+    recordContextChars('development', contextPrompt.length);
     const projectSlug = state.systemBranch.replace(/^project\//, '');
 
-    const result = await dispatchDevelopers(apiKey, pending, state.workspacePath, contextPrompt, state.systemBranch, projectSlug, state.gitContext, state.techStack, state.completedAssignmentIds);
+    const result = await dispatchDevelopers(apiKey, pending, state.workspacePath, contextPrompt, state.systemBranch, projectSlug, state.gitContext, state.techStack, state.completedAssignmentIds, state.userStories);
 
     devLog.info(`Development complete: ${result.fileChanges.length} file changes, ${result.pullRequests.length} PRs`);
 
@@ -800,13 +949,26 @@ export async function qaNode(state: ProjectStateType): Promise<Partial<ProjectSt
     let leadArtifact: any = null;
     try {
         const qaLeadAgent = createQaLeadAgent(apiKey);
-        const leadMsg = [
-            `## Architecture\n\n${JSON.stringify(state.architecture, null, 2)}`,
-            `\n## User Stories\n\n${JSON.stringify(state.userStories, null, 2)}`,
-            `\n## Tech Stack\n\n${JSON.stringify(state.techStack, null, 2)}`,
-            `\n## DB Design\n\n${JSON.stringify(state.dbDesign, null, 2)}`,
-        ].join('\n');
-        const r = await invokeAgent(qaLeadAgent, leadMsg, 'qa-lead', 'qa-lead', 'qa');
+        let leadMsg: string;
+        if (CONTEXT_COMPACT) {
+            const sections: ContextSection[] = [
+                { title: 'Architecture', body: summariseArchitecture(state.architecture), priority: 2 },
+                { title: 'Tech Stack', body: summariseTechStack(state.techStack), priority: 2 },
+                { title: 'DB Design', body: summariseDbDesign(state.dbDesign, 'compact'), priority: 3 },
+                { title: 'Test Plan', body: JSON.stringify(state.testPlan ?? { unit: [], integration: [], e2e: [] }, null, 2), priority: 1 },
+            ];
+            leadMsg = buildContext(sections, CONTEXT_MAX_CHARS);
+        } else {
+            leadMsg = [
+                `## Architecture\n\n${JSON.stringify(state.architecture, null, 2)}`,
+                `\n## User Stories\n\n${JSON.stringify(state.userStories, null, 2)}`,
+                `\n## Tech Stack\n\n${JSON.stringify(state.techStack, null, 2)}`,
+                `\n## DB Design\n\n${JSON.stringify(state.dbDesign, null, 2)}`,
+            ].join('\n');
+        }
+        qaLog.info(`Context [qa-lead]: ${leadMsg.length} chars`);
+        recordContextChars('qa', leadMsg.length);
+        const r = await invokeAgent(qaLeadAgent, leadMsg, 'qa-lead', 'qa-lead', 'qa', { schema: QaLeadOutputSchema });
         leadOutput = r.output;
         if (r.tokenUsage) qaTokenUsage.push(r.tokenUsage);
         qaLog.info(`Test plan: ${leadOutput.testPlan?.unit?.length ?? 0} unit, ${leadOutput.testPlan?.e2e?.length ?? 0} e2e`);
@@ -829,12 +991,24 @@ export async function qaNode(state: ProjectStateType): Promise<Partial<ProjectSt
     let unitArtifact: any = null;
     try {
         const qaUnitAgent = createQaUnitAgent(apiKey, state.workspacePath, qaConventionFiles);
-        const unitMsg = [
-            `## Test Plan (unit + integration)\n\n${JSON.stringify({ unit: leadOutput.testPlan?.unit ?? [], integration: leadOutput.testPlan?.integration ?? [] }, null, 2)}`,
-            `\n## Architecture\n\n${JSON.stringify(state.architecture, null, 2)}`,
-            `\n## Tech Stack\n\n${JSON.stringify(state.techStack, null, 2)}`,
-        ].join('\n');
-        const r = await invokeAgent(qaUnitAgent, unitMsg, 'qa-unit', 'qa-unit', 'qa', { recursionLimit: TOOL_PIPELINE_RECURSION_LIMIT });
+        let unitMsg: string;
+        if (CONTEXT_COMPACT) {
+            const sections: ContextSection[] = [
+                { title: 'Test Plan (unit + integration)', body: JSON.stringify({ unit: leadOutput.testPlan?.unit ?? [], integration: leadOutput.testPlan?.integration ?? [] }, null, 2), priority: 1 },
+                { title: 'Architecture', body: summariseArchitecture(state.architecture), priority: 2 },
+                { title: 'Tech Stack', body: summariseTechStack(state.techStack), priority: 2 },
+            ];
+            unitMsg = buildContext(sections, CONTEXT_MAX_CHARS);
+        } else {
+            unitMsg = [
+                `## Test Plan (unit + integration)\n\n${JSON.stringify({ unit: leadOutput.testPlan?.unit ?? [], integration: leadOutput.testPlan?.integration ?? [] }, null, 2)}`,
+                `\n## Architecture\n\n${JSON.stringify(state.architecture, null, 2)}`,
+                `\n## Tech Stack\n\n${JSON.stringify(state.techStack, null, 2)}`,
+            ].join('\n');
+        }
+        qaLog.info(`Context [qa-unit]: ${unitMsg.length} chars`);
+        recordContextChars('qa', unitMsg.length);
+        const r = await invokeAgent(qaUnitAgent, unitMsg, 'qa-unit', 'qa-unit', 'qa', { recursionLimit: TOOL_PIPELINE_RECURSION_LIMIT, schema: QaUnitOutputSchema });
         unitOutput = r.output;
         if (r.tokenUsage) qaTokenUsage.push(r.tokenUsage);
         qaLog.info(`Unit tests: ${unitOutput.testReport?.passed ?? 0} passed, ${unitOutput.testReport?.failed ?? 0} failed`);
@@ -934,15 +1108,29 @@ export async function bugfixTriageNode(state: ProjectStateType): Promise<Partial
     const apiKey = await getAccessToken();
     const agent = createTeamLeaderAgent(apiKey);
 
-    const userMsg = [
-        `## Bug-fix Triage — Iteration ${iteration}`,
-        `\n## Open Bugs\n\n${JSON.stringify(openBugs, null, 2)}`,
-        `\n## Architecture\n\n${JSON.stringify(state.architecture, null, 2)}`,
-        `\n## Existing Assignments\n\n${JSON.stringify(state.assignments, null, 2)}`,
-        `\n\nPlease create NEW assignments to fix these bugs. Assign each bug to the most appropriate developer.`,
-    ].join('\n');
+    let userMsg: string;
+    if (CONTEXT_COMPACT) {
+        const sections: ContextSection[] = [
+            { title: `Bug-fix Triage — Iteration ${iteration}`, body: '', priority: 1 },
+            { title: 'Open Bugs', body: JSON.stringify(openBugs, null, 2), priority: 1 },
+            { title: 'Architecture', body: summariseArchitecture(state.architecture), priority: 2 },
+            { title: 'Existing Assignments', body: state.assignments.map(a => `- ${a.id} [${a.devAgentId}]: ${a.description?.slice(0, 100)}`).join('\n'), priority: 3 },
+            { title: 'Instructions', body: 'Please create NEW assignments to fix these bugs. Assign each bug to the most appropriate developer.', priority: 1 },
+        ];
+        userMsg = buildContext(sections, CONTEXT_MAX_CHARS);
+    } else {
+        userMsg = [
+            `## Bug-fix Triage — Iteration ${iteration}`,
+            `\n## Open Bugs\n\n${JSON.stringify(openBugs, null, 2)}`,
+            `\n## Architecture\n\n${JSON.stringify(state.architecture, null, 2)}`,
+            `\n## Existing Assignments\n\n${JSON.stringify(state.assignments, null, 2)}`,
+            `\n\nPlease create NEW assignments to fix these bugs. Assign each bug to the most appropriate developer.`,
+        ].join('\n');
+    }
+    bugLog.info(`Context [bugfix-triage]: ${userMsg.length} chars`);
+    recordContextChars('bugfix-triage', userMsg.length);
 
-    const { output, tokenUsage } = await invokeAgent(agent, userMsg, `tl-bugfix-${iteration}`, 'team-leader', 'bugfix-triage');
+    const { output, tokenUsage } = await invokeAgent(agent, userMsg, `tl-bugfix-${iteration}`, 'team-leader', 'bugfix-triage', { schema: TeamLeaderOutputSchema });
 
     // ── Namespace bugfix assignment ids to avoid collisions ──────────────
     const rawAssignments = output.assignments ?? [];
@@ -994,19 +1182,36 @@ export async function devopsNode(state: ProjectStateType): Promise<Partial<Proje
     try {
         const agent = createDevOpsAgent(apiKey, state.workspacePath, devopsConventionFiles);
 
-        const devopsParts = [
-            `## Architecture\n\n${JSON.stringify(state.architecture, null, 2)}`,
-            `\n## Tech Stack\n\n${JSON.stringify(state.techStack, null, 2)}`,
-            `\n## DB Design\n\n${JSON.stringify(state.dbDesign, null, 2)}`,
-            `\n## File Changes\n\n${JSON.stringify(state.fileChanges, null, 2)}`,
-        ];
-        if (state.codebaseAnalysis) {
-            devopsParts.unshift(`## Existing Codebase Analysis\n\n${JSON.stringify(state.codebaseAnalysis, null, 2)}`);
-            devopsParts.push(`\n## NOTE: This is MAINTAIN mode. Update existing Docker/K8s configs rather than creating from scratch.`);
+        let userMsg: string;
+        if (CONTEXT_COMPACT) {
+            const sections: ContextSection[] = [
+                { title: 'Architecture', body: summariseArchitecture(state.architecture), priority: 2 },
+                { title: 'Tech Stack', body: summariseTechStack(state.techStack), priority: 1 },
+                { title: 'DB Design', body: summariseDbDesign(state.dbDesign, 'compact'), priority: 3 },
+                { title: 'File Changes', body: summariseFileChanges(state.fileChanges, DEV_CONTEXT_FILE_CHANGES_LIMIT), priority: 3 },
+            ];
+            if (state.codebaseAnalysis) {
+                sections.unshift({ title: 'Existing Codebase Analysis', body: summariseCodebaseAnalysis(state.codebaseAnalysis), priority: 3 });
+                sections.push({ title: 'NOTE', body: 'This is MAINTAIN mode. Update existing Docker/K8s configs rather than creating from scratch.', priority: 1 });
+            }
+            userMsg = buildContext(sections, CONTEXT_MAX_CHARS);
+        } else {
+            const devopsParts = [
+                `## Architecture\n\n${JSON.stringify(state.architecture, null, 2)}`,
+                `\n## Tech Stack\n\n${JSON.stringify(state.techStack, null, 2)}`,
+                `\n## DB Design\n\n${JSON.stringify(state.dbDesign, null, 2)}`,
+                `\n## File Changes\n\n${JSON.stringify(state.fileChanges, null, 2)}`,
+            ];
+            if (state.codebaseAnalysis) {
+                devopsParts.unshift(`## Existing Codebase Analysis\n\n${JSON.stringify(state.codebaseAnalysis, null, 2)}`);
+                devopsParts.push(`\n## NOTE: This is MAINTAIN mode. Update existing Docker/K8s configs rather than creating from scratch.`);
+            }
+            userMsg = devopsParts.join('\n');
         }
-        const userMsg = devopsParts.join('\n');
+        opsLog.info(`Context [devops]: ${userMsg.length} chars`);
+        recordContextChars('devops', userMsg.length);
 
-        const r = await invokeAgent(agent, userMsg, 'devops', 'devops', 'devops', { recursionLimit: TOOL_PIPELINE_RECURSION_LIMIT });
+        const r = await invokeAgent(agent, userMsg, 'devops', 'devops', 'devops', { recursionLimit: TOOL_PIPELINE_RECURSION_LIMIT, schema: DevOpsOutputSchema });
         output = r.output;
         tokenUsage = r.tokenUsage;
         opsLog.info(`Build: ${output.devops?.buildStatus}, Run: ${output.devops?.runStatus}`);
@@ -1103,7 +1308,7 @@ export async function e2eNode(state: ProjectStateType): Promise<Partial<ProjectS
             `## Test Plan (e2e)\n\n${JSON.stringify(state.testPlan?.e2e ?? [], null, 2)}`,
             `\n## Service URLs\n\n${JSON.stringify(state.devopsPlan.serviceUrls, null, 2)}`,
         ].join('\n');
-        const { output: e2eOutput, tokenUsage: e2eTU } = await invokeAgent(qaE2eAgent, e2eMsg, 'qa-e2e', 'qa-e2e', 'e2e', { recursionLimit: TOOL_PIPELINE_RECURSION_LIMIT });
+        const { output: e2eOutput, tokenUsage: e2eTU } = await invokeAgent(qaE2eAgent, e2eMsg, 'qa-e2e', 'qa-e2e', 'e2e', { recursionLimit: TOOL_PIPELINE_RECURSION_LIMIT, schema: QaE2eOutputSchema });
         if (e2eTU) e2eTokenUsage.push(e2eTU);
         e2eReport = e2eOutput.testReport;
         if (e2eOutput.bugs) allBugs.push(...e2eOutput.bugs);
@@ -1184,10 +1389,31 @@ export async function finalizeNode(state: ProjectStateType): Promise<Partial<Pro
     summary.push(
         `Requests: ${throttle.total}, rate-limited: ${throttle.rateLimited}, total cooldown: ${(throttle.cooldownMsTotal / 1000).toFixed(0)}s`,
     );
+    summary.push('');
+    summary.push(`── Output Validation ──`);
+    const valStats = getValidationStats();
+    summary.push(
+        `Validated: ${valStats.validated}, repaired: ${valStats.repaired}, failed: ${valStats.failed}`,
+    );
+    summary.push('');
+    summary.push(`── Context ──`);
+    const ctxStats = getContextStats();
+    const ctxPhases = Object.entries(ctxStats);
+    if (ctxPhases.length > 0) {
+        const totalCtx = ctxPhases.reduce((sum, [, chars]) => sum + chars, 0);
+        summary.push(`Total context chars sent: ${totalCtx.toLocaleString()}`);
+        for (const [phase, chars] of ctxPhases) {
+            summary.push(`  ${phase}: ${chars.toLocaleString()} chars`);
+        }
+        summary.push(`Compact mode: ${CONTEXT_COMPACT ? 'enabled' : 'disabled'}`);
+    } else {
+        summary.push('No context stats recorded');
+    }
     const summaryText = summary.join('\n');
 
     finalLog.info(`\n${summaryText}`);
     logThrottleStats();
+    logValidationStats();
 
     // Write final summary artifact
     writeArtifact({
