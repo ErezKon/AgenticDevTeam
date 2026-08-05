@@ -100,6 +100,10 @@ export const RUN_MODE: 'autonomous' | 'human' =
 export const MAX_BUGFIX_ITERATIONS =
     parseInt(process.env.MAX_BUGFIX_ITERATIONS ?? '3', 10);
 
+/** Allow a hard reset to origin/<branch> when ff/rebase both fail during workspace sync. */
+export const WORKSPACE_SYNC_ALLOW_RESET =
+    (process.env.WORKSPACE_SYNC_ALLOW_RESET ?? 'true') === 'true';
+
 /**
  * LangGraph recursion limits per agent type.
  *

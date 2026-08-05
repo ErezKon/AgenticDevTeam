@@ -24,7 +24,7 @@ import { getPlaywrightMcpTools, closePlaywrightMcp } from '../tools/mcp/playwrig
 import {
     MAX_BUGFIX_ITERATIONS, GIT_DEFAULT_BRANCH, PIPELINE_RECURSION_LIMIT,
     TOOL_PIPELINE_RECURSION_LIMIT,
-    GITHUB_TOKEN, GITHUB_OWNER, GITHUB_REPO, GIT_USER_NAME, GIT_USER_EMAIL,
+    GITHUB_TOKEN, GITHUB_OWNER, GITHUB_REPO,
     GITHUB_PROJECT_TOKEN, GITHUB_PROJECT_OWNER,
     ARCHITECT_MODEL, PRODUCT_MANAGER_MODEL, DBA_MODEL, TEAM_LEADER_MODEL,
     DEVOPS_MODEL, CODEBASE_ANALYZER_MODEL, QA_MODEL, LLM_MODEL,
@@ -32,6 +32,8 @@ import {
 } from '../config';
 import { sanitizeMermaidLabels } from '../tools/diagram/diagram-tools';
 import { createGitHubRepo, validateGitHubRepo, initializeRepoLocally } from '../utils/github-repo-manager';
+import { gitExec, gitPush, findGitRoot } from '../utils/git-exec';
+import { syncWorkspaceToBranch, looksSourceless } from './workspace-sync';
 import { execSync } from 'child_process';
 import type { ProjectStateType } from './state';
 import type { PhaseName, TranscriptMessage, Bug, CodebaseAnalysis, GitContext } from '../agents/_shared/base-schemas';
@@ -70,30 +72,7 @@ function detectDefaultBranch(workspacePath: string): string {
     return GIT_DEFAULT_BRANCH;
 }
 
-function gitExec(workspacePath: string, args: string): string {
-    try {
-        return execSync(`git ${args}`, {
-            cwd: workspacePath, encoding: 'utf-8',
-            timeout: 30_000, maxBuffer: 1024 * 1024 * 5,
-            env: {
-                ...process.env,
-                GIT_TERMINAL_PROMPT: '0', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null',
-                GIT_AUTHOR_NAME: GIT_USER_NAME, GIT_AUTHOR_EMAIL: GIT_USER_EMAIL,
-                GIT_COMMITTER_NAME: GIT_USER_NAME, GIT_COMMITTER_EMAIL: GIT_USER_EMAIL,
-            },
-        }).trim();
-    } catch (err: any) {
-        return `Error: ${err.stderr?.toString() ?? err.message}`.trim();
-    }
-}
-
-function gitPush(workspacePath: string, branchName: string, gitContext?: GitContext | null): string {
-    const token = gitContext?.token ?? GITHUB_TOKEN;
-    const owner = gitContext?.owner ?? GITHUB_OWNER;
-    const repo = gitContext?.repo ?? GITHUB_REPO;
-    const authUrl = `https://x-access-token:${token}@github.com/${owner}/${repo}.git`;
-    return gitExec(workspacePath, `push ${authUrl} HEAD:refs/heads/${branchName}`);
-}
+// gitExec, gitPush, findGitRoot imported from ../utils/git-exec
 
 function msg(agentId: string, phase: PhaseName, message: string): TranscriptMessage {
     return { timestamp: ts(), agentId, phase, message };
@@ -103,6 +82,9 @@ function msg(agentId: string, phase: PhaseName, message: string): TranscriptMess
  * Stage, commit, and push any new/modified files in the workspace.
  * Used by planning agents (architect, PM) that produce doc artifacts
  * but don't go through the PR workflow.
+ *
+ * Syncs with origin before committing, and retries the push once after
+ * a sync if the first push fails (non-fast-forward after squash merges).
  */
 function commitAndPushArtifacts(
     workspacePath: string,
@@ -110,16 +92,37 @@ function commitAndPushArtifacts(
     gitContext?: GitContext | null,
     logger?: ReturnType<typeof getLogger>,
 ): void {
+    // Resolve git root for sync operations
+    let gitRoot: string;
+    try {
+        gitRoot = findGitRoot(workspacePath);
+    } catch {
+        gitRoot = workspacePath;
+    }
+
+    // Sync before committing to avoid non-fast-forward pushes
+    const currentBranch = gitExec(gitRoot, 'rev-parse --abbrev-ref HEAD');
+    if (currentBranch && !currentBranch.startsWith('Error:')) {
+        syncWorkspaceToBranch(gitRoot, currentBranch, gitContext);
+    }
+
     gitExec(workspacePath, 'add .');
     const status = gitExec(workspacePath, 'status --short');
     if (!status || status.includes('nothing to commit')) return;
 
     gitExec(workspacePath, `commit -m "${commitMessage}"`);
-    const currentBranch = gitExec(workspacePath, 'rev-parse --abbrev-ref HEAD');
     if (currentBranch && !currentBranch.startsWith('Error:')) {
         const pushResult = gitPush(workspacePath, currentBranch, gitContext);
         if (pushResult.startsWith('Error:')) {
-            logger?.error?.(`Failed to push artifacts: ${pushResult}`);
+            // Retry once: sync again then push
+            logger?.warn?.(`Push failed, retrying after sync: ${pushResult}`);
+            syncWorkspaceToBranch(gitRoot, currentBranch, gitContext);
+            const retryResult = gitPush(workspacePath, currentBranch, gitContext);
+            if (retryResult.startsWith('Error:')) {
+                logger?.error?.(`Failed to push artifacts after retry: ${retryResult}`);
+            } else {
+                logger?.info?.(`Committed and pushed artifacts on ${currentBranch} (after retry)`);
+            }
         } else {
             logger?.info?.(`Committed and pushed artifacts on ${currentBranch}`);
         }
@@ -305,25 +308,14 @@ export async function intakeNode(state: ProjectStateType): Promise<Partial<Proje
         };
     } else {
         // ── Same-repo: existing behavior ─────────────────────────────────
-        // Walk up from workspacePath to find the nearest .git directory.
-        let foundGitRoot: string | null = null;
-        let search = workspacePath;
-        while (true) {
-            if (fs.existsSync(path.join(search, '.git'))) {
-                foundGitRoot = search;
-                break;
-            }
-            const parent = path.dirname(search);
-            if (parent === search) break; // reached filesystem root
-            search = parent;
-        }
-        if (!foundGitRoot) {
+        try {
+            gitRoot = findGitRoot(workspacePath);
+        } catch {
             throw new Error(
                 `Workspace is not inside a Git repository: ${workspacePath}. ` +
                 `Initialize with 'git init' in a parent directory and configure a GitHub remote before running.`
             );
         }
-        gitRoot = foundGitRoot;
         defaultBranch = detectDefaultBranch(gitRoot);
 
         gitContext = {
@@ -721,13 +713,33 @@ export async function developmentNode(state: ProjectStateType): Promise<Partial<
 
     devLog.info(`Development complete: ${result.fileChanges.length} file changes, ${result.pullRequests.length} PRs`);
 
+    // ── Sync workspace to merged system branch (fixes A1) ────────────────
+    let gitRoot: string;
+    try {
+        gitRoot = findGitRoot(state.workspacePath);
+    } catch {
+        gitRoot = state.workspacePath;
+    }
+    const syncResult = syncWorkspaceToBranch(gitRoot, state.systemBranch, state.gitContext);
+    devLog.info(`Workspace synced to origin/${state.systemBranch}: ${syncResult.details}`);
+
+    // Warn if the workspace still looks sourceless after sync
+    const lsFiles = gitExec(gitRoot, 'ls-files');
+    if (!lsFiles.startsWith('Error:')) {
+        const files = lsFiles.split('\n').filter(Boolean);
+        if (looksSourceless(files)) {
+            devLog.error(`WARNING: Workspace appears sourceless after sync — QA and DevOps will see no application code. Files: ${files.length}`);
+            result.transcript.push(msg('conductor', 'development', `ERROR: Workspace is sourceless after development sync — PR merges may not have landed`));
+        }
+    }
+
     return {
         fileChanges: result.fileChanges,
         artifacts: result.artifacts,
         pullRequests: result.pullRequests,
         transcript: [
             ...result.transcript,
-            msg('conductor', 'development', `Development phase complete: ${result.fileChanges.length} files changed, ${result.pullRequests.length} PRs merged`),
+            msg('conductor', 'development', `Development phase complete: ${result.fileChanges.length} files changed, ${result.pullRequests.length} PRs merged. Sync: ${syncResult.details}`),
         ],
         phase: 'qa' as PhaseName,
         tokenUsage: result.tokenUsage ?? [],
@@ -743,6 +755,16 @@ export async function qaNode(state: ProjectStateType): Promise<Partial<ProjectSt
     const apiKey = await getAccessToken();
     const transcript: TranscriptMessage[] = [];
     const allBugs: Bug[] = [];
+
+    // ── Sync workspace before QA (idempotent — protects HITL resume) ─────
+    let qaGitRoot: string;
+    try {
+        qaGitRoot = findGitRoot(state.workspacePath);
+    } catch {
+        qaGitRoot = state.workspacePath;
+    }
+    const qaSyncResult = syncWorkspaceToBranch(qaGitRoot, state.systemBranch, state.gitContext);
+    qaLog.info(`Workspace synced to origin/${state.systemBranch}: ${qaSyncResult.details}`);
 
     // Deploy conventions (idempotent — skips if already deployed)
     deployAllConventionsToWorkspace(state.workspacePath);
@@ -843,18 +865,14 @@ export async function qaNode(state: ProjectStateType): Promise<Partial<ProjectSt
         transcript.push(msg('qa-e2e', 'qa', 'Skipped — no running services'));
     }
 
-    // B11: Commit QA-generated files to the system branch
+    // Commit QA-generated files via the shared helper (includes sync + retry)
     const systemSlug = path.basename(state.workspacePath);
-    gitExec(state.workspacePath, 'add .');
-    const qaStatus = gitExec(state.workspacePath, 'status --short');
-    if (qaStatus && !qaStatus.includes('nothing to commit')) {
-        gitExec(state.workspacePath, `commit -m "[${systemSlug}]-chore: QA unit test files"`);
-        const currentBranch = gitExec(state.workspacePath, 'rev-parse --abbrev-ref HEAD');
-        if (currentBranch && !currentBranch.startsWith('Error:')) {
-            gitPush(state.workspacePath, currentBranch, state.gitContext);
-            qaLog.info(`Committed and pushed QA test files on ${currentBranch}`);
-        }
-    }
+    commitAndPushArtifacts(
+        state.workspacePath,
+        `[${systemSlug}]-chore: QA unit test files`,
+        state.gitContext,
+        qaLog,
+    );
 
     const testReports = [unitOutput?.testReport, ...(e2eReport ? [e2eReport] : [])].filter(Boolean);
     const artifacts = [...(leadArtifact ? [leadArtifact] : []), ...(unitArtifact ? [unitArtifact] : []), ...(e2eArtifact ? [e2eArtifact] : [])];
@@ -921,6 +939,16 @@ export async function devopsNode(state: ProjectStateType): Promise<Partial<Proje
     opsLog.info('Starting DevOps phase...');
     const apiKey = await getAccessToken();
 
+    // ── Sync workspace before DevOps (idempotent — protects HITL resume) ──
+    let devopsGitRoot: string;
+    try {
+        devopsGitRoot = findGitRoot(state.workspacePath);
+    } catch {
+        devopsGitRoot = state.workspacePath;
+    }
+    const devopsSyncResult = syncWorkspaceToBranch(devopsGitRoot, state.systemBranch, state.gitContext);
+    opsLog.info(`Workspace synced to origin/${state.systemBranch}: ${devopsSyncResult.details}`);
+
     // Deploy conventions (idempotent — skips if already deployed)
     deployAllConventionsToWorkspace(state.workspacePath);
 
@@ -967,18 +995,14 @@ export async function devopsNode(state: ProjectStateType): Promise<Partial<Proje
         ].join('\n'),
     });
 
-    // B11: Commit DevOps-generated files to the system branch
+    // Commit DevOps-generated files via the shared helper (includes sync + retry)
     const devopsSlug = path.basename(state.workspacePath);
-    gitExec(state.workspacePath, 'add .');
-    const devopsStatus = gitExec(state.workspacePath, 'status --short');
-    if (devopsStatus && !devopsStatus.includes('nothing to commit')) {
-        gitExec(state.workspacePath, `commit -m "[${devopsSlug}]-chore: DevOps configuration files"`);
-        const currentBranch = gitExec(state.workspacePath, 'rev-parse --abbrev-ref HEAD');
-        if (currentBranch && !currentBranch.startsWith('Error:')) {
-            gitPush(state.workspacePath, currentBranch, state.gitContext);
-            opsLog.info(`Committed and pushed DevOps files on ${currentBranch}`);
-        }
-    }
+    commitAndPushArtifacts(
+        state.workspacePath,
+        `[${devopsSlug}]-chore: DevOps configuration files`,
+        state.gitContext,
+        opsLog,
+    );
 
     transcript.push(msg('devops', 'devops', `Build: ${output.devops?.buildStatus ?? 'unknown'}, Run: ${output.devops?.runStatus ?? 'unknown'}`));
 

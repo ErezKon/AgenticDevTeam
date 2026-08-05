@@ -17,6 +17,7 @@ import { buildDevAgent } from '../agents/developers/dev-agent.builder';
 import { buildReviewerAgent } from '../agents/developers/reviewer-agent.builder';
 import { getDevAgent, DEV_AGENTS } from '../agents/developers/registry';
 import { resolveConventionFiles } from '../utils/coding-conventions';
+import { gitExec, gitPush, findGitRoot } from '../utils/git-exec';
 import {
     GITHUB_TOKEN, GITHUB_OWNER, GITHUB_REPO,
     MAX_REVIEW_ITERATIONS, DEV_RECURSION_LIMIT, REVIEWER_RECURSION_LIMIT,
@@ -70,36 +71,7 @@ function msg(agentId: string, message: string): TranscriptMessage {
     return { timestamp: ts(), agentId, phase: 'development' as PhaseName, message };
 }
 
-function gitExec(workspacePath: string, args: string): string {
-    try {
-        return execSync(`git ${args}`, {
-            cwd: workspacePath, encoding: 'utf-8',
-            timeout: 30_000, maxBuffer: 1024 * 1024 * 5,
-            env: {
-                ...process.env,
-                GIT_TERMINAL_PROMPT: '0', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null',
-                GIT_AUTHOR_NAME: GIT_USER_NAME, GIT_AUTHOR_EMAIL: GIT_USER_EMAIL,
-                GIT_COMMITTER_NAME: GIT_USER_NAME, GIT_COMMITTER_EMAIL: GIT_USER_EMAIL,
-            },
-        }).trim();
-    } catch (err: any) {
-        return `Error: ${err.stderr?.toString() ?? err.message}`.trim();
-    }
-}
-
-function gitPush(workspacePath: string, branchName: string, gitContext?: GitContext | null): string {
-    const token = gitContext?.token ?? GITHUB_TOKEN;
-    const owner = gitContext?.owner ?? GITHUB_OWNER;
-    const repo = gitContext?.repo ?? GITHUB_REPO;
-    const authUrl = `https://x-access-token:${token}@github.com/${owner}/${repo}.git`;
-    const result = gitExec(workspacePath, `push ${authUrl} HEAD:refs/heads/${branchName}`);
-    if (result.startsWith('Error:')) {
-        log.error(`Push failed for ${branchName}: ${result}`);
-    } else {
-        log.info(`Pushed branch ${branchName}`);
-    }
-    return result;
-}
+// gitExec, gitPush, findGitRoot imported from ../utils/git-exec
 
 function getOctokit(gitContext?: GitContext | null): Octokit {
     const token = gitContext?.token ?? GITHUB_TOKEN;
@@ -200,15 +172,7 @@ function ensureDepsAndRunTests(workspacePath: string): { passed: boolean; output
     }
 }
 
-function findGitRoot(startPath: string): string {
-    let dir = path.resolve(startPath);
-    while (true) {
-        if (fs.existsSync(path.join(dir, '.git'))) return dir;
-        const parent = path.dirname(dir);
-        if (parent === dir) throw new Error(`Not inside a git repository: ${startPath}`);
-        dir = parent;
-    }
-}
+// findGitRoot imported from ../utils/git-exec
 
 // ─── PR title & description builders ─────────────────────────────────────────
 
