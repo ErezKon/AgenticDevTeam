@@ -1,64 +1,77 @@
 # Product Manager Mission Report
 
 **Agent**: product-manager  
-**Generated**: 2026-08-05T10:17:50.788Z
+**Generated**: 2026-08-05T14:02:20.743Z
 
 ---
 
-## User Stories (9)
+## User Stories (12)
 
-### US-001: As a User, I want a responsive calculator interface that works on desktop and mobile browsers
-- So that: I can use the calculator comfortably on any device
-- AC: The UI renders correctly on viewports >= 768px (desktop) and < 768px (mobile) with appropriate layout adjustments.; All calculator buttons (digits, operators, parentheses, decimal, clear, equals) are visible, sized for touch on mobile, and maintain consistent spacing.; The display area updates in real time as the user presses buttons, showing the current expression.
-### US-002: As a User, I want keyboard navigation and screen‑reader support for the calculator
-- So that: I can operate it without a mouse and it is accessible to assistive technologies
-- AC: Each button can be focused via Tab and activated with Enter or Space, moving focus in a logical order.; ARIA labels are present on every button describing its function (e.g., "Add", "Subtract", "Open parenthesis").; Screen readers announce the current expression and any result or error message.
-### US-003: As a User, I want the calculator to evaluate arithmetic expressions I input
-- So that: I receive correct numeric results instantly
-- AC: Given a syntactically valid expression (e.g., "3+4*2/(1-5)"), the engine returns the mathematically correct result.; Operator precedence and parentheses are respected during evaluation.
-### US-004: As a Developer, I want the expression engine to be a reusable TypeScript library
-- So that: it can be imported by the UI and unit‑tested independently
-- AC: The library exports a single function `evaluate(expression: string): number | Error`.; The library builds without external runtime dependencies beyond the TypeScript standard library.
-### US-005: As a User, I want clear error messages when I enter an invalid expression
-- So that: I can understand what is wrong and correct my input
-- AC: For syntax errors (unmatched parentheses, illegal characters, malformed decimal), the engine returns a descriptive error string.; For runtime errors such as division by zero, the engine returns a specific error message indicating the problem.
-### US-006: As a User, I want the UI to display errors without crashing the app
-- So that: I can continue using the calculator after an error
-- AC: When the engine returns an error, the UI shows the error message in a dedicated error banner.; After an error is shown, subsequent valid inputs are evaluated correctly and the error banner disappears.
-### US-007: As a Developer, I want an automated CI pipeline that lints, tests, and builds the project on every push
-- So that: code quality is enforced and broken builds are prevented
-- AC: GitHub Actions runs ESLint, TypeScript compilation, and Jest test suite on each push.; The workflow fails if any linting error, type error, or test failure occurs.
-### US-008: As a Developer, I want the application packaged in a Docker image with NGINX serving the static assets
-- So that: deployment is reproducible and isolated
-- AC: A multi‑stage Dockerfile builds the React app and copies the output into NGINX's `/usr/share/nginx/html` directory.; Running the image locally serves the SPA over HTTP on port 80 and the UI functions as expected.
-### US-009: As a User, I want the calculator to load quickly over HTTPS
-- So that: I have a fast and smooth experience
-- AC: NGINX serves static assets with appropriate `Cache‑Control` headers for browser caching.; The initial page load (HTML, CSS, JS) completes in under 2 seconds on a simulated 3G network.
+### US-001: As a user, I want a responsive calculator layout that works on desktop and mobile
+- So that: I can use it comfortably on any device
+- AC: The calculator layout adjusts to screen widths: on screens >600px shows full keypad, on <600px buttons resize appropriately.; The display and keypad remain fully visible without horizontal scrolling.
+### US-002: As a user, I want to interact with the calculator using keyboard keys and have proper ARIA attributes for accessibility
+- So that: I can use it accessibly
+- AC: All buttons have appropriate ARIA roles (button) and labels.; Keyboard input (e.g., pressing "1" key) triggers the same action as clicking the button, and pressing "Enter" evaluates the expression.
+### US-003: As a user, I want to enter arithmetic expressions with parentheses, decimals, and negatives and get correct results
+- So that: I can perform complex calculations
+- AC: The engine correctly evaluates expressions like "3+4*2/(1-5)" to the expected result.; The engine supports decimal numbers (e.g., "0.5*2") and negative numbers (e.g., "-3+5").
+### US-004: As a developer, I want the calculator engine to be a pure TypeScript module with no external runtime
+- So that: the bundle size stays minimal and the logic is testable
+- AC: The engine module builds to a <10KB bundle (excluding dependencies) when compiled.; The module has no runtime dependencies beyond standard JavaScript/TypeScript.
+### US-005: As a user, I want to see clear error messages when I input malformed expressions or divide by zero
+- So that: I understand what went wrong
+- AC: When the user enters "5/0", the UI displays "Error: Division by zero".; When the user enters a malformed expression like "5++2", the UI displays "Error: Invalid syntax".
+### US-006: As a user, I want the UI not to crash on any invalid input
+- So that: my session remains stable
+- AC: The application does not crash (no uncaught exceptions) when evaluating invalid expressions.; The UI remains functional after an error, allowing new input.
+### US-007: As a developer, I want a Vite build pipeline that outputs static assets
+- So that: they can be served by Nginx
+- AC: Running `npm run build` produces a `dist` folder with index.html and assets ready for Nginx.; The build completes without lint or test failures.
+### US-008: As a DevOps engineer, I want a Dockerfile that builds an Nginx container serving the static assets
+- So that: deployment is reproducible
+- AC: The Docker image builds successfully and serves the calculator at http://localhost (port 80) with correct content.; The Nginx container includes CSP header `Content-Security-Policy: default-src 'self'`.
+### US-009: As a CI engineer, I want a GitHub Actions workflow that lints, tests, builds, and pushes the Docker image
+- So that: CI/CD is automated
+- AC: On each push, GitHub Actions runs lint, test, build, and Docker push steps, and passes.; The workflow fails if tests or coverage thresholds fail.
+### US-010: As a QA engineer, I want unit tests for the Calculator Engine covering all operations and edge cases
+- So that: the core logic is reliable
+- AC: All core operations (+, -, *, /) have passing unit tests.; Edge cases (division by zero, large numbers, decimal precision) are covered and pass.
+### US-011: As a QA engineer, I want component tests for the React UI using React Testing Library
+- So that: UI behavior is verified
+- AC: UI component tests verify that clicking "7", "+", "3", "=" updates display to "10".; Keyboard events produce the same result.
+### US-012: As a QA engineer, I want coverage thresholds enforced in CI
+- So that: code quality is maintained
+- AC: CI fails if overall test coverage drops below 80%.; Coverage report is generated and uploaded as an artifact.
 
-## Tasks (25)
+## Tasks (29)
 
-- **TASK-001** [frontend/Vite] Initialize React project with Vite and TypeScript
-- **TASK-002** [frontend/npm] Install core dependencies and dev tools
-- **TASK-003** [testing/Jest, React Testing Library] Configure Jest and React Testing Library
-- **TASK-004** [infra/ESLint, Prettier] Set up ESLint and Prettier for TypeScript
-- **TASK-010** [frontend/React, CSS Modules] Implement responsive calculator layout
-- **TASK-011** [frontend/React, TypeScript] Create reusable Button component
-- **TASK-012** [frontend/React, TypeScript] Create Display component for expression/result
-- **TASK-013** [frontend/React] Add ARIA attributes to calculator buttons and display
-- **TASK-014** [frontend/React] Implement keyboard navigation and focus management
-- **TASK-020** [backend/TypeScript] Develop recursive‑descent parser and evaluator
-- **TASK-021** [testing/Jest] Write unit tests for expression evaluation
-- **TASK-022** [backend/TypeScript] Expose evaluate function as a library entry point
-- **TASK-023** [infra/TypeScript] Add build script for the expression engine library
-- **TASK-030** [backend/TypeScript] Implement syntax error detection in parser
-- **TASK-031** [backend/TypeScript] Add runtime error handling (division by zero)
-- **TASK-032** [frontend/React] Create ErrorBanner component for UI feedback
-- **TASK-033** [frontend/React, TypeScript] Integrate engine results and errors into UI state
-- **TASK-040** [infra/GitHub Actions] Create GitHub Actions CI workflow
-- **TASK-041** [infra/ESLint, Prettier] Configure linting and formatting scripts
-- **TASK-042** [infra/Docker] Write multi‑stage Dockerfile for production image
-- **TASK-043** [infra/NGINX] Add NGINX configuration for static serving and caching
-- **TASK-044** [infra/NGINX] Configure caching headers in NGINX
-- **TASK-045** [testing/Lighthouse CI] Add Lighthouse CI step to verify performance budget
-- **TASK-050** [testing/Jest, React Testing Library] Write React Testing Library tests for Calculator UI
-- **TASK-051** [testing/Jest, React Testing Library] Write integration test for error handling flow
+- **TASK-001** [infra/Vite] Initialize Vite React TypeScript project
+- **TASK-002** [infra/npm] Install core and dev dependencies
+- **TASK-003** [infra/ESLint, Prettier] Configure ESLint and Prettier for TypeScript React
+- **TASK-004** [testing/Jest, React Testing Library] Set up Jest with React Testing Library
+- **TASK-005** [infra/Docker] Create Dockerfile for Nginx static server
+- **TASK-006** [infra/GitHub Actions] Create GitHub Actions CI/CD workflow
+- **TASK-007** [frontend/React, TypeScript, CSS Modules] Implement responsive CalculatorLayout component
+- **TASK-008** [frontend/React, TypeScript, CSS] Implement Display component
+- **TASK-009** [frontend/React, TypeScript, CSS] Implement Keypad component with responsive buttons
+- **TASK-010** [frontend/React] Add ARIA roles and labels to calculator buttons
+- **TASK-011** [frontend/React] Implement keyboard navigation for keypad
+- **TASK-012** [frontend/React] Add global keyboard event listener
+- **TASK-013** [frontend/CSS] Implement focus ring styling for accessibility
+- **TASK-014** [backend/TypeScript] Create parser module using shunting‑yard algorithm
+- **TASK-015** [backend/TypeScript] Create evaluator module for RPN
+- **TASK-016** [backend/TypeScript] Export evaluateExpression API
+- **TASK-017** [backend/TypeScript] Configure tsconfig for minimal ES module output
+- **TASK-018** [backend/TypeScript] Add descriptive error objects in engine
+- **TASK-019** [frontend/React] Display engine errors in UI
+- **TASK-020** [frontend/React] Guard UI against uncaught engine exceptions
+- **TASK-021** [infra/Vite] Configure Vite production build settings
+- **TASK-022** [testing/GitHub Actions] Verify build output in CI
+- **TASK-023** [infra/Docker] Write Dockerfile for Nginx static serving
+- **TASK-024** [infra/Nginx] Create nginx.conf with security headers
+- **TASK-025** [infra/GitHub Actions] Implement GitHub Actions CI workflow
+- **TASK-026** [testing/Jest] Add coverage threshold check in CI
+- **TASK-027** [testing/Jest] Write unit tests for Calculator Engine
+- **TASK-028** [testing/React Testing Library, Jest] Write React component tests with RTL
+- **TASK-029** [testing/Jest] Configure Jest coverage thresholds
