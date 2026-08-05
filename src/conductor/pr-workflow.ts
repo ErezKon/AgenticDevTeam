@@ -18,7 +18,7 @@ import { buildReviewerAgent } from '../agents/developers/reviewer-agent.builder'
 import { getDevAgent, DEV_AGENTS } from '../agents/developers/registry';
 import {
     GITHUB_TOKEN, GITHUB_OWNER, GITHUB_REPO,
-    MAX_REVIEW_ITERATIONS, AGENT_RECURSION_LIMIT,
+    MAX_REVIEW_ITERATIONS, DEV_RECURSION_LIMIT, REVIEWER_RECURSION_LIMIT,
     GIT_USER_NAME, GIT_USER_EMAIL,
     PRINCIPAL_DEV_MODEL, SENIOR_DEV_MODEL, JUNIOR_DEV_MODEL,
 } from '../config';
@@ -137,6 +137,35 @@ function slugify(text: string): string {
         .slice(0, 50);
 }
 
+/**
+ * Detect the test command from package.json and run it.
+ * Returns null if no test script exists or the project is not Node-based.
+ */
+function runPostDevTests(workspacePath: string): { passed: boolean; output: string } | null {
+    const pkgPath = path.join(workspacePath, 'package.json');
+    if (!fs.existsSync(pkgPath)) return null;
+
+    try {
+        const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
+        const testScript = pkg?.scripts?.test;
+        if (!testScript || testScript.includes('no test specified')) return null;
+
+        // Run `npm test` with a reasonable timeout (60s) in non-interactive mode
+        const result = execSync('npm test --silent 2>&1', {
+            cwd: workspacePath,
+            encoding: 'utf-8',
+            timeout: 60_000,
+            maxBuffer: 1024 * 1024 * 2,
+            env: { ...process.env, CI: 'true', NODE_ENV: 'test' },
+        });
+        return { passed: true, output: result.trim().slice(-2000) };
+    } catch (err: any) {
+        // execSync throws on non-zero exit code
+        const output = (err.stdout ?? err.stderr ?? err.message ?? '').toString().trim();
+        return { passed: false, output: output.slice(-2000) };
+    }
+}
+
 function findGitRoot(startPath: string): string {
     let dir = path.resolve(startPath);
     while (true) {
@@ -232,17 +261,44 @@ async function invokeDevAgent(
     return retryWithBackoff(async () => {
         const result = await agent.invoke(
             { messages: [{ role: 'user', content: userMessage }] },
-            { configurable: { thread_id: `dev-pr-${threadSuffix}-${Date.now()}` }, recursionLimit: AGENT_RECURSION_LIMIT },
+            { configurable: { thread_id: `dev-pr-${threadSuffix}-${Date.now()}` }, recursionLimit: DEV_RECURSION_LIMIT },
         );
         const tokenUsage = extractTokenUsageFromMessages(result, agentId, model, 'development');
+
+        // Guard against empty or missing messages array
+        if (!result?.messages || result.messages.length === 0) {
+            log.warn(`Dev agent ${agentId} returned no messages — returning empty output`);
+            return { output: { fileChanges: [], notes: 'Agent returned no messages (possible tool loop or recursion limit).' }, tokenUsage };
+        }
+
         const last = result.messages[result.messages.length - 1];
+        if (!last || last.content == null) {
+            log.warn(`Dev agent ${agentId} returned message with no content — returning empty output`);
+            return { output: { fileChanges: [], notes: 'Agent returned empty content.' }, tokenUsage };
+        }
+
         const raw = typeof last.content === 'string' ? last.content : JSON.stringify(last.content);
         try {
             return { output: JSON.parse(raw), tokenUsage };
         } catch {
             // Try extracting JSON from markdown code fence
             const match = raw.match(/```(?:json)?\s*([\s\S]*?)```/);
-            if (match) return { output: JSON.parse(match[1].trim()), tokenUsage };
+            if (match) {
+                try {
+                    return { output: JSON.parse(match[1].trim()), tokenUsage };
+                } catch {
+                    // Fall through to error below
+                }
+            }
+            // Try extracting any JSON object from the response
+            const objMatch = raw.match(/\{[\s\S]*\}/);
+            if (objMatch) {
+                try {
+                    return { output: JSON.parse(objMatch[0]), tokenUsage };
+                } catch {
+                    // Fall through to error below
+                }
+            }
             throw new Error(`Invalid JSON output from dev agent: ${raw.slice(0, 200)}`);
         }
     }, `dev-${threadSuffix}`);
@@ -255,16 +311,42 @@ async function invokeReviewerAgent(
     return retryWithBackoff(async () => {
         const result = await agent.invoke(
             { messages: [{ role: 'user', content: userMessage }] },
-            { configurable: { thread_id: `review-${threadSuffix}-${Date.now()}` }, recursionLimit: AGENT_RECURSION_LIMIT },
+            { configurable: { thread_id: `review-${threadSuffix}-${Date.now()}` }, recursionLimit: REVIEWER_RECURSION_LIMIT },
         );
         const tokenUsage = extractTokenUsageFromMessages(result, agentId, model, 'review');
+
+        // Guard against empty or missing messages
+        if (!result?.messages || result.messages.length === 0) {
+            log.warn(`Reviewer ${agentId} returned no messages — defaulting to approved`);
+            return { output: { status: 'approved', summary: 'Reviewer returned no messages.', comments: [] }, tokenUsage };
+        }
+
         const last = result.messages[result.messages.length - 1];
+        if (!last || last.content == null) {
+            log.warn(`Reviewer ${agentId} returned message with no content — defaulting to approved`);
+            return { output: { status: 'approved', summary: 'Reviewer returned empty content.', comments: [] }, tokenUsage };
+        }
+
         const raw = typeof last.content === 'string' ? last.content : JSON.stringify(last.content);
         try {
             return { output: JSON.parse(raw), tokenUsage };
         } catch {
             const match = raw.match(/```(?:json)?\s*([\s\S]*?)```/);
-            if (match) return { output: JSON.parse(match[1].trim()), tokenUsage };
+            if (match) {
+                try {
+                    return { output: JSON.parse(match[1].trim()), tokenUsage };
+                } catch {
+                    // Fall through
+                }
+            }
+            const objMatch = raw.match(/\{[\s\S]*\}/);
+            if (objMatch) {
+                try {
+                    return { output: JSON.parse(objMatch[0]), tokenUsage };
+                } catch {
+                    // Fall through
+                }
+            }
             throw new Error(`Invalid JSON output from reviewer agent: ${raw.slice(0, 200)}`);
         }
     }, `review-${threadSuffix}`);
@@ -326,6 +408,10 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
         : worktreeDir;
 
     log.info(`Creating worktree for branch: ${branchName} (from ${baseBranch})`);
+
+    // Prune stale worktree tracking entries (e.g. directories deleted but
+    // git's internal worktree list not updated — prevents "already checked out" errors)
+    gitExec(gitRoot, 'worktree prune');
 
     // Clean up stale worktree from a previous failed run
     if (fs.existsSync(worktreeDir)) {
@@ -427,9 +513,68 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
         }
         gitPush(worktreeWorkspace, branchName, gitContext);
 
+        // ── 1a. Post-development test verification ────────────────────
+        // Run project tests (if available) to detect failures early.
+        // Results are logged and included in the PR description.
+        let testResult: { passed: boolean; output: string } | null = null;
+        try {
+            testResult = runPostDevTests(worktreeWorkspace);
+            if (testResult) {
+                if (testResult.passed) {
+                    log.info(`Tests passed on branch ${branchName}`);
+                    allTranscript.push(msg('conductor', `Tests passed on branch ${branchName}`));
+                } else {
+                    log.warn(`Tests FAILED on branch ${branchName} — will include in PR description`);
+                    allTranscript.push(msg('conductor', `WARNING: Tests failed on branch ${branchName}:\n${testResult.output.slice(0, 500)}`));
+                }
+            }
+        } catch (testErr: any) {
+            log.warn(`Post-dev test check error: ${testErr.message}`);
+        }
+
+        // ── 1b. Check for actual commits before creating PR ─────────────
+        // If no commits exist between base and this branch, skip PR creation
+        // to avoid the "No commits between" GitHub API error.
+        const diffCheck = gitExec(worktreeWorkspace, `log ${baseBranch}..HEAD --oneline`);
+        if (!diffCheck || diffCheck.startsWith('Error:') || diffCheck.trim() === '') {
+            log.warn(`No commits on branch ${branchName} relative to ${baseBranch} — skipping PR creation`);
+            allTranscript.push(msg('conductor', `Skipped PR for ${branchName}: no commits (dev agent produced no changes)`));
+
+            const pullRequest: PullRequest = {
+                id: `PR-SKIPPED-${branchName}`,
+                prNumber: 0,
+                prUrl: '',
+                title: `[SKIPPED] No changes on ${branchName}`,
+                description: 'Dev agent did not produce any commits.',
+                branchName,
+                authorAgentId: assignments[0].devAgentId,
+                reviewerAgentIds,
+                reviews: [],
+                status: 'closed',
+                assignmentIds: assignments.map(a => a.id),
+                taskType,
+                currentState,
+            };
+            return {
+                pullRequest,
+                fileChanges: allFileChanges,
+                artifacts: allArtifacts,
+                transcript: allTranscript,
+                tokenUsage: allTokenUsage,
+            };
+        }
+
         // ── 2. Create GitHub PR ─────────────────────────────────────────
         const prTitle = buildPRTitle(assignments, taskType, projectSlug);
-        const prBody = buildPRDescription(assignments, allFileChanges, taskType, currentState, assignments[0].devAgentId);
+        let prBody = buildPRDescription(assignments, allFileChanges, taskType, currentState, assignments[0].devAgentId);
+        // Append test results to the PR description
+        if (testResult) {
+            if (testResult.passed) {
+                prBody += '\n\n## Tests\n\n:white_check_mark: All tests passed.';
+            } else {
+                prBody += `\n\n## Tests\n\n:warning: **Tests failed.** Review output:\n\n\`\`\`\n${testResult.output.slice(0, 1000)}\n\`\`\``;
+            }
+        }
 
         log.info(`Creating PR: "${prTitle}"`);
         const octokit = getOctokit(gitContext);
@@ -472,11 +617,23 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
         const seenCommentKeys = new Set<string>();
         let prStatus: 'open' | 'approved' | 'merged' | 'closed' | 'escalated_open' = 'open';
 
+        /** Max chars for inline diff before switching to stat-based fallback. */
+        const MAX_DIFF_CHARS = 25_000;
+
+        /** Generated-file exclusion pathspecs for git diff (mirrors git-tools.ts). */
+        const DIFF_EXCLUDE_SPECS = [
+            'package-lock.json', 'yarn.lock', 'pnpm-lock.yaml', 'bun.lockb',
+            'composer.lock', 'Gemfile.lock', 'Pipfile.lock', 'poetry.lock',
+            'go.sum', 'Cargo.lock',
+            '*.min.js', '*.min.css', '*.map', '*.snap',
+            'dist/*', 'build/*', '.next/*',
+        ].map(p => `':!${p}'`).join(' ');
+
         for (let iteration = 1; iteration <= MAX_REVIEW_ITERATIONS; iteration++) {
             log.info(`Review iteration ${iteration}/${MAX_REVIEW_ITERATIONS}`);
 
-            // Get the diff for reviewers
-            const prDiff = gitExec(worktreeWorkspace, `diff ${baseBranch}...${branchName}`);
+            // Get the diff for reviewers (excluding generated files)
+            const prDiff = gitExec(worktreeWorkspace, `diff ${baseBranch}...${branchName} -- . ${DIFF_EXCLUDE_SPECS}`);
 
             // Determine which reviewers need to (re-)review
             const pendingReviewers = iteration === 1
@@ -509,11 +666,20 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
 
                 const reviewerAgent = buildReviewerAgent(apiKey, reviewerEntry, worktreeWorkspace, gitContext);
 
-                // B6: Context-aware diff truncation
-                const MAX_DIFF_CHARS = 30_000;
-                const truncatedDiff = prDiff.length > MAX_DIFF_CHARS
-                    ? prDiff.slice(0, MAX_DIFF_CHARS) + '\n\n... [DIFF TRUNCATED — review the files directly using git tools] ...'
-                    : prDiff;
+                // B6: Context-aware diff truncation with stat fallback
+                let truncatedDiff: string;
+                if (prDiff.length <= MAX_DIFF_CHARS) {
+                    truncatedDiff = prDiff;
+                } else {
+                    // Diff too large — provide stat summary and instruct to use per-file tools
+                    const diffStat = gitExec(worktreeWorkspace, `diff --stat ${baseBranch}...${branchName} -- . ${DIFF_EXCLUDE_SPECS}`);
+                    truncatedDiff = [
+                        `[DIFF TOO LARGE — ${prDiff.length} chars. Showing file summary instead]\n`,
+                        diffStat,
+                        `\nUse the "git_diff_file" tool with a specific file path to review individual files.`,
+                        `Use the "git_diff_stat" tool to see the full list of changed files.`,
+                    ].join('\n');
+                }
 
                 // B6: Summarize previous reviews instead of full JSON
                 const prevReviewSummary = iteration > 1
@@ -709,6 +875,19 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                             iteration--;
                             await new Promise(r => setTimeout(r, 30_000));
                         }
+                        // Recursion limit: the agent ran out of steps, but a fresh
+                        // agent in the next review iteration gets a fresh budget.
+                        // Log and continue rather than aborting all remaining iterations.
+                        if (err.message?.includes('recursion limit') || err.message?.includes('Recursion limit')) {
+                            log.warn(`Recursion limit hit in fix attempt — will retry with fresh agent next iteration`);
+                            allTranscript.push(msg(primaryDevId, `Fix hit recursion limit (iteration ${iteration}), will retry`));
+                        }
+                        // Truly non-retriable errors (state corruption): abort fix loop
+                        if (err.message?.includes('Already borrowed')) {
+                            log.warn(`Non-retriable error in fix attempt — skipping remaining fix iterations`);
+                            allTranscript.push(msg(primaryDevId, `Fix skipped (non-retriable): ${err.message}`));
+                            break;
+                        }
                         allTranscript.push(msg(primaryDevId, `Fix failed: ${err.message}`));
                     }
                 }
@@ -784,11 +963,22 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                             escalatedReviewerLog.info(`Escalated review of PR #${ghPr.number}`);
 
                             const escalatedReviewer = buildReviewerAgent(apiKey, escalatedReviewerEntry, worktreeWorkspace, gitContext);
-                            const escalatedDiff = gitExec(worktreeWorkspace, `diff ${baseBranch}...${branchName}`);
+                            const escalatedDiff = gitExec(worktreeWorkspace, `diff ${baseBranch}...${branchName} -- . ${DIFF_EXCLUDE_SPECS}`);
+                            let escalatedDiffContent: string;
+                            if (escalatedDiff.length <= MAX_DIFF_CHARS) {
+                                escalatedDiffContent = `\`\`\`diff\n${escalatedDiff}\n\`\`\``;
+                            } else {
+                                const escalatedStat = gitExec(worktreeWorkspace, `diff --stat ${baseBranch}...${branchName} -- . ${DIFF_EXCLUDE_SPECS}`);
+                                escalatedDiffContent = [
+                                    `[DIFF TOO LARGE — ${escalatedDiff.length} chars. Showing file summary instead]\n`,
+                                    escalatedStat,
+                                    `\nUse "git_diff_file" to review individual files.`,
+                                ].join('\n');
+                            }
                             const escalatedReviewMsg = [
                                 `## Escalated Review — Pull Request #${ghPr.number}: ${prTitle}`,
                                 `\n## PR Description\n\n${prBody.slice(0, 2000)}`,
-                                `\n## Diff\n\n\`\`\`diff\n${escalatedDiff.slice(0, 30_000)}\n\`\`\``,
+                                `\n## Diff\n\n${escalatedDiffContent}`,
                                 `\n## Context: This is an escalated review after ${MAX_REVIEW_ITERATIONS} iterations. A higher-rank dev has already applied fixes.`,
                             ].join('\n');
 

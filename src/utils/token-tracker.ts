@@ -1,7 +1,13 @@
 /**
  * Token usage tracking — singleton tracker that accumulates LLM token
  * consumption per agent, model, and pipeline phase across an entire run.
+ *
+ * Supports crash-safe persistence: when enabled, the raw JSON ledger is
+ * saved to disk after every LLM call, and an optional refresh callback
+ * regenerates the HTML report on a debounced schedule.
  */
+import * as fs from 'fs';
+import * as path from 'path';
 import { getLogger } from './logger';
 
 const log = getLogger('[TokenTracker]', 220);
@@ -40,10 +46,75 @@ export interface RunUsageSummary {
     byModel: { model: string; inputTokens: number; outputTokens: number; totalTokens: number; callCount: number }[];
 }
 
+// ─── Run status ─────────────────────────────────────────────────────────────
+
+export type RunStatus = 'in-progress' | 'completed' | 'failed';
+
 // ─── Singleton ──────────────────────────────────────────────────────────────
 
 class TokenTracker {
     private ledger: TokenCallRecord[] = [];
+
+    // ── Persistence fields ──────────────────────────────────────────────
+    private _outputPath: string | null = null;
+    private _systemName: string = '';
+    private _runStatus: RunStatus = 'in-progress';
+    private _refreshCallback: (() => void) | null = null;
+    private _refreshTimer: ReturnType<typeof setTimeout> | null = null;
+    private static readonly REFRESH_DEBOUNCE_MS = 3_000;
+
+    // ── Persistence API ─────────────────────────────────────────────────
+
+    /**
+     * Enable crash-safe persistence. Creates the output directory and
+     * writes an initial empty JSON snapshot so the report skeleton exists
+     * on disk immediately.
+     */
+    enablePersistence(outputPath: string, systemName: string): void {
+        this._outputPath = outputPath;
+        this._systemName = systemName;
+        this._runStatus = 'in-progress';
+        fs.mkdirSync(outputPath, { recursive: true });
+        this.saveJsonSnapshot();
+        log.info(`Persistence enabled → ${outputPath}`);
+    }
+
+    /** Set a callback that regenerates the HTML report (debounced after each recordCall). */
+    setRefreshCallback(cb: () => void): void {
+        this._refreshCallback = cb;
+    }
+
+    setRunStatus(status: RunStatus): void { this._runStatus = status; }
+    getOutputPath(): string | null { return this._outputPath; }
+    getSystemName(): string { return this._systemName; }
+    getRunStatus(): RunStatus { return this._runStatus; }
+
+    /** Flush the JSON snapshot to disk immediately (no-op if persistence is disabled). */
+    private saveJsonSnapshot(): void {
+        if (!this._outputPath) return;
+        try {
+            const jsonPath = path.join(this._outputPath, 'token-usage.json');
+            fs.writeFileSync(jsonPath, JSON.stringify(this.ledger, null, 2), 'utf-8');
+        } catch (e) {
+            log.warn(`Failed to save JSON snapshot: ${(e as Error).message}`);
+        }
+    }
+
+    /** Schedule a debounced HTML report refresh. */
+    private scheduleRefresh(): void {
+        if (!this._refreshCallback) return;
+        if (this._refreshTimer) clearTimeout(this._refreshTimer);
+        this._refreshTimer = setTimeout(() => {
+            this._refreshTimer = null;
+            try {
+                this._refreshCallback?.();
+            } catch (e) {
+                log.warn(`Refresh callback failed: ${(e as Error).message}`);
+            }
+        }, TokenTracker.REFRESH_DEBOUNCE_MS);
+    }
+
+    // ── Core tracking API ───────────────────────────────────────────────
 
     /** Record a single LLM call's token usage. */
     recordCall(record: TokenCallRecord): void {
@@ -52,6 +123,9 @@ class TokenTracker {
             `${record.agentId} [${record.model}] ${record.phase}: `
             + `in=${record.inputTokens} out=${record.outputTokens} total=${record.totalTokens}`,
         );
+        // Persist to disk after every call for crash safety
+        this.saveJsonSnapshot();
+        this.scheduleRefresh();
     }
 
     /** Get aggregated usage for a single agent. */
@@ -115,9 +189,14 @@ class TokenTracker {
         return [...this.ledger];
     }
 
-    /** Clear all tracked data (call at run start). */
+    /** Clear all tracked data and persistence config (call at run start). */
     reset(): void {
+        if (this._refreshTimer) { clearTimeout(this._refreshTimer); this._refreshTimer = null; }
         this.ledger = [];
+        this._outputPath = null;
+        this._systemName = '';
+        this._runStatus = 'in-progress';
+        this._refreshCallback = null;
         log.info('Token tracker reset');
     }
 }

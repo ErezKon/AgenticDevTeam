@@ -22,8 +22,41 @@ import { parseRequirementsFile } from './tools/requirements/parse-requirements';
 import type { ProjectStateType } from './conductor/state';
 import type { RepoTarget } from './agents/_shared/base-schemas';
 import { GITHUB_PROJECT_OWNER, GITHUB_OWNER } from './config';
+import { tokenTracker } from './utils/token-tracker';
+import { refreshTokenReport } from './utils/token-report';
 
 const TAG = `${color256(46)}[CLI]${LogColors.RESET}`;
+
+// ─── Signal handlers — flush token report on unexpected exit ─────────────────
+
+function flushTokenReportOnExit(reason: string) {
+    try {
+        if (tokenTracker.getOutputPath()) {
+            tokenTracker.setRunStatus('failed');
+            refreshTokenReport();
+            console.error(`${TAG} Token report saved (${reason}).`);
+        }
+    } catch { /* best-effort */ }
+}
+
+process.on('SIGINT', () => {
+    flushTokenReportOnExit('SIGINT');
+    process.exit(130);
+});
+process.on('SIGTERM', () => {
+    flushTokenReportOnExit('SIGTERM');
+    process.exit(143);
+});
+process.on('uncaughtException', (err) => {
+    console.error(`${TAG} Uncaught exception: ${err.message}`);
+    flushTokenReportOnExit('uncaughtException');
+    process.exit(1);
+});
+process.on('unhandledRejection', (reason) => {
+    console.error(`${TAG} Unhandled rejection: ${reason}`);
+    flushTokenReportOnExit('unhandledRejection');
+    process.exit(1);
+});
 
 /** Redact sensitive fields (tokens) from state before printing. */
 function redactState(state: any): any {
@@ -229,6 +262,11 @@ async function startAutonomousRun() {
     } catch (err: any) {
         console.error(`\n${TAG} ${LogColors.RED}Run failed: ${err.message}${LogColors.RESET}`);
         console.error(err.stack);
+        // Token report is already flushed by run.ts try/catch, but log path for user
+        const reportPath = tokenTracker.getOutputPath();
+        if (reportPath) {
+            console.error(`${TAG} Partial token report: ${reportPath}/token-usage-report.html`);
+        }
     }
 
     await mainMenu();
@@ -472,6 +510,10 @@ async function startMaintainRun() {
     } catch (err: any) {
         console.error(`\n${TAG} ${LogColors.RED}Maintain run failed: ${err.message}${LogColors.RESET}`);
         console.error(err.stack);
+        const reportPath = tokenTracker.getOutputPath();
+        if (reportPath) {
+            console.error(`${TAG} Partial token report: ${reportPath}/token-usage-report.html`);
+        }
     }
 
     await mainMenu();

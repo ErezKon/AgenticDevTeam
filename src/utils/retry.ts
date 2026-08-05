@@ -21,7 +21,11 @@ function isRateLimitError(err: any): boolean {
 }
 
 /**
- * Retry an async function with exponential backoff on rate-limit errors.
+ * Retry an async function with exponential backoff + jitter on rate-limit errors.
+ *
+ * Jitter prevents the "thundering herd" problem where multiple agents
+ * hit rate limits simultaneously and retry at identical intervals,
+ * causing cascading collisions.
  *
  * @param fn        The async function to execute
  * @param label     A label for log messages (e.g. "dev-branch-x", "qa-lead")
@@ -39,9 +43,12 @@ export async function retryWithBackoff<T>(
             return await fn();
         } catch (err: any) {
             if (isRateLimitError(err) && attempt < attempts) {
-                const delay = initialMs * Math.pow(2, attempt - 1);
+                const baseDelay = initialMs * Math.pow(2, attempt - 1);
+                // Add ±30% random jitter to stagger concurrent retries
+                const jitter = baseDelay * (0.7 + Math.random() * 0.6);
+                const delay = Math.round(jitter);
                 log.warn(
-                    `${label}: rate-limited (attempt ${attempt}/${attempts}), retrying in ${delay / 1000}s...`,
+                    `${label}: rate-limited (attempt ${attempt}/${attempts}), retrying in ${(delay / 1000).toFixed(1)}s...`,
                 );
                 await new Promise(r => setTimeout(r, delay));
                 continue;

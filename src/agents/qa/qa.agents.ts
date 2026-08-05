@@ -5,14 +5,13 @@ import { qaE2eSystemPrompt } from './qa-e2e.prompt';
 import { QaLeadOutputSchema, QaUnitOutputSchema, QaE2eOutputSchema } from './schemas/qa-output.schema';
 import { createWorkspaceTools } from '../../tools/fs/workspace-tools';
 import { createShellTool } from '../../tools/shell/shell-tools';
-import { emitMermaidTool } from '../../tools/diagram/diagram-tools';
 import { QA_MODEL } from '../../config';
 
 export const createQaLeadAgent = (apiKey: string) => {
     return buildAgent(apiKey, {
         id: 'qa-lead',
         systemPrompt: qaLeadSystemPrompt,
-        tools: [emitMermaidTool],
+        tools: [],
         responseFormat: QaLeadOutputSchema,
         temperature: 0.2,
         model: QA_MODEL,

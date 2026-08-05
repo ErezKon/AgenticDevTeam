@@ -10,7 +10,6 @@ import { DeveloperOutputSchema } from './schemas/dev-output.schema';
 import { createWorkspaceTools } from '../../tools/fs/workspace-tools';
 import { createGitTools } from '../../tools/git/git-tools';
 import { createShellTool } from '../../tools/shell/shell-tools';
-import { emitMermaidTool } from '../../tools/diagram/diagram-tools';
 import { PRINCIPAL_DEV_MODEL, SENIOR_DEV_MODEL, JUNIOR_DEV_MODEL } from '../../config';
 import type { GitContext } from '../_shared/base-schemas';
 import type { DevAgentEntry } from './registry';
@@ -39,12 +38,21 @@ export function buildDevAgent(apiKey: string, entry: DevAgentEntry, workspaceRoo
         tag: entry.tag,
     });
 
+    // Dev agents get workspace (fs), git, and shell tools.
+    // No emitMermaidTool — the DeveloperOutputSchema has a `mermaidDiagram`
+    // field for diagrams; giving devs the tool caused infinite loops.
     const tools = [
         ...createWorkspaceTools(workspaceRoot),
         ...createGitTools(workspaceRoot, gitContext),
         createShellTool(workspaceRoot),
-        emitMermaidTool,
     ];
+
+    // Dev agents need more tool calls than pipeline agents:
+    // read files, create/edit files, run tests, git add/commit/push per file.
+    // Principal/Senior devs doing multi-file work need the most headroom.
+    const maxToolCalls = entry.rank === 'principal' ? 40
+        : entry.rank === 'senior' ? 35
+        : 30; // junior
 
     return buildAgent(apiKey, {
         id: entry.id,
@@ -54,5 +62,6 @@ export function buildDevAgent(apiKey: string, entry: DevAgentEntry, workspaceRoo
         temperature: entry.temperature,
         model: getModelForRank(entry.rank),
         phase: 'development',
+        maxToolCalls,
     });
 }

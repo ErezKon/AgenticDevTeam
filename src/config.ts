@@ -49,9 +49,12 @@ export const PRINCIPAL_DEV_MODEL =
 export const SENIOR_DEV_MODEL =
     process.env.SENIOR_DEV_MODEL ?? 'mistral-small-3-1-24b-instruct-2503';
 
-/** Junior Developer agent model (all specialties). */
+/** Junior Developer agent model (all specialties).
+ *  Minimum recommended: 20B+ parameters for reliable code generation.
+ *  The original 3B default (llama-3-2-3b-instruct) was too small to follow
+ *  structured output schemas or create files; agents looped endlessly. */
 export const JUNIOR_DEV_MODEL =
-    process.env.JUNIOR_DEV_MODEL ?? 'llama-3-2-3b-instruct';
+    process.env.JUNIOR_DEV_MODEL ?? 'gpt-oss-20b';
 
 /** QA agent model (Lead, Unit, E2E). */
 export const QA_MODEL =
@@ -97,9 +100,30 @@ export const RUN_MODE: 'autonomous' | 'human' =
 export const MAX_BUGFIX_ITERATIONS =
     parseInt(process.env.MAX_BUGFIX_ITERATIONS ?? '3', 10);
 
-/** LangGraph recursion limit per agent invocation. */
+/**
+ * LangGraph recursion limits per agent type.
+ *
+ * Pipeline agents (architect, PM, DBA, TL, QA) need very few tool calls (1-5).
+ * Developer agents may need 15-25 tool calls (read, edit, git add, commit,
+ * push — per file), so their limit must accommodate multi-file changes.
+ * LangGraph counts 2 steps per tool call (LLM + tool), so limit ÷ 2 ≈ max calls.
+ * Reviewer agents need 2-5 (diff, log, produce JSON).
+ *
+ * Lower limits prevent poisoned/looping agents from burning tokens until
+ * the global ceiling (150). Per-type env vars override the global fallback.
+ */
+export const PIPELINE_RECURSION_LIMIT =
+    parseInt(process.env.PIPELINE_RECURSION_LIMIT ?? process.env.AGENT_RECURSION_LIMIT ?? '15', 10);
+
+export const DEV_RECURSION_LIMIT =
+    parseInt(process.env.DEV_RECURSION_LIMIT ?? process.env.AGENT_RECURSION_LIMIT ?? '50', 10);
+
+export const REVIEWER_RECURSION_LIMIT =
+    parseInt(process.env.REVIEWER_RECURSION_LIMIT ?? process.env.AGENT_RECURSION_LIMIT ?? '15', 10);
+
+/** @deprecated Use per-type limits (PIPELINE_RECURSION_LIMIT, DEV_RECURSION_LIMIT, REVIEWER_RECURSION_LIMIT). */
 export const AGENT_RECURSION_LIMIT =
-    parseInt(process.env.AGENT_RECURSION_LIMIT ?? '150', 10);
+    parseInt(process.env.AGENT_RECURSION_LIMIT ?? '30', 10);
 
 /** Max parallel developer agents during fan-out. */
 export const MAX_CONCURRENT_DEVS =

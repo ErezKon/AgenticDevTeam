@@ -11,7 +11,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { getLogger } from './logger';
 import { MODEL_PRICING } from '../config';
-import type { TokenCallRecord, RunUsageSummary } from './token-tracker';
+import type { TokenCallRecord, RunUsageSummary, RunStatus } from './token-tracker';
 import { tokenTracker } from './token-tracker';
 
 const log = getLogger('[TokenReport]', 220);
@@ -90,6 +90,7 @@ function generateHtml(
     summary: RunUsageSummary,
     records: TokenCallRecord[],
     systemName: string,
+    runStatus: RunStatus = 'completed',
 ): string {
     const agentRows = buildAgentCostRows(summary);
     const totalCost = agentRows.reduce((s, r) => s + r.totalCost, 0);
@@ -323,11 +324,39 @@ function generateHtml(
         text-align: center;
         color: var(--text-muted);
     }
+    .status-banner {
+        padding: 0.75rem 1.2rem;
+        border-radius: 8px;
+        margin-bottom: 1.5rem;
+        font-weight: 600;
+        font-size: 0.9rem;
+    }
+    .status-banner.in-progress {
+        background: rgba(224, 175, 104, 0.15);
+        border: 1px solid var(--accent-yellow);
+        color: var(--accent-yellow);
+    }
+    .status-banner.failed {
+        background: rgba(247, 118, 142, 0.15);
+        border: 1px solid var(--accent-red);
+        color: var(--accent-red);
+    }
+    .status-banner.completed {
+        background: rgba(158, 206, 106, 0.15);
+        border: 1px solid var(--accent-green);
+        color: var(--accent-green);
+    }
 </style>
 </head>
 <body>
 <h1>Token Usage Report</h1>
 <p class="subtitle">${escapeHtml(systemName)} &mdash; ${runDate}</p>
+
+${runStatus === 'in-progress'
+    ? '<div class="status-banner in-progress">&#9203; Run in progress &mdash; this report updates automatically as agents complete their work.</div>'
+    : runStatus === 'failed'
+    ? '<div class="status-banner failed">&#10060; Run failed &mdash; this report contains partial data collected before the failure.</div>'
+    : '<div class="status-banner completed">&#9989; Run completed successfully.</div>'}
 
 <!-- Summary cards -->
 <div class="summary-grid">
@@ -550,11 +579,13 @@ function generateHtml(
  * @param records  Raw token call records from the run
  * @param outputPath  Directory to write the report files into
  * @param systemName  Human-readable system/project name for the report header
+ * @param runStatus  Current run status (shown as a banner in the HTML)
  */
 export function generateTokenReport(
     records: TokenCallRecord[],
     outputPath: string,
     systemName: string,
+    runStatus: RunStatus = 'completed',
 ): { jsonPath: string; htmlPath: string } {
     const summary = tokenTracker.getRunSummary();
 
@@ -567,10 +598,34 @@ export function generateTokenReport(
     log.info(`Saved raw token data: ${jsonPath} (${records.length} records)`);
 
     // Generate and save HTML report
-    const html = generateHtml(summary, records, systemName);
+    const html = generateHtml(summary, records, systemName, runStatus);
     const htmlPath = path.join(outputPath, 'token-usage-report.html');
     fs.writeFileSync(htmlPath, html, 'utf-8');
     log.info(`Saved HTML report: ${htmlPath} (${html.length} chars)`);
 
     return { jsonPath, htmlPath };
+}
+
+/**
+ * Regenerate the token usage report from the current TokenTracker state.
+ *
+ * No-op if persistence has not been enabled via `tokenTracker.enablePersistence()`.
+ * Safe to call at any time (errors are caught and logged).
+ */
+export function refreshTokenReport(): { jsonPath: string; htmlPath: string } | null {
+    const outputPath = tokenTracker.getOutputPath();
+    const systemName = tokenTracker.getSystemName();
+    if (!outputPath) return null;
+
+    try {
+        return generateTokenReport(
+            tokenTracker.getSnapshot(),
+            outputPath,
+            systemName,
+            tokenTracker.getRunStatus(),
+        );
+    } catch (e) {
+        log.warn(`Failed to refresh token report: ${(e as Error).message}`);
+        return null;
+    }
 }

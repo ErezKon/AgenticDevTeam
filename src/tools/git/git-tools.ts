@@ -17,6 +17,33 @@ const TAG_COLOR = 202;
 const TAG = `${color256(TAG_COLOR)}[git]${LogColors.RESET}`;
 
 /**
+ * Files excluded from merge-base diffs to prevent token-limit blowouts.
+ * These are generated / vendored files that add noise without review value.
+ */
+const DIFF_EXCLUDE_PATTERNS = [
+    'package-lock.json',
+    'yarn.lock',
+    'pnpm-lock.yaml',
+    'bun.lockb',
+    'composer.lock',
+    'Gemfile.lock',
+    'Pipfile.lock',
+    'poetry.lock',
+    'go.sum',
+    'Cargo.lock',
+    '*.min.js',
+    '*.min.css',
+    '*.map',
+    '*.snap',
+    'dist/*',
+    'build/*',
+    '.next/*',
+];
+
+/** Max characters for a diff tool response before switching to stat-only mode. */
+const MAX_DIFF_RESPONSE_CHARS = 25_000;
+
+/**
  * Run a git command in the workspace and return stdout.
  * Throws on non-zero exit (caught by the tool wrapper).
  */
@@ -179,13 +206,69 @@ export function createGitTools(workspaceRoot: string, gitContext?: GitContext | 
     const gitMergeBaseDiffTool = tool(
         async ({ baseBranch }) => {
             const base = baseBranch ?? GIT_DEFAULT_BRANCH;
-            logToolAction(`${TAG} diff ${base}...HEAD`);
-            const result = git(workspaceRoot, `diff ${base}...HEAD`);
-            return result || '(no differences from base branch)';
+            const excludeArgs = DIFF_EXCLUDE_PATTERNS.map(p => `':!${p}'`).join(' ');
+            logToolAction(`${TAG} diff ${base}...HEAD (excluding generated files)`);
+            const result = git(workspaceRoot, `diff ${base}...HEAD -- . ${excludeArgs}`);
+            if (!result || result === '') {
+                return '(no differences from base branch)';
+            }
+            // If the diff is small enough, return it directly
+            if (result.length <= MAX_DIFF_RESPONSE_CHARS) {
+                return result;
+            }
+            // Diff is too large — return a stat summary and instruct to use per-file tool
+            logToolAction(`${TAG} diff too large (${result.length} chars), falling back to stat summary`);
+            const stat = git(workspaceRoot, `diff --stat ${base}...HEAD -- . ${excludeArgs}`);
+            return [
+                `## Diff too large for a single response (${result.length} chars). Showing file summary instead.\n`,
+                stat,
+                `\n## To review specific files, use the "git_diff_file" tool with the file path.`,
+                `## To see all changed file names, use the "git_diff_stat" tool.`,
+            ].join('\n');
         },
         {
             name: 'git_merge_base_diff',
-            description: 'Show the full diff between the current branch and the base branch (main/master). Useful for reviewing all changes in a PR.',
+            description: 'Show the diff between the current branch and the base branch (main/master), excluding generated files (lock files, dist/, etc.). If the diff is too large, returns a stat summary instead — use git_diff_file to review individual files.',
+            schema: z.object({
+                baseBranch: z.string().optional().describe('Base branch to compare against (default: main/master from config)'),
+            }),
+        }
+    );
+
+    const gitDiffFileTool = tool(
+        async ({ baseBranch, filePath }) => {
+            const base = baseBranch ?? GIT_DEFAULT_BRANCH;
+            logToolAction(`${TAG} diff ${base}...HEAD -- ${filePath}`);
+            const result = git(workspaceRoot, `diff ${base}...HEAD -- "${filePath}"`);
+            if (!result || result === '') {
+                return `(no differences in ${filePath})`;
+            }
+            // Truncate individual file diffs that are extremely large (e.g. generated code)
+            if (result.length > MAX_DIFF_RESPONSE_CHARS) {
+                return result.slice(0, MAX_DIFF_RESPONSE_CHARS) + `\n\n... [TRUNCATED — file diff is ${result.length} chars, likely a generated file] ...`;
+            }
+            return result;
+        },
+        {
+            name: 'git_diff_file',
+            description: 'Show the diff for a SINGLE file between the current branch and the base branch. Use this to review files one at a time when the full diff is too large.',
+            schema: z.object({
+                filePath: z.string().describe('Path of the file to diff (e.g. "src/App.tsx")'),
+                baseBranch: z.string().optional().describe('Base branch to compare against (default: main/master from config)'),
+            }),
+        }
+    );
+
+    const gitDiffStatTool = tool(
+        async ({ baseBranch }) => {
+            const base = baseBranch ?? GIT_DEFAULT_BRANCH;
+            logToolAction(`${TAG} diff --stat ${base}...HEAD`);
+            const result = git(workspaceRoot, `diff --stat ${base}...HEAD`);
+            return result || '(no differences from base branch)';
+        },
+        {
+            name: 'git_diff_stat',
+            description: 'Show a summary of changed files (names and line counts) between the current branch and the base branch. Useful for understanding the scope of changes before reviewing individual files.',
             schema: z.object({
                 baseBranch: z.string().optional().describe('Base branch to compare against (default: main/master from config)'),
             }),
@@ -217,6 +300,8 @@ export function createGitTools(workspaceRoot: string, gitContext?: GitContext | 
         gitDiffTool,
         gitCurrentBranchTool,
         gitMergeBaseDiffTool,
+        gitDiffFileTool,
+        gitDiffStatTool,
         gitLogTool,
     ];
 }

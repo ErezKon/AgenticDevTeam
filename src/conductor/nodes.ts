@@ -21,20 +21,21 @@ import { createQaLeadAgent, createQaUnitAgent, createQaE2eAgent } from '../agent
 import { createDevOpsAgent } from '../agents/devops/devops.agent';
 import { getPlaywrightMcpTools, closePlaywrightMcp } from '../tools/mcp/playwright-mcp';
 import {
-    MAX_BUGFIX_ITERATIONS, GIT_DEFAULT_BRANCH, AGENT_RECURSION_LIMIT,
+    MAX_BUGFIX_ITERATIONS, GIT_DEFAULT_BRANCH, PIPELINE_RECURSION_LIMIT,
     GITHUB_TOKEN, GITHUB_OWNER, GITHUB_REPO, GIT_USER_NAME, GIT_USER_EMAIL,
     GITHUB_PROJECT_TOKEN, GITHUB_PROJECT_OWNER,
     ARCHITECT_MODEL, PRODUCT_MANAGER_MODEL, DBA_MODEL, TEAM_LEADER_MODEL,
     DEVOPS_MODEL, CODEBASE_ANALYZER_MODEL, QA_MODEL, LLM_MODEL,
     MODEL_PRICING,
 } from '../config';
+import { sanitizeMermaidLabels } from '../tools/diagram/diagram-tools';
 import { createGitHubRepo, validateGitHubRepo, initializeRepoLocally } from '../utils/github-repo-manager';
 import { execSync } from 'child_process';
 import type { ProjectStateType } from './state';
 import type { PhaseName, TranscriptMessage, Bug, CodebaseAnalysis, GitContext } from '../agents/_shared/base-schemas';
 import { tokenTracker, type TokenCallRecord } from '../utils/token-tracker';
 import { extractTokenUsageFromMessages } from '../utils/token-usage-extractor';
-import { generateTokenReport } from '../utils/token-report';
+import { generateTokenReport, refreshTokenReport } from '../utils/token-report';
 import * as path from 'path';
 import * as fs from 'fs';
 
@@ -95,6 +96,33 @@ function msg(agentId: string, phase: PhaseName, message: string): TranscriptMess
     return { timestamp: ts(), agentId, phase, message };
 }
 
+/**
+ * Stage, commit, and push any new/modified files in the workspace.
+ * Used by planning agents (architect, PM) that produce doc artifacts
+ * but don't go through the PR workflow.
+ */
+function commitAndPushArtifacts(
+    workspacePath: string,
+    commitMessage: string,
+    gitContext?: GitContext | null,
+    logger?: ReturnType<typeof getLogger>,
+): void {
+    gitExec(workspacePath, 'add .');
+    const status = gitExec(workspacePath, 'status --short');
+    if (!status || status.includes('nothing to commit')) return;
+
+    gitExec(workspacePath, `commit -m "${commitMessage}"`);
+    const currentBranch = gitExec(workspacePath, 'rev-parse --abbrev-ref HEAD');
+    if (currentBranch && !currentBranch.startsWith('Error:')) {
+        const pushResult = gitPush(workspacePath, currentBranch, gitContext);
+        if (pushResult.startsWith('Error:')) {
+            logger?.error?.(`Failed to push artifacts: ${pushResult}`);
+        } else {
+            logger?.info?.(`Committed and pushed artifacts on ${currentBranch}`);
+        }
+    }
+}
+
 /** Resolve the configured model name for a pipeline agent. */
 function getModelForAgent(agentId: string): string {
     const modelMap: Record<string, string | undefined> = {
@@ -118,7 +146,7 @@ async function invokeAgent(
     return retryWithBackoff(async () => {
         const result = await agent.invoke(
             { messages: [{ role: 'user', content: userMessage }] },
-            { configurable: { thread_id: `conductor-${threadSuffix}-${Date.now()}` }, recursionLimit: AGENT_RECURSION_LIMIT },
+            { configurable: { thread_id: `conductor-${threadSuffix}-${Date.now()}` }, recursionLimit: PIPELINE_RECURSION_LIMIT },
         );
 
         // Extract per-invocation token usage from messages (complementary to callback tracking)
@@ -181,6 +209,12 @@ export async function intakeNode(state: ProjectStateType): Promise<Partial<Proje
 
     const outputPath = createRunOutputDir(state.input.systemName);
     setRunLogPath(path.join(outputPath, 'run.log'));
+
+    // ── Token report: create skeleton immediately so it exists on disk ───
+    tokenTracker.enablePersistence(outputPath, state.input.systemName);
+    tokenTracker.setRefreshCallback(() => refreshTokenReport());
+    refreshTokenReport(); // Write the initial skeleton HTML
+    intakeLog.info(`Token report skeleton created at ${outputPath}`);
 
     // ── Resolve GitContext based on repoTarget ───────────────────────────
     const repoTarget = state.input.repoTarget;
@@ -406,13 +440,21 @@ export async function codebaseAnalyzerNode(state: ProjectStateType): Promise<Par
             `\n## Frameworks: ${(output.frameworks ?? []).join(', ')}`,
             `\n## Architecture: ${output.architecture?.style}`,
             `\n${output.architecture?.description ?? ''}`,
-            output.architecture?.mermaidDiagram ? `\n\`\`\`mermaid\n${output.architecture.mermaidDiagram}\n\`\`\`` : '',
+            output.architecture?.mermaidDiagram ? `\n\`\`\`mermaid\n${sanitizeMermaidLabels(output.architecture.mermaidDiagram)}\n\`\`\`` : '',
             `\n## Modules (${(output.modules ?? []).length})`,
             ...(output.modules ?? []).map((m: any) => `- **${m.name}** (\`${m.path}\`): ${m.responsibility}`),
             `\n## Known Issues (${(output.knownIssues ?? []).length})`,
             ...(output.knownIssues ?? []).map((i: string) => `- ${i}`),
         ].join('\n'),
     });
+
+    const systemSlug = path.basename(state.workspacePath);
+    commitAndPushArtifacts(
+        state.workspacePath,
+        `[${systemSlug}]-docs: codebase analyzer mission report`,
+        state.gitContext,
+        analyzerLog,
+    );
 
     return {
         codebaseAnalysis: output as CodebaseAnalysis,
@@ -454,9 +496,17 @@ export async function architectNode(state: ProjectStateType): Promise<Partial<Pr
             `\n## Components\n\n${(output.architecture?.components ?? []).map((c: any) => `- **${c.name}** (${c.type}): ${c.description}`).join('\n')}`,
             `\n## Tech Stack\n\n${(output.techStack ?? []).map((t: any) => `- **${t.layer}**: ${t.choice} — ${t.rationale}`).join('\n')}`,
             `\n## Epics\n\n${(output.epics ?? []).map((e: any) => `- **${e.id}** ${e.title}: ${e.description}`).join('\n')}`,
-            output.architecture?.mermaidDiagram ? `\n## Architecture Diagram\n\n\`\`\`mermaid\n${output.architecture.mermaidDiagram}\n\`\`\`` : '',
+            output.architecture?.mermaidDiagram ? `\n## Architecture Diagram\n\n\`\`\`mermaid\n${sanitizeMermaidLabels(output.architecture.mermaidDiagram)}\n\`\`\`` : '',
         ].join('\n'),
     });
+
+    const systemSlug = path.basename(state.workspacePath);
+    commitAndPushArtifacts(
+        state.workspacePath,
+        `[${systemSlug}]-docs: architect mission report`,
+        state.gitContext,
+        archLog,
+    );
 
     return {
         architecture: output.architecture,
@@ -506,6 +556,14 @@ export async function productManagerNode(state: ProjectStateType): Promise<Parti
         ].join('\n'),
     });
 
+    const systemSlug = path.basename(state.workspacePath);
+    commitAndPushArtifacts(
+        state.workspacePath,
+        `[${systemSlug}]-docs: product manager mission report`,
+        state.gitContext,
+        pmLog,
+    );
+
     return {
         userStories: output.userStories ?? [],
         tasks: output.tasks ?? [],
@@ -550,9 +608,17 @@ export async function dbaNode(state: ProjectStateType): Promise<Partial<ProjectS
             `## Database Engine: ${output.dbDesign?.engine}\n\n${output.dbDesign?.rationale}`,
             `\n## Entities (${output.dbDesign?.entities?.length ?? 0})\n`,
             ...(output.dbDesign?.entities ?? []).map((e: any) => `- **${e.name}**: ${e.columns?.length ?? 0} columns`),
-            output.dbDesign?.erdMermaid ? `\n## ERD\n\n\`\`\`mermaid\n${output.dbDesign.erdMermaid}\n\`\`\`` : '',
+            output.dbDesign?.erdMermaid ? `\n## ERD\n\n\`\`\`mermaid\n${sanitizeMermaidLabels(output.dbDesign.erdMermaid)}\n\`\`\`` : '',
         ].join('\n'),
     });
+
+    const systemSlug = path.basename(state.workspacePath);
+    commitAndPushArtifacts(
+        state.workspacePath,
+        `[${systemSlug}]-docs: DBA mission report`,
+        state.gitContext,
+        dbaLog,
+    );
 
     return {
         dbDesign: output.dbDesign,
@@ -603,6 +669,14 @@ export async function teamLeaderNode(state: ProjectStateType): Promise<Partial<P
             ),
         ].join('\n'),
     });
+
+    const systemSlug = path.basename(state.workspacePath);
+    commitAndPushArtifacts(
+        state.workspacePath,
+        `[${systemSlug}]-docs: team leader mission report`,
+        state.gitContext,
+        tlLog,
+    );
 
     return {
         assignments: output.assignments ?? [],
@@ -872,6 +946,9 @@ const finalLog = getLogger('[Finalize]', 46);
 export async function finalizeNode(state: ProjectStateType): Promise<Partial<ProjectStateType>> {
     finalLog.info('Finalizing run...');
 
+    // ── Mark run as completed ────────────────────────────────────────────
+    tokenTracker.setRunStatus('completed');
+
     // ── Token usage summary ─────────────────────────────────────────────
     const usageSummary = tokenTracker.getRunSummary();
     const usageSnapshot = tokenTracker.getSnapshot();
@@ -996,6 +1073,7 @@ export async function finalizeNode(state: ProjectStateType): Promise<Partial<Pro
         usageSnapshot,
         state.outputPath,
         state.input.systemName,
+        'completed',
     );
     finalLog.info(`Token usage JSON: ${jsonPath}`);
     finalLog.info(`Token usage HTML report: ${htmlPath}`);

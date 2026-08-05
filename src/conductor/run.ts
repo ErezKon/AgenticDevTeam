@@ -3,6 +3,8 @@
  */
 import { createConductor } from './graph';
 import { getLogger } from '../utils/logger';
+import { tokenTracker } from '../utils/token-tracker';
+import { refreshTokenReport } from '../utils/token-report';
 import type { RunInput, RepoTarget } from '../agents/_shared/base-schemas';
 import type { ProjectStateType } from './state';
 
@@ -47,12 +49,21 @@ export async function runAutonomous(opts: RunOptions): Promise<ProjectStateType>
         },
     };
 
-    const finalState = await conductor.invoke(input, {
-        configurable: { thread_id: threadId },
-    });
+    try {
+        const finalState = await conductor.invoke(input, {
+            configurable: { thread_id: threadId },
+        });
 
-    log.info('Autonomous run complete.');
-    return finalState as ProjectStateType;
+        log.info('Autonomous run complete.');
+        return finalState as ProjectStateType;
+    } catch (err) {
+        // Mark the run as failed and flush the token report with whatever
+        // data was collected before the crash — ensures the report exists.
+        tokenTracker.setRunStatus('failed');
+        try { refreshTokenReport(); } catch { /* best-effort */ }
+        log.error(`Autonomous run failed — token report saved with partial data.`);
+        throw err;
+    }
 }
 
 /**
@@ -89,9 +100,16 @@ export async function runHumanInTheLoop(opts: RunOptions): Promise<RunSession> {
     };
 
     // Start — will pause at the first interrupt point
-    await conductor.invoke(input, {
-        configurable: { thread_id: threadId },
-    });
+    try {
+        await conductor.invoke(input, {
+            configurable: { thread_id: threadId },
+        });
+    } catch (err) {
+        tokenTracker.setRunStatus('failed');
+        try { refreshTokenReport(); } catch { /* best-effort */ }
+        log.error(`HITL run failed during initial invoke — token report saved with partial data.`);
+        throw err;
+    }
 
     async function getState(): Promise<ProjectStateType> {
         const snapshot = await conductor.getState({ configurable: { thread_id: threadId } });
@@ -117,12 +135,19 @@ export async function runHumanInTheLoop(opts: RunOptions): Promise<RunSession> {
             timestamp: new Date().toISOString(),
         };
 
-        const result = await conductor.invoke(
-            { approvals: [approval] },
-            { configurable: { thread_id: threadId } },
-        );
+        try {
+            const result = await conductor.invoke(
+                { approvals: [approval] },
+                { configurable: { thread_id: threadId } },
+            );
 
-        return result as ProjectStateType;
+            return result as ProjectStateType;
+        } catch (err) {
+            tokenTracker.setRunStatus('failed');
+            try { refreshTokenReport(); } catch { /* best-effort */ }
+            log.error(`HITL resume failed — token report saved with partial data.`);
+            throw err;
+        }
     }
 
     return { threadId, conductor, getState, resume };

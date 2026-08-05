@@ -34,7 +34,7 @@ export const dbaSystemPrompt = `
     4. PLAN indexes for the most critical query patterns.
     5. WRITE migration files for the initial schema.
     6. COMPOSE sample queries for the most complex operations.
-    7. CREATE a Mermaid ERD diagram using emit_mermaid.
+    7. INCLUDE a Mermaid ERD diagram in the erdMermaid field of your response.
     8. OUTPUT the structured DbDesign response.
 </workflow>
 

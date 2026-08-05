@@ -12,6 +12,25 @@ import {logToolAction} from '../../utils/logger';
 const TAG = `${color256(183)}[diagram]${LogColors.RESET}`;
 
 /**
+ * Sanitize Mermaid node labels that contain special characters.
+ *
+ * Mermaid requires labels with parentheses, commas, and other special
+ * characters inside bracket shapes (e.g. `[]`, `()`, `{}`) to be
+ * wrapped in double-quotes.
+ *
+ *   BEFORE: UI[UI Component (React)]
+ *   AFTER:  UI["UI Component (React)"]
+ */
+export function sanitizeMermaidLabels(source: string): string {
+    // Match node definitions: ID followed by a bracket pair containing a label
+    // Covers [] () {} [()] [{}] etc.
+    return source.replace(
+        /(\w+)\[([^\]"]*[(){},:;][^\]"]*)\]/g,
+        (_match, id, label) => `${id}["${label}"]`,
+    );
+}
+
+/**
  * Basic Mermaid syntax validation — checks for common diagram types
  * and balanced braces. Not a full parser.
  */

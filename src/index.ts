@@ -22,6 +22,8 @@ import { runAutonomous, runHumanInTheLoop, type RunSession } from './conductor/r
 import { parseRequirementsFile } from './tools/requirements/parse-requirements';
 import { getLogger } from './utils/logger';
 import { LogColors, color256 } from './utils/log-colors.util';
+import { tokenTracker } from './utils/token-tracker';
+import { refreshTokenReport } from './utils/token-report';
 import * as path from 'path';
 import * as fs from 'fs';
 
@@ -109,7 +111,14 @@ app.post('/api/run', async (req, res) => {
                     broadcast('run:complete', { systemName, state });
                 })
                 .catch((err) => {
-                    broadcast('run:error', { systemName, error: err.message });
+                    // run.ts already flushes the token report on failure,
+                    // but broadcast the output path so the client can find it
+                    const reportPath = tokenTracker.getOutputPath();
+                    broadcast('run:error', {
+                        systemName,
+                        error: err.message,
+                        tokenReportPath: reportPath ? `${reportPath}/token-usage-report.html` : null,
+                    });
                 });
 
             res.json({ status: 'started', systemName, mode: 'autonomous' });
@@ -204,6 +213,31 @@ if (fs.existsSync(dashboardPath)) {
     });
     log.info(`Serving Angular dashboard from ${dashboardPath}`);
 }
+
+// ─── Signal handlers — flush token report on unexpected exit ─────────────────
+
+function flushTokenReportOnExit(reason: string) {
+    try {
+        if (tokenTracker.getOutputPath()) {
+            tokenTracker.setRunStatus('failed');
+            refreshTokenReport();
+            log.info(`Token report saved on ${reason}.`);
+        }
+    } catch { /* best-effort */ }
+}
+
+process.on('SIGINT', () => { flushTokenReportOnExit('SIGINT'); process.exit(130); });
+process.on('SIGTERM', () => { flushTokenReportOnExit('SIGTERM'); process.exit(143); });
+process.on('uncaughtException', (err) => {
+    log.error(`Uncaught exception: ${err.message}`);
+    flushTokenReportOnExit('uncaughtException');
+    process.exit(1);
+});
+process.on('unhandledRejection', (reason) => {
+    log.error(`Unhandled rejection: ${reason}`);
+    flushTokenReportOnExit('unhandledRejection');
+    process.exit(1);
+});
 
 // ─── Start ──────────────────────────────────────────────────────────────────
 

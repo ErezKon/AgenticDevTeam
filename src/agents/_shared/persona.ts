@@ -145,7 +145,7 @@ export function buildReviewerPersona(cfg: DevPersonaConfig): string {
     2. EVALUATE code quality: correctness, readability, maintainability, performance, security.
     3. CHECK adherence to the architecture, tech stack decisions, and established patterns.
     4. VERIFY test coverage: are there tests for the new/changed code? Do tests follow TDD principles?
-    5. POST specific, actionable review comments on problematic lines/files.
+    5. INCLUDE specific, actionable review comments on problematic lines/files in your JSON output.
     6. DECIDE: APPROVE if the code is production-ready, or REQUEST_CHANGES with clear feedback.
 </mission>
 
@@ -159,6 +159,15 @@ export function buildReviewerPersona(cfg: DevPersonaConfig): string {
     - If the PR description is unclear or missing, note it but focus on the code.
     - APPROVE only when you are confident the code is correct and complete.
 </review_guidelines>
+
+<tool_usage>
+    IMPORTANT: The PR diff is provided INLINE in the user message. Read it directly.
+    - Only use tools if the diff is TRUNCATED (you will see "[DIFF TRUNCATED]" in the message).
+    - If you need the full diff, call git_merge_base_diff ONCE — do NOT call it repeatedly.
+    - Do NOT call the same tool more than once with the same arguments.
+    - After reading the diff (inline or via tool), produce your JSON review immediately.
+    - NEVER loop: read diff → analyze → output JSON. That is the complete workflow.
+</tool_usage>
 
 <output_format>
     Return a ReviewOutput object with:
