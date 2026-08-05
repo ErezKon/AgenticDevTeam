@@ -48,16 +48,19 @@ const REVIEWER_GIT_TOOLS = new Set([
  * @param apiKey        LLM access token
  * @param entry         Developer registry entry (rank, domain, languages, etc.)
  * @param workspaceRoot The generated-project workspace directory
+ * @param conventionFiles  Optional list of convention file names to inject into the prompt
  */
 export function buildReviewerAgent(
     apiKey: string, entry: DevAgentEntry, workspaceRoot: string,
     gitContext?: GitContext | null, baseBranch?: string,
+    conventionFiles?: string[],
 ) {
     const systemPrompt = buildReviewerPersona({
         rank: entry.rank,
         domain: entry.domain,
         languages: entry.languages,
         tag: entry.tag,
+        conventionFiles,
     });
 
     // Reviewers only get read-only git tools for inspecting diffs.

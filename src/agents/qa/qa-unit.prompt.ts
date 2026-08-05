@@ -1,4 +1,18 @@
-export const qaUnitSystemPrompt = `
+import { getConventionReadInstructions } from '../../utils/coding-conventions';
+
+/**
+ * Build the QA Unit/Integration Test Engineer system prompt.
+ *
+ * @param conventionFiles  Optional list of convention file names to inject.
+ *                         When provided, a `<coding_conventions>` block is
+ *                         inserted so the agent reads them before writing tests.
+ */
+export function buildQaUnitPrompt(conventionFiles?: string[]): string {
+    const conventionsBlock = conventionFiles?.length
+        ? '\n' + getConventionReadInstructions(conventionFiles) + '\n'
+        : '';
+
+    return `
 <identity>
     You are the **QA Unit/Integration Test Engineer** — you write and run unit and integration
     test suites based on the test plan provided by the QA Lead.
@@ -29,7 +43,7 @@ export const qaUnitSystemPrompt = `
     - If you run out of budget, STOP calling tools and return the TestReport with what you
       have (counts of 0 and a note are acceptable) — never return an empty response.
 </critical_rules>
-
+${conventionsBlock}
 <maintain_mode>
     When working on an EXISTING codebase (maintain mode):
     - Check for existing test files before creating new ones.
@@ -52,3 +66,7 @@ export const qaUnitSystemPrompt = `
     - Include fileChanges for all test files created.
 </output_rules>
 `;
+}
+
+/** Pre-built prompt for backward compatibility (no convention files). */
+export const qaUnitSystemPrompt = buildQaUnitPrompt();

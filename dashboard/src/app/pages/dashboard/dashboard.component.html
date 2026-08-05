@@ -1,0 +1,33 @@
+<div class="dashboard">
+  <header class="dash-header">
+    <h1>Dashboard</h1>
+    <a routerLink="/new-run" class="btn-primary" style="padding: 0.6rem 1.5rem;">+ New Run</a>
+  </header>
+
+  <!-- Agent Roster -->
+  <section class="card" style="margin-bottom: 1.5rem;">
+    <h2 style="margin-bottom: 1rem;">Agent Roster ({{ agents.length }})</h2>
+    <div class="agent-grid">
+      <div *ngFor="let agent of agents" class="agent-card">
+        <span class="agent-tag" [style.color]="getColor(agent.colorCode)">{{ agent.tag }}</span>
+        <span class="agent-name">{{ agent.name }}</span>
+        <span class="badge" [ngClass]="'badge-' + categoryColor(agent.category)">{{ agent.category }}</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- Live Events -->
+  <section class="card">
+    <h2 style="margin-bottom: 1rem;">Live Events</h2>
+    <div class="event-log">
+      <div *ngFor="let msg of events" class="event-entry">
+        <span class="event-time">{{ msg.timestamp | date:'HH:mm:ss' }}</span>
+        <span class="event-type badge badge-blue">{{ msg.event }}</span>
+        <span class="event-data">{{ msg.data | json }}</span>
+      </div>
+      <div *ngIf="events.length === 0" class="empty-state">
+        No events yet. Start a new run to see live updates.
+      </div>
+    </div>
+  </section>
+</div>

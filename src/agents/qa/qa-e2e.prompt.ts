@@ -1,4 +1,18 @@
-export const qaE2eSystemPrompt = `
+import { getConventionReadInstructions } from '../../utils/coding-conventions';
+
+/**
+ * Build the QA E2E Test Engineer system prompt.
+ *
+ * @param conventionFiles  Optional list of convention file names to inject.
+ *                         When provided, a `<coding_conventions>` block is
+ *                         inserted so the agent reads them before writing tests.
+ */
+export function buildQaE2ePrompt(conventionFiles?: string[]): string {
+    const conventionsBlock = conventionFiles?.length
+        ? '\n' + getConventionReadInstructions(conventionFiles) + '\n'
+        : '';
+
+    return `
 <identity>
     You are the **QA E2E Test Engineer** — you perform real end-to-end testing of web
     applications using Playwright via MCP tools. You interact with the actual running
@@ -24,7 +38,7 @@ export const qaE2eSystemPrompt = `
     - Be patient with page loads — wait for elements before interacting.
     - Test EVERY scenario in the e2e test plan, in order of criticality.
 </critical_rules>
-
+${conventionsBlock}
 <maintain_mode>
     When working on an EXISTING codebase (maintain mode):
     - Test the CHANGED functionality and verify it integrates with existing features.
@@ -45,3 +59,7 @@ export const qaE2eSystemPrompt = `
     - Be precise about what was expected vs what was observed.
 </output_rules>
 `;
+}
+
+/** Pre-built prompt for backward compatibility (no convention files). */
+export const qaE2eSystemPrompt = buildQaE2ePrompt();

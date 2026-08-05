@@ -19,6 +19,7 @@ import { createTeamLeaderAgent } from '../agents/team-leader/team-leader.agent';
 import { dispatchDevelopers } from '../agents/developers/dispatcher';
 import { createQaLeadAgent, createQaUnitAgent, createQaE2eAgent } from '../agents/qa/qa.agents';
 import { createDevOpsAgent } from '../agents/devops/devops.agent';
+import { deployAllConventionsToWorkspace, resolveConventionFiles } from '../utils/coding-conventions';
 import { getPlaywrightMcpTools, closePlaywrightMcp } from '../tools/mcp/playwright-mcp';
 import {
     MAX_BUGFIX_ITERATIONS, GIT_DEFAULT_BRANCH, PIPELINE_RECURSION_LIMIT,
@@ -699,6 +700,9 @@ export async function developmentNode(state: ProjectStateType): Promise<Partial<
     devLog.info(`Starting development with ${state.assignments.length} assignments...`);
     const apiKey = await getAccessToken();
 
+    // Deploy coding convention files to the workspace for agents to read
+    deployAllConventionsToWorkspace(state.workspacePath);
+
     const devParts = [
         `## Architecture\n\n${JSON.stringify(state.architecture, null, 2)}`,
         `\n## Tech Stack\n\n${JSON.stringify(state.techStack, null, 2)}`,
@@ -713,7 +717,7 @@ export async function developmentNode(state: ProjectStateType): Promise<Partial<
     const contextPrompt = devParts.join('\n');
     const projectSlug = state.systemBranch.replace(/^project\//, '');
 
-    const result = await dispatchDevelopers(apiKey, state.assignments, state.workspacePath, contextPrompt, state.systemBranch, projectSlug, state.gitContext);
+    const result = await dispatchDevelopers(apiKey, state.assignments, state.workspacePath, contextPrompt, state.systemBranch, projectSlug, state.gitContext, state.techStack);
 
     devLog.info(`Development complete: ${result.fileChanges.length} file changes, ${result.pullRequests.length} PRs`);
 
@@ -739,6 +743,12 @@ export async function qaNode(state: ProjectStateType): Promise<Partial<ProjectSt
     const apiKey = await getAccessToken();
     const transcript: TranscriptMessage[] = [];
     const allBugs: Bug[] = [];
+
+    // Deploy conventions (idempotent — skips if already deployed)
+    deployAllConventionsToWorkspace(state.workspacePath);
+
+    // Resolve convention files for QA agents based on tech stack
+    const qaConventionFiles = resolveConventionFiles([], state.techStack);
 
     // 7a. QA Lead — create test plan
     qaLog.info('QA Lead creating test plan...');
@@ -775,7 +785,7 @@ export async function qaNode(state: ProjectStateType): Promise<Partial<ProjectSt
     let unitOutput: any = { testReport: null, bugs: [], fileChanges: [] };
     let unitArtifact: any = null;
     try {
-        const qaUnitAgent = createQaUnitAgent(apiKey, state.workspacePath);
+        const qaUnitAgent = createQaUnitAgent(apiKey, state.workspacePath, qaConventionFiles);
         const unitMsg = [
             `## Test Plan (unit + integration)\n\n${JSON.stringify({ unit: leadOutput.testPlan?.unit ?? [], integration: leadOutput.testPlan?.integration ?? [] }, null, 2)}`,
             `\n## Architecture\n\n${JSON.stringify(state.architecture, null, 2)}`,
@@ -806,7 +816,7 @@ export async function qaNode(state: ProjectStateType): Promise<Partial<ProjectSt
         qaLog.info('QA E2E running Playwright tests...');
         try {
             const mcpTools = await getPlaywrightMcpTools();
-            const qaE2eAgent = createQaE2eAgent(apiKey, mcpTools);
+            const qaE2eAgent = createQaE2eAgent(apiKey, mcpTools, qaConventionFiles);
             const e2eMsg = [
                 `## Test Plan (e2e)\n\n${JSON.stringify(leadOutput.testPlan?.e2e ?? [], null, 2)}`,
                 `\n## Service URLs\n\n${JSON.stringify(state.devopsPlan.serviceUrls, null, 2)}`,
@@ -911,12 +921,18 @@ export async function devopsNode(state: ProjectStateType): Promise<Partial<Proje
     opsLog.info('Starting DevOps phase...');
     const apiKey = await getAccessToken();
 
+    // Deploy conventions (idempotent — skips if already deployed)
+    deployAllConventionsToWorkspace(state.workspacePath);
+
+    // Resolve convention files for DevOps agent based on tech stack
+    const devopsConventionFiles = resolveConventionFiles([], state.techStack);
+
     let output: any = { devops: { buildStatus: 'failed', runStatus: 'failed', serviceUrls: [], healthChecks: [] }, fileChanges: [] };
     let tokenUsage: TokenCallRecord | null = null;
     const transcript: TranscriptMessage[] = [];
 
     try {
-        const agent = createDevOpsAgent(apiKey, state.workspacePath);
+        const agent = createDevOpsAgent(apiKey, state.workspacePath, devopsConventionFiles);
 
         const devopsParts = [
             `## Architecture\n\n${JSON.stringify(state.architecture, null, 2)}`,

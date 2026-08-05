@@ -1,0 +1,63 @@
+.dash-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 1.5rem;
+}
+
+.agent-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 0.75rem;
+}
+
+.agent-card {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  border-radius: 6px;
+  background: var(--bg-primary);
+  font-size: 0.85rem;
+}
+
+.agent-tag {
+  font-weight: 700;
+  font-family: monospace;
+}
+
+.agent-name {
+  flex: 1;
+}
+
+.event-log {
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+.event-entry {
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
+  padding: 0.4rem 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.85rem;
+}
+
+.event-time {
+  color: var(--text-secondary);
+  font-family: monospace;
+  min-width: 70px;
+}
+
+.event-data {
+  color: var(--text-secondary);
+  font-family: monospace;
+  word-break: break-all;
+}
+
+.empty-state {
+  color: var(--text-secondary);
+  text-align: center;
+  padding: 2rem;
+}

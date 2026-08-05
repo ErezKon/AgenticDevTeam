@@ -8,7 +8,7 @@ import { MAX_CONCURRENT_DEVS, INTER_BATCH_DELAY_MS } from '../../config';
 import { getLogger } from '../../utils/logger';
 import { executePRWorkflow } from '../../conductor/pr-workflow';
 import { getDevAgent } from './registry';
-import type { Assignment, FileChange, ArtifactRef, TranscriptMessage, PhaseName, PullRequest, GitContext } from '../_shared/base-schemas';
+import type { Assignment, FileChange, ArtifactRef, TranscriptMessage, PhaseName, PullRequest, GitContext, TechDecision } from '../_shared/base-schemas';
 import type { TokenCallRecord } from '../../utils/token-tracker';
 
 const log = getLogger('[Dispatcher]', 226);
@@ -146,6 +146,7 @@ function collectReviewers(assignments: Assignment[]): string[] {
  * @param assignments  All assignments from the Team Leader
  * @param workspacePath Generated project workspace path
  * @param contextPrompt Context string (architecture, tech stack, DB design summary)
+ * @param techStack    Architect's tech stack decisions (for convention file resolution)
  */
 export async function dispatchDevelopers(
     apiKey: string,
@@ -155,6 +156,7 @@ export async function dispatchDevelopers(
     baseBranch: string,
     projectSlug: string,
     gitContext?: GitContext | null,
+    techStack?: TechDecision[],
 ): Promise<DispatchResult> {
     const fileChanges: FileChange[] = [];
     const artifacts: ArtifactRef[] = [];
@@ -223,6 +225,7 @@ export async function dispatchDevelopers(
                     contextPrompt,
                     projectSlug,
                     gitContext,
+                    techStack,
                 });
             });
 

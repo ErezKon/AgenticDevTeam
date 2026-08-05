@@ -1,7 +1,7 @@
 import { buildAgent } from '../_shared/agent-factory';
 import { qaLeadSystemPrompt } from './qa-lead.prompt';
-import { qaUnitSystemPrompt } from './qa-unit.prompt';
-import { qaE2eSystemPrompt } from './qa-e2e.prompt';
+import { buildQaUnitPrompt, qaUnitSystemPrompt } from './qa-unit.prompt';
+import { buildQaE2ePrompt, qaE2eSystemPrompt } from './qa-e2e.prompt';
 import { QaLeadOutputSchema, QaUnitOutputSchema, QaE2eOutputSchema } from './schemas/qa-output.schema';
 import { createWorkspaceTools } from '../../tools/fs/workspace-tools';
 import { createShellTool } from '../../tools/shell/shell-tools';
@@ -18,10 +18,10 @@ export const createQaLeadAgent = (apiKey: string) => {
     });
 };
 
-export const createQaUnitAgent = (apiKey: string, workspaceRoot: string) => {
+export const createQaUnitAgent = (apiKey: string, workspaceRoot: string, conventionFiles?: string[]) => {
     return buildAgent(apiKey, {
         id: 'qa-unit',
-        systemPrompt: qaUnitSystemPrompt,
+        systemPrompt: conventionFiles ? buildQaUnitPrompt(conventionFiles) : qaUnitSystemPrompt,
         tools: [
             ...createWorkspaceTools(workspaceRoot),
             createShellTool(workspaceRoot),
@@ -40,10 +40,10 @@ export const createQaUnitAgent = (apiKey: string, workspaceRoot: string) => {
  * @param apiKey       LLM token
  * @param mcpTools     Playwright MCP tools loaded via MultiServerMCPClient
  */
-export const createQaE2eAgent = (apiKey: string, mcpTools: any[]) => {
+export const createQaE2eAgent = (apiKey: string, mcpTools: any[], conventionFiles?: string[]) => {
     return buildAgent(apiKey, {
         id: 'qa-e2e',
-        systemPrompt: qaE2eSystemPrompt,
+        systemPrompt: conventionFiles ? buildQaE2ePrompt(conventionFiles) : qaE2eSystemPrompt,
         tools: mcpTools,
         responseFormat: QaE2eOutputSchema,
         temperature: 0.1,

@@ -16,6 +16,7 @@ import { writeArtifact } from '../agents/_shared/artifact';
 import { buildDevAgent } from '../agents/developers/dev-agent.builder';
 import { buildReviewerAgent } from '../agents/developers/reviewer-agent.builder';
 import { getDevAgent, DEV_AGENTS } from '../agents/developers/registry';
+import { resolveConventionFiles } from '../utils/coding-conventions';
 import {
     GITHUB_TOKEN, GITHUB_OWNER, GITHUB_REPO,
     MAX_REVIEW_ITERATIONS, DEV_RECURSION_LIMIT, REVIEWER_RECURSION_LIMIT,
@@ -26,7 +27,7 @@ import {
 import { isBlockingReview, evaluateProgress, MAX_NO_PROGRESS_ITERATIONS } from './review-policy';
 import type {
     Assignment, FileChange, ArtifactRef, TranscriptMessage,
-    PhaseName, PullRequest, PRReview, GitContext,
+    PhaseName, PullRequest, PRReview, GitContext, TechDecision,
 } from '../agents/_shared/base-schemas';
 import type { DeveloperOutput } from '../agents/developers/schemas/dev-output.schema';
 import type { ReviewOutput } from '../agents/developers/schemas/review-output.schema';
@@ -50,6 +51,7 @@ export interface PRWorkflowInput {
     currentState?: string;
     projectSlug: string;
     gitContext?: GitContext | null;
+    techStack?: TechDecision[];
 }
 
 export interface PRWorkflowResult {
@@ -428,6 +430,7 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
     const {
         branchName, baseBranch, assignments, reviewerAgentIds, taskType,
         workspacePath, apiKey, contextPrompt, currentState, projectSlug, gitContext,
+        techStack,
     } = input;
 
     // Resolve owner/repo from gitContext (falls back to config constants)
@@ -503,7 +506,8 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
             const devLog = getLogger(entry.tag, entry.colorCode);
             devLog.info(`Working on branch ${branchName}: ${devAssignments.length} assignment(s)`);
 
-            const agent = buildDevAgent(apiKey, entry, worktreeWorkspace, gitContext, baseBranch);
+            const conventionFiles = resolveConventionFiles(entry.languages, techStack);
+            const agent = buildDevAgent(apiKey, entry, worktreeWorkspace, gitContext, baseBranch, conventionFiles);
 
             const assignmentText = devAssignments.map(a =>
                 `Assignment ${a.id} [${a.priority}/${a.complexity}]: ${a.description}`
@@ -581,7 +585,8 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                                 const primaryEntry = getDevAgent(primaryDevId);
                                 if (!primaryEntry) break;
 
-                                const repairAgent = buildDevAgent(apiKey, primaryEntry, worktreeWorkspace, gitContext, baseBranch);
+                                const repairConventions = resolveConventionFiles(primaryEntry.languages, techStack);
+                                const repairAgent = buildDevAgent(apiKey, primaryEntry, worktreeWorkspace, gitContext, baseBranch, repairConventions);
                                 const repairMsg = [
                                     contextPrompt,
                                     `\n## Project Slug: ${projectSlug}`,
@@ -795,7 +800,8 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                     const reviewerLog = getLogger(`${reviewerEntry.tag} [REVIEW]`, reviewerEntry.colorCode);
                     reviewerLog.info(`Reviewing PR #${ghPr.number} (iteration ${iteration})`);
 
-                    const reviewerAgent = buildReviewerAgent(apiKey, reviewerEntry, worktreeWorkspace, gitContext, baseBranch);
+                    const reviewerConventions = resolveConventionFiles(reviewerEntry.languages, techStack);
+                    const reviewerAgent = buildReviewerAgent(apiKey, reviewerEntry, worktreeWorkspace, gitContext, baseBranch, reviewerConventions);
 
                     // B6: Context-aware diff truncation with stat fallback
                     let truncatedDiff: string;
@@ -988,7 +994,8 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                     const devLog = getLogger(primaryEntry.tag, primaryEntry.colorCode);
                     devLog.info(`Fixing ${allComments.length} review comments...`);
 
-                    const fixAgent = buildDevAgent(apiKey, primaryEntry, worktreeWorkspace, gitContext, baseBranch);
+                    const fixConventions = resolveConventionFiles(primaryEntry.languages, techStack);
+                    const fixAgent = buildDevAgent(apiKey, primaryEntry, worktreeWorkspace, gitContext, baseBranch, fixConventions);
                     const fixMsg = [
                         contextPrompt,
                         `\n## Project Slug: ${projectSlug}`,
@@ -1080,7 +1087,8 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                     log.info(`Escalated dev: ${escalatedDevEntry.name} (${escalatedDevId})`);
 
                     // Escalated dev fixes CRITICALs + reviews overall quality
-                    const escalatedDev = buildDevAgent(apiKey, escalatedDevEntry, worktreeWorkspace, gitContext, baseBranch);
+                    const escalatedConventions = resolveConventionFiles(escalatedDevEntry.languages, techStack);
+                    const escalatedDev = buildDevAgent(apiKey, escalatedDevEntry, worktreeWorkspace, gitContext, baseBranch, escalatedConventions);
                     const criticalComments = lastReviews.flatMap(r =>
                         r.comments.filter((c: any) => c.severity === 'critical' || c.body?.includes('[CRITICAL]'))
                     );
@@ -1125,7 +1133,8 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                             const escalatedReviewerLog = getLogger(`${escalatedReviewerEntry.tag} [ESCALATED REVIEW]`, escalatedReviewerEntry.colorCode);
                             escalatedReviewerLog.info(`Escalated review of PR #${ghPr.number}`);
 
-                            const escalatedReviewer = buildReviewerAgent(apiKey, escalatedReviewerEntry, worktreeWorkspace, gitContext, baseBranch);
+                            const escalatedReviewerConventions = resolveConventionFiles(escalatedReviewerEntry.languages, techStack);
+                            const escalatedReviewer = buildReviewerAgent(apiKey, escalatedReviewerEntry, worktreeWorkspace, gitContext, baseBranch, escalatedReviewerConventions);
                             const escalatedDiff = gitExec(worktreeWorkspace, `diff ${baseBranch}...${branchName} -- . ${DIFF_EXCLUDE_SPECS}`);
                             let escalatedDiffContent: string;
                             if (escalatedDiff.length <= MAX_DIFF_CHARS) {

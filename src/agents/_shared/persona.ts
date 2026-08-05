@@ -5,6 +5,8 @@
  * Non-developer agents (Architect, PM, DBA, etc.) define their own prompts.
  */
 
+import { getConventionReadInstructions } from '../../utils/coding-conventions';
+
 export type DevRank = 'principal' | 'senior' | 'junior';
 export type DevDomain = 'frontend' | 'backend' | 'fullstack';
 
@@ -13,6 +15,7 @@ interface DevPersonaConfig {
     domain: DevDomain;
     languages: string[];
     tag: string;
+    conventionFiles?: string[];
 }
 
 const RANK_RESPONSIBILITIES: Record<DevRank, string> = {
@@ -77,9 +80,13 @@ export function buildDevPersona(cfg: DevPersonaConfig): string {
       test file makes the whole suite fail ("Your test suite must contain at least one test").
 </critical_rules>
 
+${cfg.conventionFiles?.length ? getConventionReadInstructions(cfg.conventionFiles) : ''}
+
 <workflow>
     1. READ your assigned story/stories from the state carefully.
     2. READ the architecture, tech stack, and DB design to understand context.
+    2.5. READ the coding convention files listed in <coding_conventions> using read_file.
+         Apply these standards to ALL code you write.
     3. READ existing files (fileChanges log + actual workspace) to understand what's already been built.
     4. PLAN your approach: which files to create/modify, in what order.
     5. WRITE TESTS FIRST (TDD):
@@ -152,6 +159,14 @@ export function buildReviewerPersona(cfg: DevPersonaConfig): string {
     ${DOMAIN_CONTEXT[cfg.domain]}
     Your technology expertise: ${cfg.languages.join(', ')}.
 </identity>
+
+${cfg.conventionFiles?.length ? `<coding_conventions>
+    Before reviewing, read the following convention files to understand the
+    coding standards this project must follow:
+${cfg.conventionFiles.map((f) => `    - .conventions/${f}`).join('\n')}
+    CHECK that the reviewed code follows these conventions. If it violates
+    a convention rule, include it as a review comment with severity 'major'.
+</coding_conventions>` : ''}
 
 <mission>
     You are reviewing a Pull Request. Your job is to:

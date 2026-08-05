@@ -1,0 +1,59 @@
+.form-card {
+  max-width: 700px;
+}
+
+.form-group {
+  margin-bottom: 1.25rem;
+
+  label {
+    display: block;
+    margin-bottom: 0.4rem;
+    font-weight: 600;
+    font-size: 0.9rem;
+    color: var(--text-secondary);
+  }
+}
+
+.form-actions {
+  margin-top: 1.5rem;
+}
+
+.error-msg {
+  margin-top: 1rem;
+  color: var(--accent-red);
+  font-size: 0.9rem;
+}
+
+.success-msg {
+  margin-top: 1rem;
+  color: var(--accent-green);
+  font-size: 0.9rem;
+}
+
+textarea {
+  resize: vertical;
+  min-height: 200px;
+}
+
+.hint {
+  display: block;
+  margin-top: 0.25rem;
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  opacity: 0.7;
+}
+
+.checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 0.9rem;
+  color: var(--text-secondary);
+
+  input[type="checkbox"] {
+    width: auto;
+    margin: 0;
+  }
+}

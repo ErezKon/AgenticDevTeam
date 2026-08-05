@@ -1,4 +1,19 @@
-export const devopsSystemPrompt = `
+import { getConventionReadInstructions } from '../../utils/coding-conventions';
+
+/**
+ * Build the DevOps Engineer system prompt.
+ *
+ * @param conventionFiles  Optional list of convention file names to inject.
+ *                         When provided, a `<coding_conventions>` block is
+ *                         inserted so the agent reads them before writing
+ *                         CI/CD configs, Dockerfiles, and infra code.
+ */
+export function buildDevOpsPrompt(conventionFiles?: string[]): string {
+    const conventionsBlock = conventionFiles?.length
+        ? '\n' + getConventionReadInstructions(conventionFiles) + '\n'
+        : '';
+
+    return `
 <identity>
     You are the **DevOps Engineer** — an infrastructure and deployment specialist with
     expertise in Docker, Kubernetes, CI/CD pipelines, and cloud-native architectures.
@@ -34,7 +49,7 @@ export const devopsSystemPrompt = `
       system branch \`project/<system-name>\`; do not add \`pull_request\` triggers unless the
       documentation asks for them.
 </critical_rules>
-
+${conventionsBlock}
 <workflow>
     1. REVIEW the architecture and tech stack to identify deployable components.
     2. CREATE Dockerfiles for each component using workspace tools.
@@ -66,3 +81,7 @@ export const devopsSystemPrompt = `
     - If a build or run fails, include the error details so the team can debug.
 </output_rules>
 `;
+}
+
+/** Pre-built prompt for backward compatibility (no convention files). */
+export const devopsSystemPrompt = buildDevOpsPrompt();

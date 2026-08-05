@@ -29,16 +29,19 @@ function getModelForRank(rank: DevRank): string {
  * @param apiKey  LLM access token
  * @param entry   Developer registry entry (rank, domain, languages, etc.)
  * @param workspaceRoot  The generated-project workspace directory
+ * @param conventionFiles  Optional list of convention file names to inject into the prompt
  */
 export function buildDevAgent(
     apiKey: string, entry: DevAgentEntry, workspaceRoot: string,
     gitContext?: GitContext | null, baseBranch?: string,
+    conventionFiles?: string[],
 ) {
     const systemPrompt = buildDevPersona({
         rank: entry.rank,
         domain: entry.domain,
         languages: entry.languages,
         tag: entry.tag,
+        conventionFiles,
     });
 
     // Dev agents get workspace (fs), git, and shell tools.
