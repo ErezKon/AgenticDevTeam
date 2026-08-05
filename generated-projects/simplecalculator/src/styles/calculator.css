@@ -1,0 +1,17 @@
+/* Calculator button focus ring styles meeting WCAG contrast */
+.calc-button {
+  /* basic button styling */
+  background-color: #f0f0f0;
+  color: #000;
+  border: none;
+  padding: 1rem;
+  font-size: 1.2rem;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+/* Focus ring with sufficient contrast */
+.calc-button:focus-visible {
+  outline: 3px solid #000; /* black outline provides high contrast */
+  outline-offset: 2px;
+}
