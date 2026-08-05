@@ -119,7 +119,24 @@ export const DEV_RECURSION_LIMIT =
     parseInt(process.env.DEV_RECURSION_LIMIT ?? process.env.AGENT_RECURSION_LIMIT ?? '50', 10);
 
 export const REVIEWER_RECURSION_LIMIT =
-    parseInt(process.env.REVIEWER_RECURSION_LIMIT ?? process.env.AGENT_RECURSION_LIMIT ?? '15', 10);
+    parseInt(process.env.REVIEWER_RECURSION_LIMIT ?? process.env.AGENT_RECURSION_LIMIT ?? '26', 10);
+
+/**
+ * Recursion limit for pipeline agents that USE TOOLS (codebase-analyzer,
+ * qa-unit, qa-e2e, devops). These agents explore the workspace, write files
+ * and run commands, so 15 (PIPELINE_RECURSION_LIMIT) is far too low — it
+ * killed the whole run at the QA phase in runs 5 and 6.
+ */
+export const TOOL_PIPELINE_RECURSION_LIMIT =
+    parseInt(process.env.TOOL_PIPELINE_RECURSION_LIMIT ?? '60', 10);
+
+/** Loop-guard ceiling (total tool calls) for tool-using pipeline agents. */
+export const TOOL_PIPELINE_MAX_TOOL_CALLS =
+    parseInt(process.env.TOOL_PIPELINE_MAX_TOOL_CALLS ?? '25', 10);
+
+/** Loop-guard ceiling for reviewer agents (must be < REVIEWER_RECURSION_LIMIT / 2). */
+export const REVIEWER_MAX_TOOL_CALLS =
+    parseInt(process.env.REVIEWER_MAX_TOOL_CALLS ?? '8', 10);
 
 /** @deprecated Use per-type limits (PIPELINE_RECURSION_LIMIT, DEV_RECURSION_LIMIT, REVIEWER_RECURSION_LIMIT). */
 export const AGENT_RECURSION_LIMIT =
@@ -131,7 +148,7 @@ export const MAX_CONCURRENT_DEVS =
 
 /** Delay (ms) between dispatching batches of branches to avoid rate limits. */
 export const INTER_BATCH_DELAY_MS =
-    parseInt(process.env.INTER_BATCH_DELAY_MS ?? '2000', 10);
+    parseInt(process.env.INTER_BATCH_DELAY_MS ?? '5000', 10);
 
 // ─── Paths ──────────────────────────────────────────────────────────────────
 
@@ -182,6 +199,18 @@ export const GIT_USER_EMAIL = process.env.GIT_USER_EMAIL ?? 'agenticdevteam@nore
 /** Max PR review iterations before force-merging or escalating. */
 export const MAX_REVIEW_ITERATIONS =
     parseInt(process.env.MAX_REVIEW_ITERATIONS ?? '5', 10);
+
+/** Timeout (ms) for `npm install` inside a PR worktree (default 5 min). */
+export const PR_TEST_INSTALL_TIMEOUT_MS =
+    parseInt(process.env.PR_TEST_INSTALL_TIMEOUT_MS ?? '300000', 10);
+
+/** Timeout (ms) for `npm test` inside a PR worktree (default 3 min). */
+export const PR_TEST_TIMEOUT_MS =
+    parseInt(process.env.PR_TEST_TIMEOUT_MS ?? '180000', 10);
+
+/** Number of automated repair attempts when pre-PR tests fail (0 disables). */
+export const PR_TEST_REPAIR_ATTEMPTS =
+    parseInt(process.env.PR_TEST_REPAIR_ATTEMPTS ?? '1', 10);
 
 // ─── GitHub Project (multi-repo targeting) ──────────────────────────────────
 

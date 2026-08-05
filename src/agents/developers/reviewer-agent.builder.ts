@@ -11,7 +11,7 @@ import { buildReviewerPersona } from '../_shared/persona';
 import type { DevRank } from '../_shared/persona';
 import { ReviewOutputSchema } from './schemas/review-output.schema';
 import { createGitTools } from '../../tools/git/git-tools';
-import { PRINCIPAL_DEV_MODEL, SENIOR_DEV_MODEL, JUNIOR_DEV_MODEL } from '../../config';
+import { PRINCIPAL_DEV_MODEL, SENIOR_DEV_MODEL, JUNIOR_DEV_MODEL, REVIEWER_MAX_TOOL_CALLS } from '../../config';
 import type { GitContext } from '../_shared/base-schemas';
 import type { DevAgentEntry } from './registry';
 
@@ -49,7 +49,10 @@ const REVIEWER_GIT_TOOLS = new Set([
  * @param entry         Developer registry entry (rank, domain, languages, etc.)
  * @param workspaceRoot The generated-project workspace directory
  */
-export function buildReviewerAgent(apiKey: string, entry: DevAgentEntry, workspaceRoot: string, gitContext?: GitContext | null) {
+export function buildReviewerAgent(
+    apiKey: string, entry: DevAgentEntry, workspaceRoot: string,
+    gitContext?: GitContext | null, baseBranch?: string,
+) {
     const systemPrompt = buildReviewerPersona({
         rank: entry.rank,
         domain: entry.domain,
@@ -59,7 +62,7 @@ export function buildReviewerAgent(apiKey: string, entry: DevAgentEntry, workspa
 
     // Reviewers only get read-only git tools for inspecting diffs.
     // No GitHub tools — the PR workflow posts reviews on their behalf.
-    const allGitTools = createGitTools(workspaceRoot, gitContext);
+    const allGitTools = createGitTools(workspaceRoot, gitContext, baseBranch);
     const readOnlyGitTools = allGitTools.filter(t => REVIEWER_GIT_TOOLS.has(t.name));
 
     return buildAgent(apiKey, {
@@ -70,5 +73,6 @@ export function buildReviewerAgent(apiKey: string, entry: DevAgentEntry, workspa
         temperature: 0.1,
         model: getModelForRank(entry.rank),
         phase: 'review',
+        maxToolCalls: REVIEWER_MAX_TOOL_CALLS,
     });
 }

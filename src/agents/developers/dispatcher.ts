@@ -7,6 +7,7 @@
 import { MAX_CONCURRENT_DEVS, INTER_BATCH_DELAY_MS } from '../../config';
 import { getLogger } from '../../utils/logger';
 import { executePRWorkflow } from '../../conductor/pr-workflow';
+import { getDevAgent } from './registry';
 import type { Assignment, FileChange, ArtifactRef, TranscriptMessage, PhaseName, PullRequest, GitContext } from '../_shared/base-schemas';
 import type { TokenCallRecord } from '../../utils/token-tracker';
 
@@ -49,17 +50,41 @@ function topoSort(assignments: Assignment[]): Assignment[][] {
 }
 
 /**
- * Group assignments by branch name.
- * Assignments without a branchName get their own auto-generated branch.
+ * Canonical branch name for an assignment.
+ *
+ * Enforces "one branch per user story": all assignments carrying the same
+ * storyId collapse onto the branch name chosen by the FIRST assignment for
+ * that story (or a derived name if the Team Leader supplied none). Run 6
+ * produced 26 branches for 8 stories, which caused 19 PRs, ~5k LLM calls and
+ * repeated merge conflicts.
  */
-function groupByBranch(assignments: Assignment[], projectSlug: string): Map<string, Assignment[]> {
+export function canonicalBranchName(
+    a: Assignment,
+    projectSlug: string,
+    storyBranches: Map<string, string>,
+): string {
+    const storyKey = a.storyId ?? a.id;
+    const existing = storyBranches.get(storyKey);
+    if (existing) return existing;
+
+    let branch = a.branchName ?? `${projectSlug}/feature/${slugify(storyKey)}-${slugify(a.description)}`;
+    if (!branch.startsWith(`${projectSlug}/`)) branch = `${projectSlug}/${branch}`;
+    storyBranches.set(storyKey, branch);
+    return branch;
+}
+
+/**
+ * Group assignments by branch name.
+ * Uses canonicalBranchName to enforce one-branch-per-story grouping.
+ */
+function groupByBranch(
+    assignments: Assignment[],
+    projectSlug: string,
+    storyBranches: Map<string, string>,
+): Map<string, Assignment[]> {
     const groups = new Map<string, Assignment[]>();
     for (const a of assignments) {
-        let branch = a.branchName ?? `${projectSlug}/feature/${a.id}-${slugify(a.description)}`;
-        // Ensure project slug prefix even if team leader forgot it
-        if (!branch.startsWith(`${projectSlug}/`)) {
-            branch = `${projectSlug}/${branch}`;
-        }
+        const branch = canonicalBranchName(a, projectSlug, storyBranches);
         const existing = groups.get(branch) ?? [];
         existing.push(a);
         groups.set(branch, existing);
@@ -90,7 +115,8 @@ function primaryTaskType(assignments: Assignment[]): 'feature' | 'bug' | 'fix' |
 
 /**
  * Collect reviewer IDs from all assignments in a branch group.
- * Returns a deduplicated array.
+ * Returns a deduplicated array capped at 2 (the highest-rank reviewers)
+ * so review cost does not grow with merged group size.
  */
 function collectReviewers(assignments: Assignment[]): string[] {
     const reviewers = new Set<string>();
@@ -99,7 +125,15 @@ function collectReviewers(assignments: Assignment[]): string[] {
             for (const r of a.reviewerAgentIds) reviewers.add(r);
         }
     }
-    return [...reviewers];
+    const all = [...reviewers];
+    if (all.length <= 2) return all;
+
+    const RANK_ORDER: Record<string, number> = { principal: 2, senior: 1, junior: 0 };
+    return all
+        .sort((x, y) =>
+            (RANK_ORDER[getDevAgent(y)?.rank ?? 'junior'] ?? 0) -
+            (RANK_ORDER[getDevAgent(x)?.rank ?? 'junior'] ?? 0))
+        .slice(0, 2);
 }
 
 /**
@@ -128,9 +162,15 @@ export async function dispatchDevelopers(
     const pullRequests: PullRequest[] = [];
     const tokenUsage: TokenCallRecord[] = [];
 
+    // ── Story → branch mapping (shared across grouping + layer loop) ────
+    const storyBranches = new Map<string, string>();
+
     // ── Group by branch ──────────────────────────────────────────────────
-    const branchGroups = groupByBranch(assignments, projectSlug);
-    log.info(`Dispatch plan: ${branchGroups.size} branch(es), ${assignments.length} total assignments`);
+    const branchGroups = groupByBranch(assignments, projectSlug, storyBranches);
+    log.info(`Dispatch plan: ${branchGroups.size} branch(es) from ${assignments.length} assignments (${storyBranches.size} stories)`);
+    if (branchGroups.size > 8) {
+        log.warn(`High branch count (${branchGroups.size} > 8) — consider merging closely-related stories onto fewer branches`);
+    }
 
     // ── Topological sort within each branch, then process branches ────────
     // Branches with cross-branch dependencies are serialized via topoSort on assignments
@@ -140,13 +180,10 @@ export async function dispatchDevelopers(
     const processedBranches = new Set<string>();
 
     for (const layer of allAssignmentsSorted) {
-        // Identify which branches appear in this layer
+        // Identify which branches appear in this layer (uses the shared storyBranches map)
         const layerBranches = new Map<string, Assignment[]>();
         for (const a of layer) {
-            let branch = a.branchName ?? `${projectSlug}/feature/${a.id}-${slugify(a.description)}`;
-            if (!branch.startsWith(`${projectSlug}/`)) {
-                branch = `${projectSlug}/${branch}`;
-            }
+            const branch = canonicalBranchName(a, projectSlug, storyBranches);
             const existing = layerBranches.get(branch) ?? [];
             existing.push(a);
             layerBranches.set(branch, existing);

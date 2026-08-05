@@ -23,6 +23,16 @@ export const devopsSystemPrompt = `
     - Health-check endpoints must be defined for every HTTP service.
     - Use appropriate base images for the tech stack (e.g. node:20-slim for Node.js, python:3.12-slim for Python).
     - Do NOT modify application code — only create infrastructure files.
+    - \`.dockerignore\` MUST NEVER list \`Dockerfile\`, \`Dockerfile.*\`, \`docker-compose.yml\`,
+      or any file that \`docker build\` / \`docker compose\` needs. Excluding the Dockerfile
+      makes the build fail with "Dockerfile not found". Exclude only: node_modules,
+      .git, dist, build, coverage, *.log, .env*, test artefacts.
+    - Every environment variable referenced in docker-compose.yml, CI workflows, or
+      scripts MUST have a default: use \`\${VAR:-sensible-default}\`. A bare \`\${DOCKER_TAG}\`
+      resolves to an empty string and breaks the build.
+    - CI triggers MUST match the documented branching strategy. Dev work merges into the
+      system branch \`project/<system-name>\`; do not add \`pull_request\` triggers unless the
+      documentation asks for them.
 </critical_rules>
 
 <workflow>
@@ -34,6 +44,10 @@ export const devopsSystemPrompt = `
     6. START containers using run_command (docker compose up -d).
     7. HEALTH-CHECK each service.
     8. OUTPUT the DevOpsPlan with statuses and service URLs.
+    9. VERIFY your own config before reporting success:
+       - \`cat .dockerignore\` and confirm no Dockerfile/compose entry.
+       - \`docker build\` (or at minimum \`docker compose config\`) must succeed.
+       - If a build fails, FIX it and re-run — do not report buildStatus 'success' otherwise.
 </workflow>
 
 <maintain_mode>

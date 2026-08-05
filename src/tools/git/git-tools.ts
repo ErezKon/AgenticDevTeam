@@ -72,10 +72,38 @@ function git(workspaceRoot: string, args: string): string {
 /**
  * Create workspace-scoped Git CLI tools.
  */
-export function createGitTools(workspaceRoot: string, gitContext?: GitContext | null) {
+export function createGitTools(
+    workspaceRoot: string,
+    gitContext?: GitContext | null,
+    defaultBaseBranch?: string,
+) {
+    /**
+     * Resolve the base branch for merge-base diffs.
+     *
+     * Priority: explicit tool argument → the branch this PR actually targets
+     * (defaultBaseBranch) → gitContext.defaultBranch → GIT_DEFAULT_BRANCH.
+     * If the resolved ref does not exist locally, fall back to `origin/<ref>`.
+     * Runs 5 & 6 wasted whole review iterations on `diff master...HEAD`
+     * because `master` does not exist in generated repos.
+     */
+    const resolveBase = (arg?: string): string => {
+        const candidates = [
+            arg,
+            defaultBaseBranch,
+            gitContext?.defaultBranch,
+            GIT_DEFAULT_BRANCH,
+        ].filter(Boolean) as string[];
+        for (const c of candidates) {
+            if (!git(workspaceRoot, `rev-parse --verify --quiet ${c}`).startsWith('Error')) return c;
+            const remote = `origin/${c}`;
+            if (!git(workspaceRoot, `rev-parse --verify --quiet ${remote}`).startsWith('Error')) return remote;
+        }
+        return candidates[0] ?? GIT_DEFAULT_BRANCH;
+    };
+
     const gitCheckoutBranchTool = tool(
         async ({ branchName, fromBranch }) => {
-            const base = fromBranch ?? GIT_DEFAULT_BRANCH;
+            const base = resolveBase(fromBranch);
             logToolAction(`${TAG} checkout -b ${branchName} from ${base}`);
             // Ensure we're on the base branch and up to date first
             git(workspaceRoot, `checkout ${base}`);
@@ -88,7 +116,7 @@ export function createGitTools(workspaceRoot: string, gitContext?: GitContext | 
             description: 'Create and switch to a new feature branch from the default branch (or a specified base). Pulls the latest base branch first.',
             schema: z.object({
                 branchName: z.string().describe('Name of the new branch (e.g. "feature/US-001-user-auth")'),
-                fromBranch: z.string().optional().describe('Base branch to branch from (default: main/master from config)'),
+                fromBranch: z.string().optional().describe('Base branch to branch from. LEAVE EMPTY — the correct PR base branch is used automatically.'),
             }),
         }
     );
@@ -205,7 +233,7 @@ export function createGitTools(workspaceRoot: string, gitContext?: GitContext | 
 
     const gitMergeBaseDiffTool = tool(
         async ({ baseBranch }) => {
-            const base = baseBranch ?? GIT_DEFAULT_BRANCH;
+            const base = resolveBase(baseBranch);
             const excludeArgs = DIFF_EXCLUDE_PATTERNS.map(p => `':!${p}'`).join(' ');
             logToolAction(`${TAG} diff ${base}...HEAD (excluding generated files)`);
             const result = git(workspaceRoot, `diff ${base}...HEAD -- . ${excludeArgs}`);
@@ -230,14 +258,14 @@ export function createGitTools(workspaceRoot: string, gitContext?: GitContext | 
             name: 'git_merge_base_diff',
             description: 'Show the diff between the current branch and the base branch (main/master), excluding generated files (lock files, dist/, etc.). If the diff is too large, returns a stat summary instead — use git_diff_file to review individual files.',
             schema: z.object({
-                baseBranch: z.string().optional().describe('Base branch to compare against (default: main/master from config)'),
+                baseBranch: z.string().optional().describe('Base branch to compare against. LEAVE EMPTY — the correct PR base branch is used automatically.'),
             }),
         }
     );
 
     const gitDiffFileTool = tool(
         async ({ baseBranch, filePath }) => {
-            const base = baseBranch ?? GIT_DEFAULT_BRANCH;
+            const base = resolveBase(baseBranch);
             logToolAction(`${TAG} diff ${base}...HEAD -- ${filePath}`);
             const result = git(workspaceRoot, `diff ${base}...HEAD -- "${filePath}"`);
             if (!result || result === '') {
@@ -254,14 +282,14 @@ export function createGitTools(workspaceRoot: string, gitContext?: GitContext | 
             description: 'Show the diff for a SINGLE file between the current branch and the base branch. Use this to review files one at a time when the full diff is too large.',
             schema: z.object({
                 filePath: z.string().describe('Path of the file to diff (e.g. "src/App.tsx")'),
-                baseBranch: z.string().optional().describe('Base branch to compare against (default: main/master from config)'),
+                baseBranch: z.string().optional().describe('Base branch to compare against. LEAVE EMPTY — the correct PR base branch is used automatically.'),
             }),
         }
     );
 
     const gitDiffStatTool = tool(
         async ({ baseBranch }) => {
-            const base = baseBranch ?? GIT_DEFAULT_BRANCH;
+            const base = resolveBase(baseBranch);
             logToolAction(`${TAG} diff --stat ${base}...HEAD`);
             const result = git(workspaceRoot, `diff --stat ${base}...HEAD`);
             return result || '(no differences from base branch)';
@@ -270,7 +298,7 @@ export function createGitTools(workspaceRoot: string, gitContext?: GitContext | 
             name: 'git_diff_stat',
             description: 'Show a summary of changed files (names and line counts) between the current branch and the base branch. Useful for understanding the scope of changes before reviewing individual files.',
             schema: z.object({
-                baseBranch: z.string().optional().describe('Base branch to compare against (default: main/master from config)'),
+                baseBranch: z.string().optional().describe('Base branch to compare against. LEAVE EMPTY — the correct PR base branch is used automatically.'),
             }),
         }
     );

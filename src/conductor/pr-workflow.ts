@@ -21,7 +21,9 @@ import {
     MAX_REVIEW_ITERATIONS, DEV_RECURSION_LIMIT, REVIEWER_RECURSION_LIMIT,
     GIT_USER_NAME, GIT_USER_EMAIL,
     PRINCIPAL_DEV_MODEL, SENIOR_DEV_MODEL, JUNIOR_DEV_MODEL,
+    PR_TEST_INSTALL_TIMEOUT_MS, PR_TEST_TIMEOUT_MS, PR_TEST_REPAIR_ATTEMPTS,
 } from '../config';
+import { isBlockingReview, evaluateProgress, MAX_NO_PROGRESS_ITERATIONS } from './review-policy';
 import type {
     Assignment, FileChange, ArtifactRef, TranscriptMessage,
     PhaseName, PullRequest, PRReview, GitContext,
@@ -138,23 +140,53 @@ function slugify(text: string): string {
 }
 
 /**
- * Detect the test command from package.json and run it.
+ * Install dependencies (once) and run the project's test script.
+ *
+ * Runs 5 & 6 produced a stream of `npm test` exit-code-1 failures and review
+ * comments like "Cannot find module" simply because node_modules was missing.
+ *
  * Returns null if no test script exists or the project is not Node-based.
  */
-function runPostDevTests(workspacePath: string): { passed: boolean; output: string } | null {
+function ensureDepsAndRunTests(workspacePath: string): { passed: boolean; output: string } | null {
     const pkgPath = path.join(workspacePath, 'package.json');
     if (!fs.existsSync(pkgPath)) return null;
 
+    let pkg: any;
     try {
-        const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
-        const testScript = pkg?.scripts?.test;
-        if (!testScript || testScript.includes('no test specified')) return null;
+        pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
+    } catch {
+        return null;
+    }
 
-        // Run `npm test` with a reasonable timeout (60s) in non-interactive mode
+    const testScript = pkg?.scripts?.test;
+    if (!testScript || testScript.includes('no test specified')) return null;
+
+    // Install dependencies if node_modules is missing and there are deps
+    const hasDeps = pkg.dependencies || pkg.devDependencies;
+    const nodeModulesPath = path.join(workspacePath, 'node_modules');
+    if (hasDeps && !fs.existsSync(nodeModulesPath)) {
+        log.info('Installing dependencies before running tests...');
+        try {
+            execSync('npm install --no-audit --no-fund --loglevel=error 2>&1', {
+                cwd: workspacePath,
+                encoding: 'utf-8',
+                timeout: PR_TEST_INSTALL_TIMEOUT_MS,
+                maxBuffer: 1024 * 1024 * 5,
+                env: { ...process.env, CI: 'true' },
+            });
+            log.info('Dependencies installed successfully');
+        } catch (installErr: any) {
+            const installOutput = (installErr.stdout ?? installErr.stderr ?? installErr.message ?? '').toString().trim();
+            log.warn(`npm install failed (non-fatal): ${installOutput.slice(-500)}`);
+        }
+    }
+
+    // Run the test script
+    try {
         const result = execSync('npm test --silent 2>&1', {
             cwd: workspacePath,
             encoding: 'utf-8',
-            timeout: 60_000,
+            timeout: PR_TEST_TIMEOUT_MS,
             maxBuffer: 1024 * 1024 * 2,
             env: { ...process.env, CI: 'true', NODE_ENV: 'test' },
         });
@@ -309,10 +341,23 @@ async function invokeReviewerAgent(
     agentId: string, model: string,
 ): Promise<{ output: ReviewOutput; tokenUsage: TokenCallRecord | null }> {
     return retryWithBackoff(async () => {
-        const result = await agent.invoke(
-            { messages: [{ role: 'user', content: userMessage }] },
-            { configurable: { thread_id: `review-${threadSuffix}-${Date.now()}` }, recursionLimit: REVIEWER_RECURSION_LIMIT },
-        );
+        let result: any;
+        try {
+            result = await agent.invoke(
+                { messages: [{ role: 'user', content: userMessage }] },
+                { configurable: { thread_id: `review-${threadSuffix}-${Date.now()}` }, recursionLimit: REVIEWER_RECURSION_LIMIT },
+            );
+        } catch (err: any) {
+            const m = String(err?.message ?? err);
+            if (m.includes('Recursion limit') || m.includes('recursion limit')) {
+                log.warn(`Reviewer ${agentId} hit the recursion limit — abstaining (treated as approved).`);
+                return {
+                    output: { status: 'approved', summary: 'Reviewer abstained: tool-call budget exhausted.', comments: [] },
+                    tokenUsage: null,
+                };
+            }
+            throw err;   // rate limits stay retriable via retryWithBackoff
+        }
         const tokenUsage = extractTokenUsageFromMessages(result, agentId, model, 'review');
 
         // Guard against empty or missing messages
@@ -458,7 +503,7 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
             const devLog = getLogger(entry.tag, entry.colorCode);
             devLog.info(`Working on branch ${branchName}: ${devAssignments.length} assignment(s)`);
 
-            const agent = buildDevAgent(apiKey, entry, worktreeWorkspace, gitContext);
+            const agent = buildDevAgent(apiKey, entry, worktreeWorkspace, gitContext, baseBranch);
 
             const assignmentText = devAssignments.map(a =>
                 `Assignment ${a.id} [${a.priority}/${a.complexity}]: ${a.description}`
@@ -514,18 +559,70 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
         gitPush(worktreeWorkspace, branchName, gitContext);
 
         // ── 1a. Post-development test verification ────────────────────
-        // Run project tests (if available) to detect failures early.
-        // Results are logged and included in the PR description.
+        // Install deps (once) and run project tests to detect failures early.
+        // If tests fail and PR_TEST_REPAIR_ATTEMPTS > 0, give the dev agent
+        // one repair attempt before opening the PR (Sub-Plan 5, Change 5).
         let testResult: { passed: boolean; output: string } | null = null;
         try {
-            testResult = runPostDevTests(worktreeWorkspace);
+            testResult = ensureDepsAndRunTests(worktreeWorkspace);
             if (testResult) {
                 if (testResult.passed) {
                     log.info(`Tests passed on branch ${branchName}`);
                     allTranscript.push(msg('conductor', `Tests passed on branch ${branchName}`));
                 } else {
-                    log.warn(`Tests FAILED on branch ${branchName} — will include in PR description`);
+                    log.warn(`Tests FAILED on branch ${branchName} — giving dev agent a repair attempt`);
                     allTranscript.push(msg('conductor', `WARNING: Tests failed on branch ${branchName}:\n${testResult.output.slice(0, 500)}`));
+
+                    // Automated repair: re-invoke the primary dev agent with test output
+                    if (PR_TEST_REPAIR_ATTEMPTS > 0) {
+                        for (let repair = 0; repair < PR_TEST_REPAIR_ATTEMPTS; repair++) {
+                            try {
+                                const primaryDevId = assignments[0].devAgentId;
+                                const primaryEntry = getDevAgent(primaryDevId);
+                                if (!primaryEntry) break;
+
+                                const repairAgent = buildDevAgent(apiKey, primaryEntry, worktreeWorkspace, gitContext, baseBranch);
+                                const repairMsg = [
+                                    contextPrompt,
+                                    `\n## Project Slug: ${projectSlug}`,
+                                    `\n## Your Branch: ${branchName}`,
+                                    `\nYou are already on this branch. Do NOT switch branches.`,
+                                    `\n## IMPORTANT: Workspace Context`,
+                                    `Your current working directory IS the project root.`,
+                                    `Do NOT prefix paths with "generated-projects/${projectSlug}/" — all file operations are relative to the project root.`,
+                                    `\n## Test Failure Output\n\n\`\`\`\n${testResult!.output.slice(-1500)}\n\`\`\``,
+                                    `\n## Instructions`,
+                                    `Fix the failing tests. Do not disable or delete tests to make them pass. Commit and push.`,
+                                ].join('\n');
+
+                                log.info(`Test repair attempt ${repair + 1}/${PR_TEST_REPAIR_ATTEMPTS}`);
+                                const repairModel = getModelForRank(primaryEntry.rank as DevRank);
+                                const { output: repairOutput, tokenUsage: repairTokenUsage } = await invokeDevAgent(
+                                    repairAgent, repairMsg, `repair-${primaryEntry.id}-${branchName}`, primaryEntry.id, repairModel,
+                                );
+                                if (repairTokenUsage) allTokenUsage.push(repairTokenUsage);
+                                if (repairOutput.fileChanges) allFileChanges.push(...repairOutput.fileChanges);
+
+                                // Commit and push repair changes
+                                gitExec(worktreeWorkspace, 'add .');
+                                const repairStatus = gitExec(worktreeWorkspace, 'status --short');
+                                if (repairStatus && !repairStatus.includes('nothing to commit')) {
+                                    gitExec(worktreeWorkspace, `commit -m "[${projectSlug}]-[${primaryStoryId}]-fix: repair failing tests"`);
+                                }
+                                gitPush(worktreeWorkspace, branchName, gitContext);
+
+                                // Re-run tests
+                                testResult = ensureDepsAndRunTests(worktreeWorkspace);
+                                if (testResult?.passed) {
+                                    log.info(`Tests passed after repair attempt ${repair + 1}`);
+                                    allTranscript.push(msg('conductor', `Tests passed after repair attempt ${repair + 1}`));
+                                    break;
+                                }
+                            } catch (repairErr: any) {
+                                log.warn(`Test repair attempt failed (non-fatal): ${repairErr.message}`);
+                            }
+                        }
+                    }
                 }
             }
         } catch (testErr: any) {
@@ -617,6 +714,14 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
         const seenCommentKeys = new Set<string>();
         let prStatus: 'open' | 'approved' | 'merged' | 'closed' | 'escalated_open' = 'open';
 
+        /** SHA of the last commit that reviewers actually reviewed. */
+        let lastReviewedSha = '';
+        /** Consecutive iterations where the fix attempt produced no new commit. */
+        let noProgressCount = 0;
+        /** Rate-limit retries of the fix step (bounded; replaces the old `iteration--`). */
+        let fixRateLimitRetries = 0;
+        const MAX_FIX_RATE_LIMIT_RETRIES = 2;
+
         /** Max chars for inline diff before switching to stat-based fallback. */
         const MAX_DIFF_CHARS = 25_000;
 
@@ -632,180 +737,221 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
         for (let iteration = 1; iteration <= MAX_REVIEW_ITERATIONS; iteration++) {
             log.info(`Review iteration ${iteration}/${MAX_REVIEW_ITERATIONS}`);
 
+            // ── No-progress detection (Change 1) ────────────────────────
+            // NOTE: the decision must be taken BEFORE `lastReviewedSha` is
+            // updated, otherwise every iteration > 1 looks like no-progress and
+            // reviewers are never re-invoked. `evaluateProgress` owns that order.
+            const headSha = gitExec(worktreeWorkspace, 'rev-parse HEAD');
+            const progress = evaluateProgress(iteration, headSha, lastReviewedSha, noProgressCount);
+            lastReviewedSha = progress.lastReviewedSha;
+            noProgressCount = progress.noProgressCount;
+            const skipReviewPhase = progress.skipReview;
+            if (skipReviewPhase) {
+                log.warn(`No new commits since the last review (HEAD ${headSha.slice(0, 8)}) — skipping re-review (no-progress ${noProgressCount}/${MAX_NO_PROGRESS_ITERATIONS})`);
+                if (progress.endLoop) {
+                    log.warn(`${MAX_NO_PROGRESS_ITERATIONS} consecutive iterations with no progress — ending review loop.`);
+                    break;
+                }
+                // Skip the review but still attempt a fix below
+            }
+
             // Get the diff for reviewers (excluding generated files)
             const prDiff = gitExec(worktreeWorkspace, `diff ${baseBranch}...${branchName} -- . ${DIFF_EXCLUDE_SPECS}`);
 
-            // Determine which reviewers need to (re-)review
-            const pendingReviewers = iteration === 1
-                ? reviewerAgentIds
-                : reviewerAgentIds.filter(rid => {
-                    const lastReview = allReviews
-                        .filter(r => r.reviewerId === rid)
-                        .sort((a, b) => b.iteration - a.iteration)[0];
-                    return !lastReview || lastReview.status === 'changes_requested';
-                });
-
-            if (pendingReviewers.length === 0) {
-                log.info('All reviewers have approved');
+            // ── Skip reviewers on empty diff (Change 4) ─────────────────
+            if (!prDiff || prDiff.trim() === '' || prDiff.startsWith('Error:')) {
+                log.warn('Empty or unavailable diff — skipping review iteration.');
                 prStatus = 'approved';
                 break;
             }
 
-            // Run each reviewer
+            // ── Review phase (skipped when no progress) ──────────────────
             const reviewResults: { reviewerId: string; output: ReviewOutput }[] = [];
 
-            for (const reviewerId of pendingReviewers) {
-                const reviewerEntry = getDevAgent(reviewerId);
-                if (!reviewerEntry) {
-                    log.warn(`Unknown reviewer: ${reviewerId}, skipping`);
-                    continue;
-                }
-
-                const reviewerLog = getLogger(`${reviewerEntry.tag} [REVIEW]`, reviewerEntry.colorCode);
-                reviewerLog.info(`Reviewing PR #${ghPr.number} (iteration ${iteration})`);
-
-                const reviewerAgent = buildReviewerAgent(apiKey, reviewerEntry, worktreeWorkspace, gitContext);
-
-                // B6: Context-aware diff truncation with stat fallback
-                let truncatedDiff: string;
-                if (prDiff.length <= MAX_DIFF_CHARS) {
-                    truncatedDiff = prDiff;
-                } else {
-                    // Diff too large — provide stat summary and instruct to use per-file tools
-                    const diffStat = gitExec(worktreeWorkspace, `diff --stat ${baseBranch}...${branchName} -- . ${DIFF_EXCLUDE_SPECS}`);
-                    truncatedDiff = [
-                        `[DIFF TOO LARGE — ${prDiff.length} chars. Showing file summary instead]\n`,
-                        diffStat,
-                        `\nUse the "git_diff_file" tool with a specific file path to review individual files.`,
-                        `Use the "git_diff_stat" tool to see the full list of changed files.`,
-                    ].join('\n');
-                }
-
-                // B6: Summarize previous reviews instead of full JSON
-                const prevReviewSummary = iteration > 1
-                    ? allReviews.filter(r => r.reviewerId === reviewerId)
-                        .map(r => `Iteration ${r.iteration}: ${r.status} (${r.comments.length} comments)`)
-                        .join('\n')
-                    : '';
-
-                // B3: Collect prior reviewer comments from this iteration to avoid duplicates
-                const priorIterComments = reviewResults
-                    .flatMap(r => (r.output.comments ?? []).map((c: any) => ({
-                        reviewer: r.reviewerId,
-                        file: c.filePath,
-                        line: c.line,
-                        body: c.body,
-                        severity: c.severity,
-                    })));
-                const priorCommentsSection = priorIterComments.length > 0
-                    ? `\n## Other Reviewer Comments This Iteration\nThe following comments have already been posted by other reviewers in this iteration. Do NOT repeat these. Only add NEW, UNIQUE observations.\n\n${JSON.stringify(priorIterComments, null, 2)}`
-                    : '';
-
-                const reviewMsg = [
-                    `## Pull Request #${ghPr.number}: ${prTitle}`,
-                    `\n## PR Description\n\n${prBody.slice(0, 2000)}`,
-                    `\n## Diff\n\n\`\`\`diff\n${truncatedDiff}\n\`\`\``,
-                    `\n## Review Iteration: ${iteration}`,
-                    prevReviewSummary ? `\n## Previous Review Summary\n\n${prevReviewSummary}` : '',
-                    priorCommentsSection,
-                ].join('\n');
-
-                try {
-                    const reviewerModel = getModelForRank(reviewerEntry.rank as DevRank);
-                    const { output: reviewOutput, tokenUsage: revTokenUsage } = await invokeReviewerAgent(
-                        reviewerAgent, reviewMsg, `${reviewerId}-pr${ghPr.number}-iter${iteration}`,
-                        `${reviewerId}-reviewer`, reviewerModel,
-                    );
-                    if (revTokenUsage) allTokenUsage.push(revTokenUsage);
-                    // B10: Fallback for undefined status
-                    if (!reviewOutput.status) {
-                        reviewerLog.warn('Reviewer returned undefined status — treating as approved');
-                        reviewOutput.status = 'approved';
-                    }
-
-                    reviewResults.push({ reviewerId, output: reviewOutput });
-                    reviewerLog.info(`Decision: ${reviewOutput.status} (${reviewOutput.comments?.length ?? 0} comments)`);
-
-                    // B2: Log individual review comments to the run log
-                    for (const c of reviewOutput.comments ?? []) {
-                        reviewerLog.info(`  ${c.filePath}${c.line ? ':' + c.line : ''} — [${(c.severity ?? 'info').toUpperCase()}] ${c.body}`);
-                    }
-
-                    // Post simulated review as an issue comment (avoids "Can not request changes on your own pull request")
-                    const ghComments = (reviewOutput.comments ?? [])
-                        .filter((c: any) => c.filePath && c.body)
-                        .map((c: any) => ({
-                            path: c.filePath,
-                            line: c.line ?? 1,
-                            body: `**[${c.severity?.toUpperCase() ?? 'INFO'}]** ${c.body}`,
-                        }));
-
-                    const statusTag = reviewOutput.status === 'approved' ? 'APPROVED' : 'CHANGES_REQUESTED';
-                    const commentParts = [
-                        `[REVIEW: ${statusTag} by ${reviewerEntry.name} (${reviewerEntry.id})] — iteration ${iteration}`,
-                        '',
-                        `**Summary:** ${reviewOutput.summary}`,
-                    ];
-                    if (ghComments.length > 0) {
-                        commentParts.push('', '### Comments', '');
-                        for (const c of ghComments) {
-                            commentParts.push(`- **\`${c.path}\`${c.line ? `:${c.line}` : ''}** — ${c.body}`);
-                        }
-                    }
-
-                    try {
-                        await octokit.issues.createComment({
-                            owner: ghOwner, repo: ghRepo,
-                            issue_number: ghPr.number, body: commentParts.join('\n'),
-                        });
-                    } catch (commentErr: any) {
-                        log.warn(`Failed to post review comment to GitHub: ${commentErr.message}`);
-                    }
-
-                    // Record review
-                    allReviews.push({
-                        reviewerId,
-                        status: reviewOutput.status === 'approved' ? 'approved' : 'changes_requested',
-                        comments: (reviewOutput.comments ?? []).map((c: any, idx: number) => ({
-                            id: `${reviewerId}-iter${iteration}-${idx}`,
-                            reviewerId,
-                            filePath: c.filePath ?? '',
-                            line: c.line,
-                            body: c.body ?? '',
-                            severity: c.severity ?? 'info',
-                            resolved: false,
-                        })),
-                        iteration,
+            if (!skipReviewPhase) {
+                // Determine which reviewers need to (re-)review
+                const pendingReviewers = iteration === 1
+                    ? reviewerAgentIds
+                    : reviewerAgentIds.filter(rid => {
+                        const lastReview = allReviews
+                            .filter(r => r.reviewerId === rid)
+                            .sort((a, b) => b.iteration - a.iteration)[0];
+                        return !lastReview || lastReview.status === 'changes_requested';
                     });
 
-                    allTranscript.push(msg(reviewerId, `Review: ${reviewOutput.status} — ${reviewOutput.summary?.slice(0, 100)}`));
-                } catch (err: any) {
-                    log.error(`Reviewer ${reviewerId} failed: ${err.message}`);
-                    allTranscript.push(msg(reviewerId, `Review failed: ${err.message}`));
+                if (pendingReviewers.length === 0) {
+                    log.info('All reviewers have approved');
+                    prStatus = 'approved';
+                    break;
                 }
-            }
 
-            // Check if all reviewers approved
-            const allApproved = reviewerAgentIds.every(rid => {
-                const latest = allReviews
-                    .filter(r => r.reviewerId === rid)
-                    .sort((a, b) => b.iteration - a.iteration)[0];
-                return latest?.status === 'approved';
-            });
+                for (const reviewerId of pendingReviewers) {
+                    const reviewerEntry = getDevAgent(reviewerId);
+                    if (!reviewerEntry) {
+                        log.warn(`Unknown reviewer: ${reviewerId}, skipping`);
+                        continue;
+                    }
 
-            if (allApproved) {
-                log.info('All reviewers approved!');
-                prStatus = 'approved';
-                break;
-            }
+                    const reviewerLog = getLogger(`${reviewerEntry.tag} [REVIEW]`, reviewerEntry.colorCode);
+                    reviewerLog.info(`Reviewing PR #${ghPr.number} (iteration ${iteration})`);
+
+                    const reviewerAgent = buildReviewerAgent(apiKey, reviewerEntry, worktreeWorkspace, gitContext, baseBranch);
+
+                    // B6: Context-aware diff truncation with stat fallback
+                    let truncatedDiff: string;
+                    if (prDiff.length <= MAX_DIFF_CHARS) {
+                        truncatedDiff = prDiff;
+                    } else {
+                        // Diff too large — provide stat summary and instruct to use per-file tools
+                        const diffStat = gitExec(worktreeWorkspace, `diff --stat ${baseBranch}...${branchName} -- . ${DIFF_EXCLUDE_SPECS}`);
+                        truncatedDiff = [
+                            `[DIFF TOO LARGE — ${prDiff.length} chars. Showing file summary instead]\n`,
+                            diffStat,
+                            `\nUse the "git_diff_file" tool with a specific file path to review individual files.`,
+                            `Use the "git_diff_stat" tool to see the full list of changed files.`,
+                        ].join('\n');
+                    }
+
+                    // B6: Summarize previous reviews instead of full JSON
+                    const prevReviewSummary = iteration > 1
+                        ? allReviews.filter(r => r.reviewerId === reviewerId)
+                            .map(r => `Iteration ${r.iteration}: ${r.status} (${r.comments.length} comments)`)
+                            .join('\n')
+                        : '';
+
+                    // B3: Collect prior reviewer comments from this iteration to avoid duplicates
+                    const priorIterComments = reviewResults
+                        .flatMap(r => (r.output.comments ?? []).map((c: any) => ({
+                            reviewer: r.reviewerId,
+                            file: c.filePath,
+                            line: c.line,
+                            body: c.body,
+                            severity: c.severity,
+                        })));
+                    const priorCommentsSection = priorIterComments.length > 0
+                        ? `\n## Other Reviewer Comments This Iteration\nThe following comments have already been posted by other reviewers in this iteration. Do NOT repeat these. Only add NEW, UNIQUE observations.\n\n${JSON.stringify(priorIterComments, null, 2)}`
+                        : '';
+
+                    const reviewMsg = [
+                        `## Pull Request #${ghPr.number}: ${prTitle}`,
+                        `\n## Base Branch: ${baseBranch} (already applied to all diff tools — never pass a baseBranch argument yourself)`,
+                        `\n## PR Description\n\n${prBody.slice(0, 2000)}`,
+                        `\n## Diff\n\n\`\`\`diff\n${truncatedDiff}\n\`\`\``,
+                        `\n## Review Iteration: ${iteration}`,
+                        prevReviewSummary ? `\n## Previous Review Summary\n\n${prevReviewSummary}` : '',
+                        priorCommentsSection,
+                    ].join('\n');
+
+                    try {
+                        const reviewerModel = getModelForRank(reviewerEntry.rank as DevRank);
+                        const { output: reviewOutput, tokenUsage: revTokenUsage } = await invokeReviewerAgent(
+                            reviewerAgent, reviewMsg, `${reviewerId}-pr${ghPr.number}-iter${iteration}`,
+                            `${reviewerId}-reviewer`, reviewerModel,
+                        );
+                        if (revTokenUsage) allTokenUsage.push(revTokenUsage);
+                        // B10: Fallback for undefined status
+                        if (!reviewOutput.status) {
+                            reviewerLog.warn('Reviewer returned undefined status — treating as approved');
+                            reviewOutput.status = 'approved';
+                        }
+
+                        // ── Only blocking severities block (Change 3) ───────
+                        if (reviewOutput.status === 'changes_requested' && !isBlockingReview(reviewOutput.comments ?? [])) {
+                            reviewerLog.info('Only non-blocking comments (minor/suggestion) — recording as approved-with-comments.');
+                            reviewOutput.status = 'approved';
+                        }
+
+                        reviewResults.push({ reviewerId, output: reviewOutput });
+                        reviewerLog.info(`Decision: ${reviewOutput.status} (${reviewOutput.comments?.length ?? 0} comments)`);
+
+                        // B2: Log individual review comments to the run log
+                        for (const c of reviewOutput.comments ?? []) {
+                            reviewerLog.info(`  ${c.filePath}${c.line ? ':' + c.line : ''} — [${(c.severity ?? 'info').toUpperCase()}] ${c.body}`);
+                        }
+
+                        // Post simulated review as an issue comment (avoids "Can not request changes on your own pull request")
+                        const ghComments = (reviewOutput.comments ?? [])
+                            .filter((c: any) => c.filePath && c.body)
+                            .map((c: any) => ({
+                                path: c.filePath,
+                                line: c.line ?? 1,
+                                body: `**[${c.severity?.toUpperCase() ?? 'INFO'}]** ${c.body}`,
+                            }));
+
+                        const statusTag = reviewOutput.status === 'approved' ? 'APPROVED' : 'CHANGES_REQUESTED';
+                        const commentParts = [
+                            `[REVIEW: ${statusTag} by ${reviewerEntry.name} (${reviewerEntry.id})] — iteration ${iteration}`,
+                            '',
+                            `**Summary:** ${reviewOutput.summary}`,
+                        ];
+                        if (ghComments.length > 0) {
+                            commentParts.push('', '### Comments', '');
+                            for (const c of ghComments) {
+                                commentParts.push(`- **\`${c.path}\`${c.line ? `:${c.line}` : ''}** — ${c.body}`);
+                            }
+                        }
+
+                        try {
+                            await octokit.issues.createComment({
+                                owner: ghOwner, repo: ghRepo,
+                                issue_number: ghPr.number, body: commentParts.join('\n'),
+                            });
+                        } catch (commentErr: any) {
+                            log.warn(`Failed to post review comment to GitHub: ${commentErr.message}`);
+                        }
+
+                        // Record review
+                        allReviews.push({
+                            reviewerId,
+                            status: reviewOutput.status === 'approved' ? 'approved' : 'changes_requested',
+                            comments: (reviewOutput.comments ?? []).map((c: any, idx: number) => ({
+                                id: `${reviewerId}-iter${iteration}-${idx}`,
+                                reviewerId,
+                                filePath: c.filePath ?? '',
+                                line: c.line,
+                                body: c.body ?? '',
+                                severity: c.severity ?? 'info',
+                                resolved: false,
+                            })),
+                            iteration,
+                        });
+
+                        allTranscript.push(msg(reviewerId, `Review: ${reviewOutput.status} — ${reviewOutput.summary?.slice(0, 100)}`));
+                    } catch (err: any) {
+                        log.error(`Reviewer ${reviewerId} failed: ${err.message}`);
+                        allTranscript.push(msg(reviewerId, `Review failed: ${err.message}`));
+                    }
+                }
+
+                // Check if all reviewers approved
+                const allApproved = reviewerAgentIds.every(rid => {
+                    const latest = allReviews
+                        .filter(r => r.reviewerId === rid)
+                        .sort((a, b) => b.iteration - a.iteration)[0];
+                    return latest?.status === 'approved';
+                });
+
+                if (allApproved) {
+                    log.info('All reviewers approved!');
+                    prStatus = 'approved';
+                    break;
+                }
+            } // end if (!skipReviewPhase)
 
             // ── Fix requested changes ───────────────────────────────────
-            const changesRequested = reviewResults.filter(r => r.output.status === 'changes_requested');
+            // When skipReviewPhase is true, re-use the comments from the most
+            // recent iteration that actually produced reviews — the previous
+            // iteration may itself have been a skipped one.
+            const lastReviewedIteration = allReviews.reduce((m, r) => Math.max(m, r.iteration), 0);
+            const changesRequested = skipReviewPhase
+                ? allReviews
+                    .filter(r => r.iteration === lastReviewedIteration && r.status === 'changes_requested')
+                    .map(r => ({ reviewerId: r.reviewerId, output: { status: 'changes_requested' as const, summary: '', comments: r.comments } }))
+                : reviewResults.filter(r => r.output.status === 'changes_requested');
             if (changesRequested.length > 0 && iteration < MAX_REVIEW_ITERATIONS) {
                 log.info(`${changesRequested.length} reviewer(s) requested changes. Re-invoking dev agent(s)...`);
 
-                // Collect all review comments, deduplicating across iterations
-                const allComments = changesRequested.flatMap(r =>
+                const requestedComments = changesRequested.flatMap(r =>
                     (r.output.comments ?? []).map((c: any) => ({
                         reviewer: r.reviewerId,
                         file: c.filePath,
@@ -813,12 +959,20 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                         comment: c.body,
                         severity: c.severity,
                     }))
-                ).filter(c => {
-                    const key = `${(c.file ?? '').toLowerCase()}::${(c.comment ?? '').slice(0, 100).toLowerCase()}`;
-                    if (seenCommentKeys.has(key)) return false;
-                    seenCommentKeys.add(key);
-                    return true;
-                });
+                );
+
+                // Collect all review comments, deduplicating across iterations.
+                // On a no-progress retry the comments are deliberately the same
+                // ones the failed fix attempt was given, so dedup is skipped —
+                // otherwise the retry would find nothing to do.
+                const allComments = skipReviewPhase
+                    ? requestedComments
+                    : requestedComments.filter(c => {
+                        const key = `${(c.file ?? '').toLowerCase()}::${(c.comment ?? '').slice(0, 100).toLowerCase()}`;
+                        if (seenCommentKeys.has(key)) return false;
+                        seenCommentKeys.add(key);
+                        return true;
+                    });
 
                 // If all comments are duplicates of prior iterations, treat as approved
                 if (allComments.length === 0) {
@@ -834,7 +988,7 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                     const devLog = getLogger(primaryEntry.tag, primaryEntry.colorCode);
                     devLog.info(`Fixing ${allComments.length} review comments...`);
 
-                    const fixAgent = buildDevAgent(apiKey, primaryEntry, worktreeWorkspace, gitContext);
+                    const fixAgent = buildDevAgent(apiKey, primaryEntry, worktreeWorkspace, gitContext, baseBranch);
                     const fixMsg = [
                         contextPrompt,
                         `\n## Project Slug: ${projectSlug}`,
@@ -869,11 +1023,16 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                         gitPush(worktreeWorkspace, branchName, gitContext);
                     } catch (err: any) {
                         log.error(`Fix attempt failed: ${err.message}`);
-                        // B5: Don't consume the iteration if rate-limited
+                        // ── Bounded rate-limit retry (Change 2) ─────────────
                         if (err.message?.includes('429') || err.message?.includes('rate limit') || err.message?.includes('Rate limit') || err.message?.includes('Request limit')) {
-                            log.warn('Rate-limited fix — will retry this iteration');
-                            iteration--;
-                            await new Promise(r => setTimeout(r, 30_000));
+                            if (fixRateLimitRetries < MAX_FIX_RATE_LIMIT_RETRIES) {
+                                fixRateLimitRetries++;
+                                log.warn(`Rate-limited fix (retry ${fixRateLimitRetries}/${MAX_FIX_RATE_LIMIT_RETRIES}) — waiting before the next iteration`);
+                                await new Promise(r => setTimeout(r, 30_000));
+                            } else {
+                                log.warn('Fix step exhausted its rate-limit retries — ending review loop.');
+                                break;
+                            }
                         }
                         // Recursion limit: the agent ran out of steps, but a fresh
                         // agent in the next review iteration gets a fresh budget.
@@ -896,7 +1055,11 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
 
         // ── 3b. Escalation check ────────────────────────────────────────
         if (prStatus === 'open') {
-            const lastReviews = allReviews.filter(r => r.iteration === MAX_REVIEW_ITERATIONS);
+            // Use the last iteration that actually produced reviews — the loop can
+            // now end early (no-progress / rate-limit exhaustion), in which case
+            // there are no reviews at MAX_REVIEW_ITERATIONS to escalate on.
+            const finalIteration = allReviews.reduce((m, r) => Math.max(m, r.iteration), 0);
+            const lastReviews = allReviews.filter(r => r.iteration === finalIteration);
             const hasCritical = lastReviews.some(r =>
                 r.comments.some((c: any) => c.severity === 'critical' || c.body?.includes('[CRITICAL]'))
             );
@@ -917,7 +1080,7 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                     log.info(`Escalated dev: ${escalatedDevEntry.name} (${escalatedDevId})`);
 
                     // Escalated dev fixes CRITICALs + reviews overall quality
-                    const escalatedDev = buildDevAgent(apiKey, escalatedDevEntry, worktreeWorkspace, gitContext);
+                    const escalatedDev = buildDevAgent(apiKey, escalatedDevEntry, worktreeWorkspace, gitContext, baseBranch);
                     const criticalComments = lastReviews.flatMap(r =>
                         r.comments.filter((c: any) => c.severity === 'critical' || c.body?.includes('[CRITICAL]'))
                     );
@@ -962,7 +1125,7 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                             const escalatedReviewerLog = getLogger(`${escalatedReviewerEntry.tag} [ESCALATED REVIEW]`, escalatedReviewerEntry.colorCode);
                             escalatedReviewerLog.info(`Escalated review of PR #${ghPr.number}`);
 
-                            const escalatedReviewer = buildReviewerAgent(apiKey, escalatedReviewerEntry, worktreeWorkspace, gitContext);
+                            const escalatedReviewer = buildReviewerAgent(apiKey, escalatedReviewerEntry, worktreeWorkspace, gitContext, baseBranch);
                             const escalatedDiff = gitExec(worktreeWorkspace, `diff ${baseBranch}...${branchName} -- . ${DIFF_EXCLUDE_SPECS}`);
                             let escalatedDiffContent: string;
                             if (escalatedDiff.length <= MAX_DIFF_CHARS) {
@@ -977,6 +1140,7 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                             }
                             const escalatedReviewMsg = [
                                 `## Escalated Review — Pull Request #${ghPr.number}: ${prTitle}`,
+                                `\n## Base Branch: ${baseBranch} (already applied to all diff tools — never pass a baseBranch argument yourself)`,
                                 `\n## PR Description\n\n${prBody.slice(0, 2000)}`,
                                 `\n## Diff\n\n${escalatedDiffContent}`,
                                 `\n## Context: This is an escalated review after ${MAX_REVIEW_ITERATIONS} iterations. A higher-rank dev has already applied fixes.`,

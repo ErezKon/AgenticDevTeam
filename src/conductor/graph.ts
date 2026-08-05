@@ -39,8 +39,8 @@ const HITL_PHASES: PhaseName[] = [
 // ─── Conditional edges ──────────────────────────────────────────────────────
 
 function afterQaRouter(state: ProjectStateType): string {
-    const hasFailures = state.testReports.some(r => r.status === 'fail');
-    if (hasFailures && state.iteration.bugfix < MAX_BUGFIX_ITERATIONS) {
+    const hasFailures = (state.testReports ?? []).some(r => r.status === 'fail');
+    if (hasFailures && (state.iteration?.bugfix ?? 0) < MAX_BUGFIX_ITERATIONS) {
         return 'bugfix-triage';
     }
     return 'devops';

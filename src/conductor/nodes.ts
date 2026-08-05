@@ -22,6 +22,7 @@ import { createDevOpsAgent } from '../agents/devops/devops.agent';
 import { getPlaywrightMcpTools, closePlaywrightMcp } from '../tools/mcp/playwright-mcp';
 import {
     MAX_BUGFIX_ITERATIONS, GIT_DEFAULT_BRANCH, PIPELINE_RECURSION_LIMIT,
+    TOOL_PIPELINE_RECURSION_LIMIT,
     GITHUB_TOKEN, GITHUB_OWNER, GITHUB_REPO, GIT_USER_NAME, GIT_USER_EMAIL,
     GITHUB_PROJECT_TOKEN, GITHUB_PROJECT_OWNER,
     ARCHITECT_MODEL, PRODUCT_MANAGER_MODEL, DBA_MODEL, TEAM_LEADER_MODEL,
@@ -36,6 +37,7 @@ import type { PhaseName, TranscriptMessage, Bug, CodebaseAnalysis, GitContext } 
 import { tokenTracker, type TokenCallRecord } from '../utils/token-tracker';
 import { extractTokenUsageFromMessages } from '../utils/token-usage-extractor';
 import { generateTokenReport, refreshTokenReport } from '../utils/token-report';
+import { getThrottleStats, logThrottleStats } from '../utils/llm-throttle';
 import * as path from 'path';
 import * as fs from 'fs';
 
@@ -142,11 +144,13 @@ function getModelForAgent(agentId: string): string {
 async function invokeAgent(
     agent: any, userMessage: string, threadSuffix: string,
     agentId: string, phase: string,
+    opts?: { recursionLimit?: number },
 ): Promise<{ output: any; tokenUsage: TokenCallRecord | null }> {
+    const recursionLimit = opts?.recursionLimit ?? PIPELINE_RECURSION_LIMIT;
     return retryWithBackoff(async () => {
         const result = await agent.invoke(
             { messages: [{ role: 'user', content: userMessage }] },
-            { configurable: { thread_id: `conductor-${threadSuffix}-${Date.now()}` }, recursionLimit: PIPELINE_RECURSION_LIMIT },
+            { configurable: { thread_id: `conductor-${threadSuffix}-${Date.now()}` }, recursionLimit },
         );
 
         // Extract per-invocation token usage from messages (complementary to callback tracking)
@@ -421,7 +425,7 @@ export async function codebaseAnalyzerNode(state: ProjectStateType): Promise<Par
     contextParts.push(`## Task\n\nAnalyze the codebase at the workspace root and produce a comprehensive CodebaseAnalysis.`);
 
     const userMsg = contextParts.join('\n\n');
-    const { output, tokenUsage } = await invokeAgent(agent, userMsg, 'codebase-analyzer', 'codebase-analyzer', 'codebase-analyzer');
+    const { output, tokenUsage } = await invokeAgent(agent, userMsg, 'codebase-analyzer', 'codebase-analyzer', 'codebase-analyzer', { recursionLimit: TOOL_PIPELINE_RECURSION_LIMIT });
 
     analyzerLog.info(`Analysis complete: ${output.modules?.length ?? 0} modules, ${output.primaryLanguages?.length ?? 0} languages`);
     analyzerLog.info(`Architecture: ${output.architecture?.style ?? 'unknown'}`);
@@ -739,43 +743,61 @@ export async function qaNode(state: ProjectStateType): Promise<Partial<ProjectSt
     // 7a. QA Lead — create test plan
     qaLog.info('QA Lead creating test plan...');
     const qaTokenUsage: TokenCallRecord[] = [];
-    const qaLeadAgent = createQaLeadAgent(apiKey);
-    const leadMsg = [
-        `## Architecture\n\n${JSON.stringify(state.architecture, null, 2)}`,
-        `\n## User Stories\n\n${JSON.stringify(state.userStories, null, 2)}`,
-        `\n## Tech Stack\n\n${JSON.stringify(state.techStack, null, 2)}`,
-        `\n## DB Design\n\n${JSON.stringify(state.dbDesign, null, 2)}`,
-    ].join('\n');
-    const { output: leadOutput, tokenUsage: leadTokenUsage } = await invokeAgent(qaLeadAgent, leadMsg, 'qa-lead', 'qa-lead', 'qa');
-    if (leadTokenUsage) qaTokenUsage.push(leadTokenUsage);
-    qaLog.info(`Test plan: ${leadOutput.testPlan?.unit?.length ?? 0} unit, ${leadOutput.testPlan?.e2e?.length ?? 0} e2e`);
+    let leadOutput: any = { testPlan: { unit: [], integration: [], e2e: [] } };
+    let leadArtifact: any = null;
+    try {
+        const qaLeadAgent = createQaLeadAgent(apiKey);
+        const leadMsg = [
+            `## Architecture\n\n${JSON.stringify(state.architecture, null, 2)}`,
+            `\n## User Stories\n\n${JSON.stringify(state.userStories, null, 2)}`,
+            `\n## Tech Stack\n\n${JSON.stringify(state.techStack, null, 2)}`,
+            `\n## DB Design\n\n${JSON.stringify(state.dbDesign, null, 2)}`,
+        ].join('\n');
+        const r = await invokeAgent(qaLeadAgent, leadMsg, 'qa-lead', 'qa-lead', 'qa');
+        leadOutput = r.output;
+        if (r.tokenUsage) qaTokenUsage.push(r.tokenUsage);
+        qaLog.info(`Test plan: ${leadOutput.testPlan?.unit?.length ?? 0} unit, ${leadOutput.testPlan?.e2e?.length ?? 0} e2e`);
 
-    const leadArtifact = writeArtifact({
-        agentId: 'qa-lead', colorCode: 198, workspacePath: state.workspacePath,
-        title: 'QA Lead — Test Plan',
-        content: `## Test Plan\n\n${JSON.stringify(leadOutput.testPlan, null, 2)}`,
-    });
-    transcript.push(msg('qa-lead', 'qa', `Test plan created: ${leadOutput.testPlan?.unit?.length ?? 0} unit, ${leadOutput.testPlan?.e2e?.length ?? 0} e2e`));
+        leadArtifact = writeArtifact({
+            agentId: 'qa-lead', colorCode: 198, workspacePath: state.workspacePath,
+            title: 'QA Lead — Test Plan',
+            content: `## Test Plan\n\n${JSON.stringify(leadOutput.testPlan, null, 2)}`,
+        });
+        transcript.push(msg('qa-lead', 'qa', `Test plan created: ${leadOutput.testPlan?.unit?.length ?? 0} unit, ${leadOutput.testPlan?.e2e?.length ?? 0} e2e`));
+    } catch (err: any) {
+        qaLog.error(`QA Lead failed: ${err.message}`);
+        if (err?.stack) qaLog.error(err.stack);
+        transcript.push(msg('qa-lead', 'qa', `QA Lead failed: ${err.message}`));
+    }
 
     // 7b. QA Unit — write & run unit/integration tests
     qaLog.info('QA Unit writing and running tests...');
-    const qaUnitAgent = createQaUnitAgent(apiKey, state.workspacePath);
-    const unitMsg = [
-        `## Test Plan (unit + integration)\n\n${JSON.stringify({ unit: leadOutput.testPlan?.unit, integration: leadOutput.testPlan?.integration }, null, 2)}`,
-        `\n## Architecture\n\n${JSON.stringify(state.architecture, null, 2)}`,
-        `\n## Tech Stack\n\n${JSON.stringify(state.techStack, null, 2)}`,
-    ].join('\n');
-    const { output: unitOutput, tokenUsage: unitTokenUsage } = await invokeAgent(qaUnitAgent, unitMsg, 'qa-unit', 'qa-unit', 'qa');
-    if (unitTokenUsage) qaTokenUsage.push(unitTokenUsage);
-    qaLog.info(`Unit tests: ${unitOutput.testReport?.passed ?? 0} passed, ${unitOutput.testReport?.failed ?? 0} failed`);
-    if (unitOutput.bugs) allBugs.push(...unitOutput.bugs);
+    let unitOutput: any = { testReport: null, bugs: [], fileChanges: [] };
+    let unitArtifact: any = null;
+    try {
+        const qaUnitAgent = createQaUnitAgent(apiKey, state.workspacePath);
+        const unitMsg = [
+            `## Test Plan (unit + integration)\n\n${JSON.stringify({ unit: leadOutput.testPlan?.unit ?? [], integration: leadOutput.testPlan?.integration ?? [] }, null, 2)}`,
+            `\n## Architecture\n\n${JSON.stringify(state.architecture, null, 2)}`,
+            `\n## Tech Stack\n\n${JSON.stringify(state.techStack, null, 2)}`,
+        ].join('\n');
+        const r = await invokeAgent(qaUnitAgent, unitMsg, 'qa-unit', 'qa-unit', 'qa', { recursionLimit: TOOL_PIPELINE_RECURSION_LIMIT });
+        unitOutput = r.output;
+        if (r.tokenUsage) qaTokenUsage.push(r.tokenUsage);
+        qaLog.info(`Unit tests: ${unitOutput.testReport?.passed ?? 0} passed, ${unitOutput.testReport?.failed ?? 0} failed`);
+        if (unitOutput.bugs) allBugs.push(...unitOutput.bugs);
 
-    const unitArtifact = writeArtifact({
-        agentId: 'qa-unit', colorCode: 205, workspacePath: state.workspacePath,
-        title: 'QA Unit — Test Report',
-        content: `## Results\n\n${JSON.stringify(unitOutput.testReport, null, 2)}`,
-    });
-    transcript.push(msg('qa-unit', 'qa', `Unit tests: ${unitOutput.testReport?.passed ?? 0}/${unitOutput.testReport?.total ?? 0} passed`));
+        unitArtifact = writeArtifact({
+            agentId: 'qa-unit', colorCode: 205, workspacePath: state.workspacePath,
+            title: 'QA Unit — Test Report',
+            content: `## Results\n\n${JSON.stringify(unitOutput.testReport, null, 2)}`,
+        });
+        transcript.push(msg('qa-unit', 'qa', `Unit tests: ${unitOutput.testReport?.passed ?? 0}/${unitOutput.testReport?.total ?? 0} passed`));
+    } catch (err: any) {
+        qaLog.error(`QA Unit failed: ${err.message}`);
+        if (err?.stack) qaLog.error(err.stack);
+        transcript.push(msg('qa-unit', 'qa', `QA Unit failed: ${err.message}`));
+    }
 
     // 7c. QA E2E — Playwright MCP testing (only if services are running)
     let e2eReport = null;
@@ -786,10 +808,10 @@ export async function qaNode(state: ProjectStateType): Promise<Partial<ProjectSt
             const mcpTools = await getPlaywrightMcpTools();
             const qaE2eAgent = createQaE2eAgent(apiKey, mcpTools);
             const e2eMsg = [
-                `## Test Plan (e2e)\n\n${JSON.stringify(leadOutput.testPlan?.e2e, null, 2)}`,
+                `## Test Plan (e2e)\n\n${JSON.stringify(leadOutput.testPlan?.e2e ?? [], null, 2)}`,
                 `\n## Service URLs\n\n${JSON.stringify(state.devopsPlan.serviceUrls, null, 2)}`,
             ].join('\n');
-            const { output: e2eOutput, tokenUsage: e2eTokenUsage } = await invokeAgent(qaE2eAgent, e2eMsg, 'qa-e2e', 'qa-e2e', 'qa');
+            const { output: e2eOutput, tokenUsage: e2eTokenUsage } = await invokeAgent(qaE2eAgent, e2eMsg, 'qa-e2e', 'qa-e2e', 'qa', { recursionLimit: TOOL_PIPELINE_RECURSION_LIMIT });
             if (e2eTokenUsage) qaTokenUsage.push(e2eTokenUsage);
             e2eReport = e2eOutput.testReport;
             if (e2eOutput.bugs) allBugs.push(...e2eOutput.bugs);
@@ -824,14 +846,14 @@ export async function qaNode(state: ProjectStateType): Promise<Partial<ProjectSt
         }
     }
 
-    const testReports = [unitOutput.testReport, ...(e2eReport ? [e2eReport] : [])].filter(Boolean);
-    const artifacts = [leadArtifact, unitArtifact, ...(e2eArtifact ? [e2eArtifact] : [])];
+    const testReports = [unitOutput?.testReport, ...(e2eReport ? [e2eReport] : [])].filter(Boolean);
+    const artifacts = [...(leadArtifact ? [leadArtifact] : []), ...(unitArtifact ? [unitArtifact] : []), ...(e2eArtifact ? [e2eArtifact] : [])];
 
     return {
-        testPlan: leadOutput.testPlan,
+        testPlan: leadOutput?.testPlan,
         testReports,
         bugs: allBugs,
-        fileChanges: unitOutput.fileChanges ?? [],
+        fileChanges: unitOutput?.fileChanges ?? [],
         artifacts,
         transcript,
         phase: 'qa' as PhaseName,
@@ -888,29 +910,42 @@ const opsLog = getLogger('[DevOps]', 33);
 export async function devopsNode(state: ProjectStateType): Promise<Partial<ProjectStateType>> {
     opsLog.info('Starting DevOps phase...');
     const apiKey = await getAccessToken();
-    const agent = createDevOpsAgent(apiKey, state.workspacePath);
 
-    const devopsParts = [
-        `## Architecture\n\n${JSON.stringify(state.architecture, null, 2)}`,
-        `\n## Tech Stack\n\n${JSON.stringify(state.techStack, null, 2)}`,
-        `\n## DB Design\n\n${JSON.stringify(state.dbDesign, null, 2)}`,
-        `\n## File Changes\n\n${JSON.stringify(state.fileChanges, null, 2)}`,
-    ];
-    if (state.codebaseAnalysis) {
-        devopsParts.unshift(`## Existing Codebase Analysis\n\n${JSON.stringify(state.codebaseAnalysis, null, 2)}`);
-        devopsParts.push(`\n## NOTE: This is MAINTAIN mode. Update existing Docker/K8s configs rather than creating from scratch.`);
+    let output: any = { devops: { buildStatus: 'failed', runStatus: 'failed', serviceUrls: [], healthChecks: [] }, fileChanges: [] };
+    let tokenUsage: TokenCallRecord | null = null;
+    const transcript: TranscriptMessage[] = [];
+
+    try {
+        const agent = createDevOpsAgent(apiKey, state.workspacePath);
+
+        const devopsParts = [
+            `## Architecture\n\n${JSON.stringify(state.architecture, null, 2)}`,
+            `\n## Tech Stack\n\n${JSON.stringify(state.techStack, null, 2)}`,
+            `\n## DB Design\n\n${JSON.stringify(state.dbDesign, null, 2)}`,
+            `\n## File Changes\n\n${JSON.stringify(state.fileChanges, null, 2)}`,
+        ];
+        if (state.codebaseAnalysis) {
+            devopsParts.unshift(`## Existing Codebase Analysis\n\n${JSON.stringify(state.codebaseAnalysis, null, 2)}`);
+            devopsParts.push(`\n## NOTE: This is MAINTAIN mode. Update existing Docker/K8s configs rather than creating from scratch.`);
+        }
+        const userMsg = devopsParts.join('\n');
+
+        const r = await invokeAgent(agent, userMsg, 'devops', 'devops', 'devops', { recursionLimit: TOOL_PIPELINE_RECURSION_LIMIT });
+        output = r.output;
+        tokenUsage = r.tokenUsage;
+        opsLog.info(`Build: ${output.devops?.buildStatus}, Run: ${output.devops?.runStatus}`);
+    } catch (err: any) {
+        opsLog.error(`DevOps agent failed: ${err.message}`);
+        if (err?.stack) opsLog.error(err.stack);
+        transcript.push(msg('devops', 'devops', `DevOps agent failed: ${err.message}`));
     }
-    const userMsg = devopsParts.join('\n');
-
-    const { output, tokenUsage } = await invokeAgent(agent, userMsg, 'devops', 'devops', 'devops');
-    opsLog.info(`Build: ${output.devops?.buildStatus}, Run: ${output.devops?.runStatus}`);
 
     const artifact = writeArtifact({
         agentId: 'devops', colorCode: 33, workspacePath: state.workspacePath,
         title: 'DevOps Mission Report',
         content: [
-            `## Build Status: ${output.devops?.buildStatus}`,
-            `## Run Status: ${output.devops?.runStatus}`,
+            `## Build Status: ${output.devops?.buildStatus ?? 'unknown'}`,
+            `## Run Status: ${output.devops?.runStatus ?? 'unknown'}`,
             `\n## Services\n\n${(output.devops?.serviceUrls ?? []).map((s: any) => `- **${s.service}**: ${s.url}`).join('\n')}`,
             `\n## Health Checks\n\n${(output.devops?.healthChecks ?? []).map((h: any) => `- ${h.service}: ${h.status}`).join('\n')}`,
         ].join('\n'),
@@ -929,12 +964,14 @@ export async function devopsNode(state: ProjectStateType): Promise<Partial<Proje
         }
     }
 
+    transcript.push(msg('devops', 'devops', `Build: ${output.devops?.buildStatus ?? 'unknown'}, Run: ${output.devops?.runStatus ?? 'unknown'}`));
+
     return {
         devopsPlan: output.devops,
         fileChanges: output.fileChanges ?? [],
         phase: 'finalize' as PhaseName,
         artifacts: [artifact],
-        transcript: [msg('devops', 'devops', `Build: ${output.devops?.buildStatus}, Run: ${output.devops?.runStatus}`)],
+        transcript,
         tokenUsage: tokenUsage ? [tokenUsage] : [],
     };
 }
@@ -969,9 +1006,17 @@ export async function finalizeNode(state: ProjectStateType): Promise<Partial<Pro
         `Total output tokens: ${usageSummary.totalOutputTokens.toLocaleString()}`,
         `Total tokens: ${usageSummary.totalTokens.toLocaleString()}`,
         `Estimated cost: see Token Usage Report for per-model breakdown`,
-    ].join('\n');
+        ``,
+        `── LLM Throttle ──`,
+    ];
+    const throttle = getThrottleStats();
+    summary.push(
+        `Requests: ${throttle.total}, rate-limited: ${throttle.rateLimited}, total cooldown: ${(throttle.cooldownMsTotal / 1000).toFixed(0)}s`,
+    );
+    const summaryText = summary.join('\n');
 
-    finalLog.info(`\n${summary}`);
+    finalLog.info(`\n${summaryText}`);
+    logThrottleStats();
 
     // Write final summary artifact
     writeArtifact({
@@ -979,7 +1024,7 @@ export async function finalizeNode(state: ProjectStateType): Promise<Partial<Pro
         colorCode: 46,
         workspacePath: state.workspacePath,
         title: 'Run Summary',
-        content: summary,
+        content: summaryText,
     });
 
     // ── Cost estimation helper ────────────────────────────────────────────

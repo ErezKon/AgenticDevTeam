@@ -30,7 +30,10 @@ function getModelForRank(rank: DevRank): string {
  * @param entry   Developer registry entry (rank, domain, languages, etc.)
  * @param workspaceRoot  The generated-project workspace directory
  */
-export function buildDevAgent(apiKey: string, entry: DevAgentEntry, workspaceRoot: string, gitContext?: GitContext | null) {
+export function buildDevAgent(
+    apiKey: string, entry: DevAgentEntry, workspaceRoot: string,
+    gitContext?: GitContext | null, baseBranch?: string,
+) {
     const systemPrompt = buildDevPersona({
         rank: entry.rank,
         domain: entry.domain,
@@ -43,7 +46,7 @@ export function buildDevAgent(apiKey: string, entry: DevAgentEntry, workspaceRoo
     // field for diagrams; giving devs the tool caused infinite loops.
     const tools = [
         ...createWorkspaceTools(workspaceRoot),
-        ...createGitTools(workspaceRoot, gitContext),
+        ...createGitTools(workspaceRoot, gitContext, baseBranch),
         createShellTool(workspaceRoot),
     ];
 

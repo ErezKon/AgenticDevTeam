@@ -113,6 +113,7 @@ app.post('/api/run', async (req, res) => {
                 .catch((err) => {
                     // run.ts already flushes the token report on failure,
                     // but broadcast the output path so the client can find it
+                    log.error(`Autonomous run error: ${err?.message ?? err}`);
                     const reportPath = tokenTracker.getOutputPath();
                     broadcast('run:error', {
                         systemName,

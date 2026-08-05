@@ -56,12 +56,13 @@ export async function runAutonomous(opts: RunOptions): Promise<ProjectStateType>
 
         log.info('Autonomous run complete.');
         return finalState as ProjectStateType;
-    } catch (err) {
+    } catch (err: any) {
         // Mark the run as failed and flush the token report with whatever
         // data was collected before the crash — ensures the report exists.
         tokenTracker.setRunStatus('failed');
         try { refreshTokenReport(); } catch { /* best-effort */ }
-        log.error(`Autonomous run failed — token report saved with partial data.`);
+        log.error(`Autonomous run failed: ${err?.message ?? err}`);
+        if (err?.stack) log.error(err.stack);
         throw err;
     }
 }
@@ -104,10 +105,11 @@ export async function runHumanInTheLoop(opts: RunOptions): Promise<RunSession> {
         await conductor.invoke(input, {
             configurable: { thread_id: threadId },
         });
-    } catch (err) {
+    } catch (err: any) {
         tokenTracker.setRunStatus('failed');
         try { refreshTokenReport(); } catch { /* best-effort */ }
-        log.error(`HITL run failed during initial invoke — token report saved with partial data.`);
+        log.error(`HITL run failed during initial invoke: ${err?.message ?? err}`);
+        if (err?.stack) log.error(err.stack);
         throw err;
     }
 
@@ -142,10 +144,11 @@ export async function runHumanInTheLoop(opts: RunOptions): Promise<RunSession> {
             );
 
             return result as ProjectStateType;
-        } catch (err) {
+        } catch (err: any) {
             tokenTracker.setRunStatus('failed');
             try { refreshTokenReport(); } catch { /* best-effort */ }
-            log.error(`HITL resume failed — token report saved with partial data.`);
+            log.error(`HITL resume failed: ${err?.message ?? err}`);
+            if (err?.stack) log.error(err.stack);
             throw err;
         }
     }

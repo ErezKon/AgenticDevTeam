@@ -5,7 +5,7 @@ import { qaE2eSystemPrompt } from './qa-e2e.prompt';
 import { QaLeadOutputSchema, QaUnitOutputSchema, QaE2eOutputSchema } from './schemas/qa-output.schema';
 import { createWorkspaceTools } from '../../tools/fs/workspace-tools';
 import { createShellTool } from '../../tools/shell/shell-tools';
-import { QA_MODEL } from '../../config';
+import { QA_MODEL, TOOL_PIPELINE_MAX_TOOL_CALLS } from '../../config';
 
 export const createQaLeadAgent = (apiKey: string) => {
     return buildAgent(apiKey, {
@@ -29,6 +29,8 @@ export const createQaUnitAgent = (apiKey: string, workspaceRoot: string) => {
         responseFormat: QaUnitOutputSchema,
         temperature: 0.2,
         model: QA_MODEL,
+        phase: 'qa',
+        maxToolCalls: TOOL_PIPELINE_MAX_TOOL_CALLS,
     });
 };
 
@@ -46,5 +48,7 @@ export const createQaE2eAgent = (apiKey: string, mcpTools: any[]) => {
         responseFormat: QaE2eOutputSchema,
         temperature: 0.1,
         model: QA_MODEL,
+        phase: 'qa',
+        maxToolCalls: TOOL_PIPELINE_MAX_TOOL_CALLS,
     });
 };
