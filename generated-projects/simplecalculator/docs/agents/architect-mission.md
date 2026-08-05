@@ -1,50 +1,52 @@
 # Architect Mission Report
 
 **Agent**: architect  
-**Generated**: 2026-08-05T19:41:39.712Z
+**Generated**: 2026-08-05T20:15:45.902Z
 
 ---
 
 ## Architecture Style
 
-client-server (static web app)
+Modular Monolith (client‑side modules served as static assets)
 
 ## Components
 
-- **React UI** (frontend): Single‑page application rendered in the browser. Hosts the calculator display, basic keypad, scientific keypad, and tooltip integration.
-- **Calculator Engine (TS)** (library): Pure TypeScript module that parses expressions and evaluates both basic and scientific operations. Exposes a clean API used by the UI.
-- **Tooltip Component (Tippy.js)** (ui‑library): Provides hover tooltips that show the full operation name for each button symbol.
-- **Nginx (static server)** (infrastructure): Serves the built static assets (HTML, CSS, JS) from the Docker container.
+- **NginxStaticServer** (Infrastructure): Serves the compiled HTML, CSS, and JavaScript assets to browsers over HTTP/HTTPS.
+- **DockerContainer** (Deployment): Docker image that packages Nginx together with the static calculator assets for reproducible deployments.
+- **FrontendApp** (Client): Root HTML page and entry JavaScript that bootstraps the calculator UI and wires up modules.
+- **ScientificUI** (Component): UI module that renders scientific buttons, groups them (Basic, Scientific, Additional), shows symbols, and forwards user input to the engine.
+- **CalculatorEngine** (Library): Pure JavaScript library that evaluates arithmetic and scientific expressions (sqrt, pow, log, sin, cos, tan, factorial, etc.).
+- **TooltipService** (Library): Provides hover tooltips that display the full operation name for each symbol button.
 
 ## Tech Stack
 
-- **frontend**: React 18 with TypeScript — React is already in the codebase, the team has TS experience, and the component model fits the keypad grouping requirement. Vue would require rewriting existing UI, and Svelte adds a new compilation step without clear benefit.
-- **ui‑library (tooltips)**: tippy.js (React wrapper) — tippy.js offers lightweight, accessible tooltips with easy placement control and is well‑maintained. react-tooltip is larger and less flexible, while a custom solution would duplicate effort and risk accessibility regressions.
-- **build**: Vite — Vite is already used, provides fast HMR and minimal config for TS/React. Webpack would increase config complexity, and Parcel offers less control over fine‑grained asset handling.
-- **testing**: Jest — Jest is documented in the existing project, integrates well with TypeScript, and has rich mocking capabilities. Vitest is newer and would require migration; Mocha lacks built‑in snapshot testing and TypeScript ergonomics.
-- **containerization**: Docker (single Nginx container) — The project already ships a Dockerfile for Nginx; keeping a single container simplifies deployment while still providing environment parity. Docker Compose adds unnecessary complexity for a static site, and moving to a serverless host would discard the existing CI/CD pipeline.
-- **CI/CD**: GitHub Actions — Repository is on GitHub; Actions integrates natively, requires no external service, and can run Vite build, Jest tests, and Docker build steps. GitLab CI would need migration, CircleCI adds external account management.
-- **infra**: NGINX 1.25 (static file server) — NGINX is already containerized, provides fine‑grained caching headers, and is familiar to the ops team. Caddy is newer with automatic TLS (unneeded for static container), and S3 would shift the deployment model away from Docker.
+- **Frontend Framework**: Vanilla ES6 JavaScript (no framework) — The existing calculator is a simple static app; adding a full framework would increase bundle size and build complexity without providing measurable benefit. Vanilla ES6 offers native module support, easy integration with existing code, and the smallest runtime footprint.
+- **UI Styling**: CSS Grid + Flexbox (plain CSS) — Grid/Flexbox provides the precise layout needed for grouped button panels without pulling in a large CSS framework. This keeps the CSS bundle minimal and aligns with the project's low‑complexity goal.
+- **Computation Library**: math.js 12 — math.js offers a battle‑tested, well‑documented API for all required scientific operations (sqrt, pow, log, trig, factorial, etc.) and handles edge cases (e.g., domain errors). Writing and testing a custom implementation would duplicate effort and increase risk.
+- **Tooltip Library**: Tippy.js 6 — Tippy.js is lightweight, framework‑agnostic, and provides easy declarative tooltips with accessibility support. It integrates cleanly with vanilla JS and requires no additional CSS framework.
+- **Web Server**: Nginx 1.25 — Nginx is the de‑facto standard for serving static assets efficiently, has minimal configuration for a single‑page app, and is already referenced in the repository. Switching to another server would add unnecessary operational overhead.
+- **Containerization**: Docker 24 — Docker is already part of the project’s tooling, provides reproducible builds, and works seamlessly with CI pipelines. Podman offers similar features but has less CI integration support in GitHub Actions.
+- **Testing Framework**: Jest 29 — Jest is mentioned in the existing documentation, supports ES6 modules out‑of‑the‑box, and provides snapshot testing useful for UI components. Mocha requires additional setup for mocking ES modules, while Vitest is newer with less community tooling.
+- **CI/CD**: GitHub Actions — The repository is hosted on GitHub; Actions integrates directly, requires no external service, and can run Docker builds, Jest tests, and linting in a single workflow file.
 
 ## Epics
 
-- **EPIC-001** Extend Calculator Engine with Scientific Operations: Add parsing and evaluation support for square root, power, logarithm, natural logarithm, trigonometric functions, factorial, constants (π, e), absolute value, angle conversions, percentage, and handling of parentheses, decimals, and negatives.
-- **EPIC-002** Implement Scientific Keypad UI: Create a new keypad section grouped into Basic, Scientific, and Additional categories. Render each operation with its mathematical symbol, ensure responsive layout, and wire button clicks to the Calculator Engine.
-- **EPIC-003** Add Symbol Tooltips: Integrate tippy.js to show a tooltip with the operation name when the user hovers over any button symbol, improving discoverability and accessibility.
-- **EPIC-004** Update Build, Tests, and CI/CD: Add Jest test suites for the new engine functions, update Vite config if needed for new assets, and extend the GitHub Actions workflow to run tests, lint, and rebuild the Docker image.
+- **EPIC-001** Add Scientific Operations to Calculator Engine: Extend the CalculatorEngine to evaluate sqrt, power, log, ln, sin, cos, tan, factorial, π, e, absolute value, rad↔deg conversion, percentage and support parentheses, decimals, and negative numbers.
+- **EPIC-002** Implement Scientific UI Grouping and Symbolic Buttons with Tooltips: Create a new ScientificUI component that renders buttons using their mathematical symbols, groups them into Basic, Scientific, and Additional sections, and attaches hover tooltips showing the operation name.
+- **EPIC-003** Introduce Unit Tests and CI Pipeline for Frontend: Add Jest test suites for CalculatorEngine and UI interaction, configure a GitHub Actions workflow to run linting, tests, and Docker image build on each push.
+- **EPIC-004** Update Dockerfile and Nginx Configuration for New Assets: Refresh the Dockerfile to copy the expanded static assets (new UI files, math.js, tippy.js) and adjust Nginx config to enable proper caching and gzip compression for the larger bundle.
 
 ## Architecture Diagram
 
 ```mermaid
-flowchart LR
-    subgraph Browser
-        UI["React UI"]
-        Engine["Calculator Engine (TS)"]
-        Tooltip["Tooltip Component (Tippy.js)"]
-    end
-    Nginx["Nginx (static server)"] --> UI
-    UI --> Engine
-    UI --> Tooltip
-    Tooltip --> UI
-    Engine --> UI
+graph TD
+    UserBrowser[User Browser] -->|HTTP GET| NginxStaticServer[Nginx Static Server]
+    NginxStaticServer -->|serves| FrontendApp["Frontend App (HTML/JS/CSS)"]
+    FrontendApp --> ScientificUI[Scientific UI Component]
+    FrontendApp --> CalculatorEngine["Calculator Engine (math.js)"]
+    FrontendApp --> TooltipService["Tooltip Service (Tippy.js)"]
+    ScientificUI -->|calls| CalculatorEngine
+    ScientificUI -->|shows| TooltipService
+    ScientificUI -->|updates| Display[Result Display]
+    DockerContainer[Docker Container] --> NginxStaticServer
 ```
