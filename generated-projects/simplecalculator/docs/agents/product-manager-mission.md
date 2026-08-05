@@ -1,68 +1,64 @@
 # Product Manager Mission Report
 
 **Agent**: product-manager  
-**Generated**: 2026-08-05T09:32:07.505Z
+**Generated**: 2026-08-05T10:17:50.788Z
 
 ---
 
-## User Stories (12)
+## User Stories (9)
 
-### US-001: As a user, I want to see a calculator display and keypad
-- So that: I can input expressions and see results
-- AC: The display area shows the current expression and the computed result.; The keypad includes buttons for digits 0-9, decimal point, operators (+, -, *, /), parentheses, and a clear key.; Clicking any keypad button updates the expression shown in the display.
-### US-002: As a user, I want to see clear error messages when the input is invalid
-- So that: I understand what went wrong and can correct it
-- AC: When the parser throws a syntax error, an error message component appears with a user‑friendly description.; When a runtime error such as division by zero occurs, a specific error message is shown.
-### US-003: As a mobile user, I want the calculator UI to be responsive
-- So that: I can use it comfortably on any device
-- AC: On viewports narrower than 600 px the layout adapts: buttons resize and stack without horizontal scrolling.; All UI elements remain fully visible and usable on both portrait and landscape mobile orientations.
-### US-004: As a system, I want to parse a raw expression string into an AST respecting precedence, parentheses, decimals, and negatives
-- So that: the evaluator can compute the correct result
-- AC: parseExpression('3+(2*4)-5/(1+1)') returns an AST that accurately represents the expression hierarchy.; parseExpression('3++4') throws a SyntaxError with a clear message.
-### US-005: As a system, I want the parser to provide detailed syntax error information for malformed input
-- So that: the UI can display helpful feedback
-- AC: For input containing unexpected characters (e.g., '2 & 3'), the parser throws a SyntaxError indicating the offending token and position.; Error objects include a `message` property that can be shown directly to the user.
-### US-006: As a system, I want to evaluate the AST and compute a numeric result while handling division by zero gracefully
-- So that: users receive correct results or meaningful error messages
-- AC: evaluateAST(validAST) returns the correct numeric result for any supported expression.; When the AST represents a division by zero, evaluateAST returns an error object with a message like "Division by zero is not allowed".
-### US-007: As a system, I want the evaluator to respect operator precedence and nested parentheses
-- So that: calculations follow standard arithmetic rules
-- AC: evaluateAST(parseExpression('2+3*4')) yields 14, confirming multiplication before addition.; evaluateAST(parseExpression('(2+3)*4')) yields 20, confirming parentheses override precedence.
-### US-008: As a developer, I want a CI/CD pipeline that builds the React app and deploys it to Netlify with HTTPS and CSP headers
-- So that: the application is securely and automatically delivered to users
-- AC: On every push to the main branch, GitHub Actions runs lint, tests, builds the Vite bundle, and triggers a Netlify deploy.; The deployed site is served over HTTPS and includes a Content‑Security‑Policy header restricting sources to 'self'.
-### US-009: As a user, I want the application to load quickly from the CDN
-- So that: my interaction feels instantaneous
-- AC: The Netlify‑served assets are cached and delivered with a Time‑to‑First‑Byte (TTFB) under 200 ms in typical network conditions.; Subsequent navigations load without full page reloads, leveraging the SPA behavior.
-### US-010: As a QA engineer, I want unit tests for the parser covering a wide range of expressions
-- So that: parser correctness is continuously verified
-- AC: Jest test suite for the parser achieves at least 90 % code coverage.; All parser tests pass on every CI run.
-### US-011: As a QA engineer, I want unit tests for the evaluator covering edge cases like division by zero
-- So that: runtime errors are caught early
-- AC: Jest test suite for the evaluator achieves at least 90 % code coverage.; Tests verify that division by zero returns the expected error object.
-### US-012: As a QA engineer, I want component tests for the UI ensuring correct display updates and error handling
-- So that: the front‑end behaves as expected for user interactions
-- AC: React Testing Library tests confirm that entering "2+2" via button clicks results in the display showing "4".; Tests confirm that an invalid expression triggers the error message component with appropriate text.
+### US-001: As a User, I want a responsive calculator interface that works on desktop and mobile browsers
+- So that: I can use the calculator comfortably on any device
+- AC: The UI renders correctly on viewports >= 768px (desktop) and < 768px (mobile) with appropriate layout adjustments.; All calculator buttons (digits, operators, parentheses, decimal, clear, equals) are visible, sized for touch on mobile, and maintain consistent spacing.; The display area updates in real time as the user presses buttons, showing the current expression.
+### US-002: As a User, I want keyboard navigation and screen‑reader support for the calculator
+- So that: I can operate it without a mouse and it is accessible to assistive technologies
+- AC: Each button can be focused via Tab and activated with Enter or Space, moving focus in a logical order.; ARIA labels are present on every button describing its function (e.g., "Add", "Subtract", "Open parenthesis").; Screen readers announce the current expression and any result or error message.
+### US-003: As a User, I want the calculator to evaluate arithmetic expressions I input
+- So that: I receive correct numeric results instantly
+- AC: Given a syntactically valid expression (e.g., "3+4*2/(1-5)"), the engine returns the mathematically correct result.; Operator precedence and parentheses are respected during evaluation.
+### US-004: As a Developer, I want the expression engine to be a reusable TypeScript library
+- So that: it can be imported by the UI and unit‑tested independently
+- AC: The library exports a single function `evaluate(expression: string): number | Error`.; The library builds without external runtime dependencies beyond the TypeScript standard library.
+### US-005: As a User, I want clear error messages when I enter an invalid expression
+- So that: I can understand what is wrong and correct my input
+- AC: For syntax errors (unmatched parentheses, illegal characters, malformed decimal), the engine returns a descriptive error string.; For runtime errors such as division by zero, the engine returns a specific error message indicating the problem.
+### US-006: As a User, I want the UI to display errors without crashing the app
+- So that: I can continue using the calculator after an error
+- AC: When the engine returns an error, the UI shows the error message in a dedicated error banner.; After an error is shown, subsequent valid inputs are evaluated correctly and the error banner disappears.
+### US-007: As a Developer, I want an automated CI pipeline that lints, tests, and builds the project on every push
+- So that: code quality is enforced and broken builds are prevented
+- AC: GitHub Actions runs ESLint, TypeScript compilation, and Jest test suite on each push.; The workflow fails if any linting error, type error, or test failure occurs.
+### US-008: As a Developer, I want the application packaged in a Docker image with NGINX serving the static assets
+- So that: deployment is reproducible and isolated
+- AC: A multi‑stage Dockerfile builds the React app and copies the output into NGINX's `/usr/share/nginx/html` directory.; Running the image locally serves the SPA over HTTP on port 80 and the UI functions as expected.
+### US-009: As a User, I want the calculator to load quickly over HTTPS
+- So that: I have a fast and smooth experience
+- AC: NGINX serves static assets with appropriate `Cache‑Control` headers for browser caching.; The initial page load (HTML, CSS, JS) completes in under 2 seconds on a simulated 3G network.
 
-## Tasks (20)
+## Tasks (25)
 
-- **TASK-001** [frontend/Vite] Project scaffolding with Vite + React
-- **TASK-002** [frontend/npm / yarn] Install core dependencies
-- **TASK-003** [infra/GitHub Actions] Configure GitHub Actions CI workflow
-- **TASK-004** [infra/Netlify] Set up Netlify deployment configuration
-- **TASK-005** [infra/Netlify] Add CSP security headers
-- **TASK-006** [frontend/React] Create CalculatorDisplay component
-- **TASK-007** [frontend/React] Create CalculatorKeypad component
-- **TASK-008** [frontend/React] Implement input handling logic
-- **TASK-009** [frontend/React] Create ErrorMessage component
-- **TASK-010** [frontend/React] Integrate parser/evaluator error handling into UI
-- **TASK-011** [frontend/CSS / Tailwind] Add responsive styling
-- **TASK-012** [backend/JavaScript] Implement recursive‑descent expression parser
-- **TASK-013** [backend/JavaScript] Expose parseExpression API
-- **TASK-014** [testing/Jest] Write Jest unit tests for the parser
-- **TASK-015** [backend/JavaScript] Implement AST evaluator
-- **TASK-016** [backend/JavaScript] Expose evaluateAST API
-- **TASK-017** [testing/Jest] Write Jest unit tests for the evaluator
-- **TASK-018** [frontend/React] Connect UI with parser and evaluator
-- **TASK-019** [testing/React Testing Library] Write React Testing Library component tests
-- **TASK-020** [infra/GitHub Actions] Add Jest coverage reporting to CI
+- **TASK-001** [frontend/Vite] Initialize React project with Vite and TypeScript
+- **TASK-002** [frontend/npm] Install core dependencies and dev tools
+- **TASK-003** [testing/Jest, React Testing Library] Configure Jest and React Testing Library
+- **TASK-004** [infra/ESLint, Prettier] Set up ESLint and Prettier for TypeScript
+- **TASK-010** [frontend/React, CSS Modules] Implement responsive calculator layout
+- **TASK-011** [frontend/React, TypeScript] Create reusable Button component
+- **TASK-012** [frontend/React, TypeScript] Create Display component for expression/result
+- **TASK-013** [frontend/React] Add ARIA attributes to calculator buttons and display
+- **TASK-014** [frontend/React] Implement keyboard navigation and focus management
+- **TASK-020** [backend/TypeScript] Develop recursive‑descent parser and evaluator
+- **TASK-021** [testing/Jest] Write unit tests for expression evaluation
+- **TASK-022** [backend/TypeScript] Expose evaluate function as a library entry point
+- **TASK-023** [infra/TypeScript] Add build script for the expression engine library
+- **TASK-030** [backend/TypeScript] Implement syntax error detection in parser
+- **TASK-031** [backend/TypeScript] Add runtime error handling (division by zero)
+- **TASK-032** [frontend/React] Create ErrorBanner component for UI feedback
+- **TASK-033** [frontend/React, TypeScript] Integrate engine results and errors into UI state
+- **TASK-040** [infra/GitHub Actions] Create GitHub Actions CI workflow
+- **TASK-041** [infra/ESLint, Prettier] Configure linting and formatting scripts
+- **TASK-042** [infra/Docker] Write multi‑stage Dockerfile for production image
+- **TASK-043** [infra/NGINX] Add NGINX configuration for static serving and caching
+- **TASK-044** [infra/NGINX] Configure caching headers in NGINX
+- **TASK-045** [testing/Lighthouse CI] Add Lighthouse CI step to verify performance budget
+- **TASK-050** [testing/Jest, React Testing Library] Write React Testing Library tests for Calculator UI
+- **TASK-051** [testing/Jest, React Testing Library] Write integration test for error handling flow
