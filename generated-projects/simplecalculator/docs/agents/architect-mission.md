@@ -1,43 +1,48 @@
 # Architect Mission Report
 
 **Agent**: architect  
-**Generated**: 2026-08-05T10:17:24.941Z
+**Generated**: 2026-08-05T14:01:55.066Z
 
 ---
 
 ## Architecture Style
 
-client-server (static server + SPA)
+client-server (static web app)
 
 ## Components
 
-- **NGINX Static Server** (web server): Serves the compiled React static assets (HTML, CSS, JS) over HTTPS.
-- **Calculator UI (React)** (frontend application): Single‑page application that provides the calculator interface, captures user input, and displays results.
-- **Expression Engine (JS)** (library): Parses and evaluates arithmetic expressions supporting +, -, *, /, parentheses, decimals and negative numbers. Returns result or validation error.
+- **React UI** (ui): Single‑page application that renders the calculator keypad, display, and handles user interactions.
+- **Calculator Engine** (module): Pure JavaScript/TypeScript module that parses the expression string, validates syntax (including parentheses, decimals, negatives) and evaluates using a shunting‑yard algorithm.
+- **Static Asset Server** (server): Serves the compiled static assets (HTML, CSS, JS) to the browser over HTTPS.
 
 ## Tech Stack
 
-- **frontend**: React with TypeScript — React has the largest ecosystem, mature tooling (Create React App / Vite), and strong TypeScript support. It enables component‑based UI, easy state handling for the calculator display, and straightforward testing with Jest/RTL. Vue and Svelte are viable but have smaller talent pools and fewer out‑of‑the‑box testing integrations for this simple SPA.
-- **backend / hosting**: NGINX static file server — NGINX is lightweight, highly performant for serving static assets, and requires minimal configuration. Apache offers similar capabilities but with higher memory footprint. Express adds unnecessary runtime overhead for a pure static site and complicates deployment.
-- **expression engine**: Custom TypeScript parser/evaluator (recursive descent) — A custom parser keeps bundle size minimal and gives full control over allowed syntax (preventing injection of unsupported operators). mathjs is feature‑rich but adds ~200 KB gzipped, overkill for basic arithmetic. jsep provides parsing but still requires a custom evaluator; building both together is comparable effort to a simple hand‑rolled parser.
-- **testing**: Jest with React Testing Library — Jest integrates seamlessly with Create React App/Vite, offers fast unit test execution, and works well with RTL for component rendering tests. Mocha requires additional setup for JSX/TSX handling. Cypress is great for full E2E but adds unnecessary complexity for a calculator where unit tests cover all logic.
-- **CI/CD**: GitHub Actions — GitHub Actions is native to the repository host, free for public/open‑source projects, and can run lint, test, and build steps without extra configuration. GitLab CI would require moving the repo, and CircleCI introduces external service overhead.
-- **containerization (optional)**: Docker (single‑stage build) — Docker provides reproducible builds and isolates NGINX configuration, useful for local development and simple production deployment. Bare‑metal is possible but adds environment‑drift risk. Podman is compatible but less universally adopted in CI pipelines.
+- **frontend**: React with TypeScript (Vite build) — React offers a minimal learning curve, excellent ecosystem, and component model that fits a single‑page calculator. Vite provides ultra‑fast dev server and native ES module support. Vue is comparable but adds a template syntax that isn’t needed for this tiny UI; Angular is heavyweight for a simple app.
+- **calculatorEngine**: Custom TypeScript module (no framework) — A custom module keeps bundle size tiny (<10 KB) and gives full control over allowed syntax (parentheses, negatives, decimal handling). Third‑party libraries add unnecessary bloat and may expose functions beyond the required feature set.
+- **staticServer**: Nginx (Docker container) — Nginx is a battle‑tested, low‑overhead HTTP server perfect for serving static assets. It requires no runtime code, provides easy TLS and CSP header configuration, and works identically in local Docker and production. Express adds a Node runtime for no benefit, and S3 introduces external cloud dependency not needed for a v1 MVP.
+- **containerization**: Docker — Docker guarantees identical environments for developers and CI, simplifies deployment to any host, and isolates Nginx. Direct host deployment risks environment drift; Docker Compose is essentially Docker plus orchestration, unnecessary for a single‑service app.
+- **testing**: Jest with React Testing Library — Jest provides fast unit testing for the engine and UI components, integrates seamlessly with Vite, and requires no browser driver. Cypress is great for full E2E but adds overhead for a calculator where unit tests suffice. Mocha lacks built‑in mocking and snapshot utilities that React Testing Library offers.
+- **ci/cd**: GitHub Actions — The repository is assumed to be on GitHub; Actions are free for public repos, require no external service, and can run lint, test, build, and Docker push steps in a single workflow. GitLab CI would require moving the repo, and CircleCI adds extra configuration complexity for a simple pipeline.
+- **observability**: Browser console + optional Sentry (error reporting) — For a lightweight client‑only app, console logs are sufficient during development. If production error tracking is desired, Sentry offers a simple SDK with minimal bundle impact. Full‑stack solutions like LogRocket or Datadog are overkill for this scope.
 
 ## Epics
 
-- **EPIC-001** Responsive Calculator UI: Design and implement a clean, accessible user interface with buttons for digits, operators, parentheses, and a display area. UI must be responsive across desktop and mobile browsers.
-- **EPIC-002** Expression Parsing and Evaluation: Develop a TypeScript expression engine that parses arithmetic strings, validates syntax (including parentheses balance, decimal format, and negative numbers), and evaluates the result. Provide clear error messages for invalid input.
-- **EPIC-003** Input Validation & Error Handling: Implement graceful handling of malformed expressions (e.g., division by zero, unmatched parentheses, invalid characters). UI should display user‑friendly error feedback without crashing.
-- **EPIC-004** Build, Test, and Deploy Pipeline: Set up automated linting, unit testing, and production build. Package the static assets into a Docker image with NGINX and publish to a container registry. Deploy to a cloud VM or static‑site hosting with HTTPS.
+- **EPIC-001** Responsive React UI: Implement the calculator keypad, display, and responsive layout. Include keyboard navigation and ARIA attributes for accessibility.
+- **EPIC-002** Calculator Engine: Create a TypeScript module that parses expressions with parentheses, decimal and negative numbers, and evaluates them using correct operator precedence.
+- **EPIC-003** Input Validation & Graceful Error Handling: Detect malformed expressions, division by zero, and other invalid inputs; surface clear error messages in the UI without crashing.
+- **EPIC-004** Build, Containerize, and Deploy: Set up Vite build pipeline, Dockerfile for Nginx, and GitHub Actions workflow to lint, test, build, and push the Docker image to a registry. Deploy to a staging environment.
+- **EPIC-005** Automated Testing & Quality Gates: Write unit tests for the Calculator Engine covering all operations, edge cases, and error paths. Add component tests for the UI using React Testing Library. Enforce coverage thresholds in CI.
 
 ## Architecture Diagram
 
 ```mermaid
 flowchart LR
-    User[User] <-- HTTP --> Nginx[NGINX Static Server]
-    Nginx --> UI["Calculator UI (React)"]
-    UI --> Engine["Expression Engine (JS)"]
+    subgraph Browser
+        UI["React UI (Input, Display)"]
+        Engine["Calculator Engine (JS Module)"]
+    end
+    User["User"] --> UI
+    UI --> Engine
     Engine --> UI
-    UI --> User
+    style Browser fill:#f9f,stroke:#333,stroke-width:2px
 ```
