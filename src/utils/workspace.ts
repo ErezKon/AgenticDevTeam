@@ -3,6 +3,7 @@ import * as path from 'path';
 import { GENERATED_PROJECTS_DIR, OUTPUTS_DIR } from '../config';
 import { LogColors } from './log-colors.util';
 import {logToolAction} from './logger';
+import type { TechDecision } from '../agents/_shared/base-schemas';
 
 const TAG = `${LogColors.BRIGHT_BLUE}[workspace]${LogColors.RESET}`;
 
@@ -49,6 +50,90 @@ export function createRunOutputDir(systemName: string): string {
 
     logToolAction(`${TAG} Created run output dir: ${outputDir}`);
     return outputDir;
+}
+
+// ─── Gitignore entries by tech stack ─────────────────────────────────────────
+
+/**
+ * Return .gitignore entries appropriate for the given tech stacks.
+ * Covers dependency dirs, build output, IDE files, OS files, and env secrets.
+ * When called without techDecisions, returns sensible defaults safe for any project.
+ */
+export function getGitignoreEntriesForStack(techDecisions?: TechDecision[]): string[] {
+    // Always-present entries (safe for any project)
+    const common = [
+        '# Dependencies',
+        'node_modules/',
+        '__pycache__/',
+        '.venv/',
+        'venv/',
+        'vendor/',
+        '.bundle/',
+        'target/',
+        '',
+        '# Build output',
+        'dist/',
+        'build/',
+        '.next/',
+        'out/',
+        '*.js.map',
+        '',
+        '# Environment & secrets',
+        '.env',
+        '.env.local',
+        '.env.*.local',
+        '',
+        '# IDE',
+        '.idea/',
+        '.vscode/',
+        '*.swp',
+        '*.swo',
+        '',
+        '# OS',
+        '.DS_Store',
+        'Thumbs.db',
+        '',
+        '# Logs',
+        '*.log',
+        'npm-debug.log*',
+        '',
+        '# Test & coverage',
+        'coverage/',
+        '.nyc_output/',
+    ];
+
+    // Tech-stack-specific additions based on architect decisions
+    const extras: string[] = [];
+    if (techDecisions) {
+        const choices = techDecisions.map(t => t.choice.toLowerCase());
+
+        // Node/JS/TS
+        if (choices.some(c => /node|react|vue|angular|next|vite|express|nest/.test(c))) {
+            extras.push('.angular/', '.turbo/', '.parcel-cache/');
+        }
+        // Python
+        if (choices.some(c => /python|django|flask|fastapi/.test(c))) {
+            extras.push('*.pyc', '*.pyo', '.eggs/', '*.egg-info/', '.mypy_cache/', '.pytest_cache/');
+        }
+        // Go
+        if (choices.some(c => /\bgo\b|gin|fiber/.test(c))) {
+            extras.push('bin/', '*.exe', '*.test');
+        }
+        // Java/Kotlin
+        if (choices.some(c => /java|spring|maven|gradle|kotlin/.test(c))) {
+            extras.push('*.class', '*.jar', '*.war', '.gradle/', 'target/');
+        }
+        // Rust
+        if (choices.some(c => /rust|cargo/.test(c))) {
+            extras.push('target/', '**/*.rs.bk');
+        }
+        // .NET/C#
+        if (choices.some(c => /\.net|dotnet|c#|csharp|blazor/.test(c))) {
+            extras.push('bin/', 'obj/', '*.user', '*.suo', 'packages/');
+        }
+    }
+
+    return [...common, ...extras];
 }
 
 // ─── Gitignore management ────────────────────────────────────────────────────

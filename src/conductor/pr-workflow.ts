@@ -338,6 +338,23 @@ function findEscalationAgent(
     return candidates[0]?.id ?? null;
 }
 
+// ─── Base-ref resolution ─────────────────────────────────────────────────────
+
+/**
+ * Resolve baseBranch to a ref that exists in the worktree.
+ * Worktrees don't have local branches for the base — only origin/ remotes.
+ */
+function resolveBaseRef(worktreeDir: string, baseBranch: string): string {
+    // Try local branch first
+    const localCheck = gitExec(worktreeDir, `rev-parse --verify --quiet ${baseBranch}`);
+    if (localCheck && !localCheck.startsWith('Error')) return baseBranch;
+    // Fall back to origin/<baseBranch>
+    const remoteCheck = gitExec(worktreeDir, `rev-parse --verify --quiet origin/${baseBranch}`);
+    if (remoteCheck && !remoteCheck.startsWith('Error')) return `origin/${baseBranch}`;
+    // Last resort: return as-is
+    return baseBranch;
+}
+
 // ─── Main PR workflow ────────────────────────────────────────────────────────
 
 export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkflowResult> {
@@ -412,6 +429,10 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
     }
 
     try {
+        // Fetch base branch and resolve to a ref that exists in the worktree
+        gitExec(worktreeWorkspace, `fetch origin ${baseBranch}`);
+        const baseRef = resolveBaseRef(worktreeWorkspace, baseBranch);
+
         // ── 1. Run dev agent(s) on assignments ──────────────────────────
         // Group by developer agent
         const byDev = new Map<string, Assignment[]>();
@@ -586,7 +607,7 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
         // ── 1b. Check for actual commits before creating PR ─────────────
         // If no commits exist between base and this branch, skip PR creation
         // to avoid the "No commits between" GitHub API error.
-        const diffCheck = gitExec(worktreeWorkspace, `log ${baseBranch}..HEAD --oneline`);
+        const diffCheck = gitExec(worktreeWorkspace, `log ${baseRef}..HEAD --oneline`);
         if (!diffCheck || diffCheck.startsWith('Error:') || diffCheck.trim() === '') {
             log.warn(`No commits on branch ${branchName} relative to ${baseBranch} — skipping PR creation`);
             allTranscript.push(msg('conductor', `Skipped PR for ${branchName}: no commits (dev agent produced no changes)`));
@@ -733,7 +754,7 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
             }
 
             // Get the diff for reviewers (excluding generated files)
-            const prDiff = gitExec(worktreeWorkspace, `diff ${baseBranch}...${branchName} -- . ${DIFF_EXCLUDE_SPECS}`);
+            const prDiff = gitExec(worktreeWorkspace, `diff ${baseRef}...${branchName} -- . ${DIFF_EXCLUDE_SPECS}`);
 
             // ── Skip reviewers on empty diff (Change 4) ─────────────────
             if (!prDiff || prDiff.trim() === '' || prDiff.startsWith('Error:')) {
@@ -783,7 +804,7 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                     const reviewerAgent = buildReviewerAgent(apiKey, reviewerEntry, worktreeWorkspace, gitContext, baseBranch, reviewerConventions);
 
                     // Refresh diff for each reviewer so they see code after prior fixes
-                    const freshDiff = gitExec(worktreeWorkspace, `diff ${baseBranch}...${branchName} -- . ${DIFF_EXCLUDE_SPECS}`);
+                    const freshDiff = gitExec(worktreeWorkspace, `diff ${baseRef}...${branchName} -- . ${DIFF_EXCLUDE_SPECS}`);
 
                     // B6: Context-aware diff truncation with stat fallback
                     let truncatedDiff: string;
@@ -791,7 +812,7 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                         truncatedDiff = freshDiff;
                     } else {
                         // Diff too large — provide stat summary and instruct to use per-file tools
-                        const diffStat = gitExec(worktreeWorkspace, `diff --stat ${baseBranch}...${branchName} -- . ${DIFF_EXCLUDE_SPECS}`);
+                        const diffStat = gitExec(worktreeWorkspace, `diff --stat ${baseRef}...${branchName} -- . ${DIFF_EXCLUDE_SPECS}`);
                         truncatedDiff = [
                             `[DIFF TOO LARGE — ${freshDiff.length} chars. Showing file summary instead]\n`,
                             diffStat,
@@ -1177,12 +1198,12 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
 
                             const escalatedReviewerConventions = resolveConventionFiles(escalatedReviewerEntry.languages, techStack);
                             const escalatedReviewer = buildReviewerAgent(apiKey, escalatedReviewerEntry, worktreeWorkspace, gitContext, baseBranch, escalatedReviewerConventions);
-                            const escalatedDiff = gitExec(worktreeWorkspace, `diff ${baseBranch}...${branchName} -- . ${DIFF_EXCLUDE_SPECS}`);
+                            const escalatedDiff = gitExec(worktreeWorkspace, `diff ${baseRef}...${branchName} -- . ${DIFF_EXCLUDE_SPECS}`);
                             let escalatedDiffContent: string;
                             if (escalatedDiff.length <= MAX_DIFF_CHARS) {
                                 escalatedDiffContent = `\`\`\`diff\n${escalatedDiff}\n\`\`\``;
                             } else {
-                                const escalatedStat = gitExec(worktreeWorkspace, `diff --stat ${baseBranch}...${branchName} -- . ${DIFF_EXCLUDE_SPECS}`);
+                                const escalatedStat = gitExec(worktreeWorkspace, `diff --stat ${baseRef}...${branchName} -- . ${DIFF_EXCLUDE_SPECS}`);
                                 escalatedDiffContent = [
                                     `[DIFF TOO LARGE — ${escalatedDiff.length} chars. Showing file summary instead]\n`,
                                     escalatedStat,

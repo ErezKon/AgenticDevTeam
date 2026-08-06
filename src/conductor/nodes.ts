@@ -8,7 +8,7 @@ import { getAccessToken } from '../utils/oauth-auth.util';
 import { getLogger, setRunLogPath } from '../utils/logger';
 import { retryWithBackoff } from '../utils/retry';
 import { writeArtifact } from '../agents/_shared/artifact';
-import { createProjectWorkspace, createRunOutputDir, ensureProjectGitignore } from '../utils/workspace';
+import { createProjectWorkspace, createRunOutputDir, ensureProjectGitignore, getGitignoreEntriesForStack } from '../utils/workspace';
 import { parseRequirementsFile } from '../tools/requirements/parse-requirements';
 import { createCodebaseAnalyzerAgent } from '../agents/codebase-analyzer/codebase-analyzer.agent';
 import { writeCodebaseAnalysis, readExistingAnalysis } from '../utils/codebase-analysis-writer';
@@ -645,8 +645,13 @@ export async function intakeNode(state: ProjectStateType): Promise<Partial<Proje
         intakeLog.info(`Pushed system branch: ${systemBranch}`);
     }
 
-    // ── Keep scaffolding out of the delivered product (fixes A11) ──────────
-    ensureProjectGitignore(workspacePath, ['.conventions/', '.worktrees/']);
+    // ── Keep scaffolding + common dependency dirs out of the repo ──────────
+    const defaultGitignoreEntries = [
+        ...getGitignoreEntriesForStack(), // common entries (no tech decisions yet)
+        '.conventions/',
+        '.worktrees/',
+    ];
+    ensureProjectGitignore(workspacePath, defaultGitignoreEntries);
 
     // ── Sweep stale worktree leftovers from previous runs ────────────────
     try {
@@ -1099,6 +1104,14 @@ export async function developmentNode(state: ProjectStateType): Promise<Partial<
     )];
     const devConventionFiles = resolveConventionFiles(devLanguages, state.techStack);
     deployConventionsToWorkspace(state.workspacePath, devConventionFiles);
+
+    // Enhance .gitignore with tech-stack-specific entries now that we know the stack
+    const stackGitignoreEntries = [
+        ...getGitignoreEntriesForStack(state.techStack),
+        '.conventions/',
+        '.worktrees/',
+    ];
+    ensureProjectGitignore(state.workspacePath, stackGitignoreEntries);
 
     let contextPrompt: string;
     if (CONTEXT_COMPACT) {
