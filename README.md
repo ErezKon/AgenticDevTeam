@@ -368,17 +368,23 @@ flowchart LR
 
 ### Required Configuration
 
-Set these environment variables in `.env` to enable the PR workflow:
+Set these environment variables in `.env` to enable the PR workflow.
+
+The workflow supports two GitHub modes:
+
+- `GITHUB_MODE=live` (default): uses GitHub REST (Octokit) and requires a PAT.
+- `GITHUB_MODE=local`: uses a local GitHub stand-in backed by a bare git repo (offline; no PAT required).
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `GITHUB_TOKEN` | Yes | GitHub PAT with `repo` scope |
-| `GITHUB_OWNER` | Yes | Repository owner (org or user) |
-| `GITHUB_REPO` | Yes | Repository name |
+| `GITHUB_MODE` | No | GitHub mode: `live` or `local` (default: `live`) |
+| `GITHUB_TOKEN` | Live only | GitHub PAT with `repo` scope |
+| `GITHUB_OWNER` | Live only | Repository owner (org or user) |
+| `GITHUB_REPO` | Live only | Repository name |
 | `GIT_DEFAULT_BRANCH` | No | Default branch (default: `main`) |
 | `MAX_REVIEW_ITERATIONS` | No | Max review rounds (default: `5`) |
 
-> **Note:** The workspace must be an initialized Git repository with a GitHub remote.
+> **Note:** In `local` mode, intake can initialize a bare repo under the run outputs (e.g. `outputs/<run>/origin.git`) and use that as `origin`.
 
 ---
 
@@ -567,6 +573,23 @@ cd ..
 npm run cli
 ```
 
+### Offline determinism (LLM cassettes + local GitHub)
+
+You can run the pipeline **offline and deterministically** by recording LLM traffic once and replaying it later, while substituting a local GitHub stand-in.
+
+```bash
+# Record a cassette while running the CLI (writes tests/cassettes/<name>.jsonl)
+LLM_CASSETTE_MODE=record CASSETTE_NAME=my-run GITHUB_MODE=local npm run cli
+
+# Run the replay-focused tests (no network)
+npm run test:replay
+
+# Run unit tests only (skips greenfield/maintain and replay)
+npm run test:unit
+```
+
+See `tests/cassettes/README.md` for cassette format and redaction rules.
+
 The CLI presents a menu:
 
 ```
@@ -697,15 +720,23 @@ npm run build
 | `OAUTH_TOKEN_URL` | — | OAuth2 token endpoint URL |
 | `OAUTH_CLIENT_ID` | — | OAuth2 client ID |
 | `OAUTH_CLIENT_SECRET` | — | OAuth2 client secret |
+| `LLM_CASSETTE_MODE` | `off` | LLM cassette mode: `off`, `record`, or `replay` |
+| `CASSETTE_NAME` | — | Cassette name (file: `tests/cassettes/<CASSETTE_NAME>.jsonl`) |
+| `LLM_CASSETTE_ON_MISS` | `strict` | Replay miss behavior: `strict` (throw) or `passthrough` (call real LLM) |
+| `CASSETTE_MAX_MB` | `25` | Warn when a cassette exceeds this size (MB) |
 | `RUN_MODE` | `human` | Default run mode: `autonomous` or `human` |
 | `MAX_BUGFIX_ITERATIONS` | `3` | Max QA → bugfix → dev cycles |
 | `MAX_CONCURRENT_DEVS` | `3` | Max parallel developer agents |
 | `GENERATED_PROJECTS_DIR` | `./generated-projects` | Where generated codebases are written |
 | `OUTPUTS_DIR` | `./outputs` | Where run logs and artifacts are saved |
 | `DOCKER_HOST` | — | Docker daemon URL (default: local socket) |
+| `SHELL_ALLOW_HOST` | `false` | Allow the Shell tool to execute commands on the host (default: blocked) |
+| `SHELL_DEFAULT_TIMEOUT_S` | `120` | Default shell command timeout (seconds) |
+| `SHELL_MAX_TIMEOUT_S` | `600` | Maximum shell command timeout (seconds) |
 | `PLAYWRIGHT_MCP_CMD` | `npx` | Playwright MCP server command |
 | `PLAYWRIGHT_MCP_ARGS` | `@playwright/mcp@latest` | Playwright MCP server arguments |
-| `GITHUB_TOKEN` | — | GitHub PAT for PR operations (requires `repo` scope) |
+| `GITHUB_MODE` | `live` | GitHub mode: `live` (Octokit + PAT) or `local` (offline bare-repo stand-in) |
+| `GITHUB_TOKEN` | — | GitHub PAT for PR operations (requires `repo` scope; live mode only) |
 | `GITHUB_OWNER` | — | GitHub repository owner (org or user) |
 | `GITHUB_REPO` | — | GitHub repository name |
 | `GIT_DEFAULT_BRANCH` | `main` | Default branch name for merging PRs |
@@ -715,6 +746,32 @@ npm run build
 | `DASHBOARD_PORT` | `3000` | HTTP/WS server port |
 
 See [`.env.example`](.env.example) for the full template.
+
+### New variables (Plan 16)
+
+#### Offline determinism (LLM cassettes)
+
+- `LLM_CASSETTE_MODE`
+  - `off` (default): normal operation
+  - `record`: record LLM HTTP responses to `tests/cassettes/<CASSETTE_NAME>.jsonl`
+  - `replay`: serve responses from the cassette (no LLM network; OAuth is skipped)
+- `CASSETTE_NAME`: cassette file name (without extension)
+- `LLM_CASSETTE_ON_MISS`: in replay mode, what to do if a request isn’t found
+  - `strict` (default): throw to keep tests deterministic
+  - `passthrough`: call the real LLM (useful while building up a cassette)
+- `CASSETTE_MAX_MB`: warn if a cassette grows beyond this size
+
+#### Local GitHub stand-in
+
+- `GITHUB_MODE`
+  - `live` (default): use real GitHub REST API
+  - `local`: use a local GitHub stand-in backed by a bare git repo (offline; no PAT required)
+
+#### Shell tool safety
+
+- `SHELL_ALLOW_HOST`: must be `true` to allow the Shell tool to execute commands (default is blocked)
+- `SHELL_DEFAULT_TIMEOUT_S`: default shell command timeout
+- `SHELL_MAX_TIMEOUT_S`: maximum allowed shell command timeout
 
 ---
 
