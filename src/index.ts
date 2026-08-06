@@ -6,6 +6,7 @@
  * - GET  /api/run/:id       Get run state
  * - POST /api/run/:id/approve  Approve a HITL phase
  * - GET  /api/agents        List all agents
+ * - GET  /api/events        Recent run events (ring buffer backfill)
  *
  * WebSocket:
  * - ws://host:port/ws       Real-time transcript + state updates
@@ -18,12 +19,13 @@ import { createServer } from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
 import { DASHBOARD_PORT } from './config';
 import { AGENT_REGISTRY } from './agents/registry';
-import { runAutonomous, runHumanInTheLoop, type RunSession } from './conductor/run';
+import { runAutonomous, runHumanInTheLoop, resumeRun, type RunSession, type HitlDecision } from './conductor/run';
 import { parseRequirementsFile } from './tools/requirements/parse-requirements';
 import { getLogger } from './utils/logger';
 import { LogColors, color256 } from './utils/log-colors.util';
 import { tokenTracker } from './utils/token-tracker';
 import { refreshTokenReport } from './utils/token-report';
+import { onRunEvent, getRecentEvents } from './utils/event-bus';
 import * as path from 'path';
 import * as fs from 'fs';
 
@@ -61,10 +63,21 @@ function broadcast(event: string, data: any) {
     }
 }
 
+// ─── Event bus → WebSocket bridge ───────────────────────────────────────────
+
+onRunEvent((event) => {
+    broadcast(event.type, { ...event.payload, ts: event.ts });
+});
+
 // ─── Routes ─────────────────────────────────────────────────────────────────
 
 app.get('/api/agents', (_req, res) => {
     res.json(AGENT_REGISTRY);
+});
+
+app.get('/api/events', (_req, res) => {
+    const limit = parseInt(String(_req.query.limit ?? '100'), 10);
+    res.json(getRecentEvents(limit));
 });
 
 app.post('/api/run', async (req, res) => {
@@ -175,12 +188,20 @@ app.post('/api/run/:id/approve', async (req, res) => {
         return;
     }
     try {
-        const { approved, feedback } = req.body;
-        const result = await session.resume(approved !== false, feedback);
+        // Accept both new { decision, feedback } and legacy { approved, feedback } payloads
+        const { decision, approved, feedback } = req.body;
+        let hitlDecision: 'approve' | 'deny' | 'enhance';
+        if (decision === 'deny' || decision === 'enhance' || decision === 'approve') {
+            hitlDecision = decision;
+        } else {
+            // Legacy: approved boolean (default true)
+            hitlDecision = approved === false ? 'deny' : 'approve';
+        }
+        const result = await session.resume(hitlDecision, feedback);
         const state = await session.getState();
         states.set(req.params.id, state);
-        broadcast('run:phase-complete', { threadId: req.params.id, phase: state.phase });
-        res.json({ phase: state.phase, state });
+        broadcast('run:phase-complete', { threadId: req.params.id, phase: state.phase, decision: hitlDecision });
+        res.json({ phase: state.phase, decision: hitlDecision, state });
     } catch (err: any) {
         log.error(`POST /api/run/:id/approve failed: ${err.message}`);
         res.status(500).json({ error: err.message });

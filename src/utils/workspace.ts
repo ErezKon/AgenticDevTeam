@@ -51,6 +51,61 @@ export function createRunOutputDir(systemName: string): string {
     return outputDir;
 }
 
+// ─── Gitignore management ────────────────────────────────────────────────────
+
+const GITIGNORE_MARKER_START = '# ─── AgenticDevTeam (do not edit this block) ───';
+const GITIGNORE_MARKER_END   = '# ─── /AgenticDevTeam ───';
+
+/**
+ * Ensure the project's `.gitignore` contains a managed block with the given
+ * entries (e.g. `.conventions/`, `.worktrees/`).
+ *
+ * - Creates the file if it does not exist.
+ * - Appends the block if the marker is absent.
+ * - Replaces the block in-place if it already exists (idempotent).
+ * - Preserves all other content the project may have.
+ */
+export function ensureProjectGitignore(
+    workspacePath: string,
+    entries: string[],
+): void {
+    const gitignorePath = path.join(workspacePath, '.gitignore');
+    const block = [
+        GITIGNORE_MARKER_START,
+        ...entries,
+        GITIGNORE_MARKER_END,
+    ].join('\n');
+
+    let existing = '';
+    if (fs.existsSync(gitignorePath)) {
+        existing = fs.readFileSync(gitignorePath, 'utf-8');
+    }
+
+    // Already contains the marker — replace the managed block
+    if (existing.includes(GITIGNORE_MARKER_START)) {
+        const re = new RegExp(
+            escapeRegex(GITIGNORE_MARKER_START) +
+            '[\\s\\S]*?' +
+            escapeRegex(GITIGNORE_MARKER_END),
+        );
+        const updated = existing.replace(re, block);
+        fs.writeFileSync(gitignorePath, updated, 'utf-8');
+        return;
+    }
+
+    // No marker yet — append (with a leading newline if the file is non-empty)
+    const separator = existing.length > 0 && !existing.endsWith('\n') ? '\n\n' : existing.length > 0 ? '\n' : '';
+    fs.writeFileSync(gitignorePath, existing + separator + block + '\n', 'utf-8');
+    logToolAction(`${TAG} Added managed .gitignore block to ${gitignorePath}`);
+}
+
+/** Escape special regex characters in a string. */
+function escapeRegex(s: string): string {
+    return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// ─── Path resolution ─────────────────────────────────────────────────────────
+
 /**
  * Resolve a workspace-relative path, ensuring it stays within the workspace.
  * Throws if the resolved path escapes the workspace root.

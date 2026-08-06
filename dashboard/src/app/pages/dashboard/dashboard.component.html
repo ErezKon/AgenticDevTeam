@@ -4,6 +4,28 @@
     <a routerLink="/new-run" class="btn-primary" style="padding: 0.6rem 1.5rem;">+ New Run</a>
   </header>
 
+  <!-- Observability Bar -->
+  <section class="obs-bar" *ngIf="currentPhase || totalCalls > 0">
+    <div class="obs-item" *ngIf="currentPhase">
+      <span class="obs-label">Phase</span>
+      <span class="obs-value badge badge-purple">{{ currentPhase }}</span>
+    </div>
+    <div class="obs-item" *ngIf="totalCalls > 0">
+      <span class="obs-label">LLM Calls</span>
+      <span class="obs-value">{{ totalCalls }}</span>
+    </div>
+    <div class="obs-item" *ngIf="totalTokens > 0">
+      <span class="obs-label">Tokens</span>
+      <span class="obs-value">{{ totalTokens.toLocaleString() }}</span>
+    </div>
+    <div class="obs-item">
+      <span class="obs-label">Budget</span>
+      <span class="obs-value" [ngClass]="budgetLevelClass()">
+        {{ budgetLevel }} ({{ (budgetUtilisation * 100).toFixed(0) }}%)
+      </span>
+    </div>
+  </section>
+
   <!-- Agent Roster -->
   <section class="card" style="margin-bottom: 1.5rem;">
     <h2 style="margin-bottom: 1rem;">Agent Roster ({{ agents.length }})</h2>
@@ -18,11 +40,11 @@
 
   <!-- Live Events -->
   <section class="card">
-    <h2 style="margin-bottom: 1rem;">Live Events</h2>
+    <h2 style="margin-bottom: 1rem;">Live Events ({{ events.length }})</h2>
     <div class="event-log">
       <div *ngFor="let msg of events" class="event-entry">
         <span class="event-time">{{ msg.timestamp | date:'HH:mm:ss' }}</span>
-        <span class="event-type badge badge-blue">{{ msg.event }}</span>
+        <span class="event-type badge" [ngClass]="eventBadgeClass(msg.event)">{{ msg.event }}</span>
         <span class="event-data">{{ msg.data | json }}</span>
       </div>
       <div *ngIf="events.length === 0" class="empty-state">

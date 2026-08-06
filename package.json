@@ -9,7 +9,10 @@
     "test": "NODE_TLS_REJECT_UNAUTHORIZED=0 jest --runInBand --verbose",
     "test:oauth": "NODE_TLS_REJECT_UNAUTHORIZED=0 jest --runInBand --verbose --testPathPattern=oauth",
     "test:greenfield": "NODE_TLS_REJECT_UNAUTHORIZED=0 jest --runInBand --verbose --testPathPattern=greenfield",
-    "test:maintain": "NODE_TLS_REJECT_UNAUTHORIZED=0 jest --runInBand --verbose --testPathPattern=maintain"
+    "test:maintain": "NODE_TLS_REJECT_UNAUTHORIZED=0 jest --runInBand --verbose --testPathPattern=maintain",
+    "test:unit": "NODE_TLS_REJECT_UNAUTHORIZED=0 jest --runInBand --verbose --testPathIgnorePatterns='greenfield|maintain|pipeline-replay'",
+    "test:replay": "NODE_TLS_REJECT_UNAUTHORIZED=0 jest --runInBand --verbose --testPathPattern=pipeline-replay",
+    "record:cassette": "NODE_TLS_REJECT_UNAUTHORIZED=0 LLM_CASSETTE_MODE=record CASSETTE_NAME=greenfield-smoke GITHUB_MODE=local tsx src/cli.ts"
   },
   "author": "",
   "license": "ISC",

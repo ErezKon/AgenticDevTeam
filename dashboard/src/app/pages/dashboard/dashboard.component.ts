@@ -14,6 +14,11 @@ import { ApiService, AgentEntry, WsMessage } from '../../services/api.service';
 export class DashboardComponent implements OnInit, OnDestroy {
   agents: AgentEntry[] = [];
   events: WsMessage[] = [];
+  currentPhase = '';
+  budgetLevel = 'ok';
+  budgetUtilisation = 0;
+  totalTokens = 0;
+  totalCalls = 0;
   private sub?: Subscription;
 
   constructor(private api: ApiService) {}
@@ -22,7 +27,20 @@ export class DashboardComponent implements OnInit, OnDestroy {
     this.api.getAgents().subscribe(agents => this.agents = agents);
     this.sub = this.api.connectWebSocket().subscribe(msg => {
       this.events.unshift(msg);
-      if (this.events.length > 100) this.events.pop();
+      if (this.events.length > 200) this.events.length = 200;
+
+      // Track derived state from event types
+      if (msg.event === 'phase:start' && msg.data?.phase) {
+        this.currentPhase = msg.data.phase;
+      }
+      if (msg.event === 'budget:level' && msg.data) {
+        this.budgetLevel = msg.data.level ?? 'ok';
+        this.budgetUtilisation = msg.data.utilisation ?? 0;
+      }
+      if (msg.event === 'tokens:update' && msg.data) {
+        this.totalTokens = msg.data.totalTokens ?? this.totalTokens;
+        this.totalCalls = msg.data.totalCalls ?? this.totalCalls;
+      }
     });
   }
 
@@ -39,6 +57,25 @@ export class DashboardComponent implements OnInit, OnDestroy {
       case 'quality': return 'yellow';
       case 'operations': return 'green';
       default: return 'blue';
+    }
+  }
+
+  eventBadgeClass(eventType: string): string {
+    if (eventType.startsWith('phase:')) return 'badge-purple';
+    if (eventType.startsWith('agent:')) return 'badge-blue';
+    if (eventType.startsWith('pr:')) return 'badge-green';
+    if (eventType.startsWith('gate:')) return 'badge-yellow';
+    if (eventType.startsWith('budget:')) return 'badge-red';
+    if (eventType.startsWith('tokens:')) return 'badge-cyan';
+    return 'badge-blue';
+  }
+
+  budgetLevelClass(): string {
+    switch (this.budgetLevel) {
+      case 'warn': return 'status-warn';
+      case 'degrade': return 'status-degrade';
+      case 'stop': return 'status-stop';
+      default: return 'status-ok';
     }
   }
 }

@@ -7,8 +7,10 @@
 import { MAX_CONCURRENT_DEVS, INTER_BATCH_DELAY_MS } from '../../config';
 import { getLogger } from '../../utils/logger';
 import { executePRWorkflow } from '../../conductor/pr-workflow';
+import { completedIdsFromPullRequests } from '../../conductor/assignment-policy';
+import { getEffectiveLimits } from '../../utils/run-budget';
 import { getDevAgent } from './registry';
-import type { Assignment, FileChange, ArtifactRef, TranscriptMessage, PhaseName, PullRequest, GitContext, TechDecision } from '../_shared/base-schemas';
+import type { Assignment, FileChange, ArtifactRef, TranscriptMessage, PhaseName, PullRequest, GitContext, TechDecision, UserStory } from '../_shared/base-schemas';
 import type { TokenCallRecord } from '../../utils/token-tracker';
 
 const log = getLogger('[Dispatcher]', 226);
@@ -19,20 +21,27 @@ export interface DispatchResult {
     transcript: TranscriptMessage[];
     pullRequests: PullRequest[];
     tokenUsage: TokenCallRecord[];
+    completedAssignmentIds: string[];
 }
 
 /**
  * Topological sort on assignments by dependsOn.
  * Returns assignments in execution order (groups of independent assignments).
+ *
+ * `preSatisfied` seeds the completed set so dependencies on already-merged
+ * work are treated as resolved rather than triggering the "cyclic" fallback.
  */
-function topoSort(assignments: Assignment[]): Assignment[][] {
+export function topoSort(
+    assignments: Assignment[],
+    preSatisfied: Set<string> = new Set(),
+): Assignment[][] {
     const map = new Map<string, Assignment>();
     for (const a of assignments) map.set(a.id, a);
 
-    const completed = new Set<string>();
+    const completed = new Set<string>(preSatisfied);
     const layers: Assignment[][] = [];
 
-    while (completed.size < assignments.length) {
+    while (assignments.filter(a => !completed.has(a.id)).length > 0) {
         const ready = assignments.filter(
             a => !completed.has(a.id) &&
                 a.dependsOn.every(dep => completed.has(dep))
@@ -157,12 +166,15 @@ export async function dispatchDevelopers(
     projectSlug: string,
     gitContext?: GitContext | null,
     techStack?: TechDecision[],
+    completedAssignmentIds?: string[],
+    userStories?: UserStory[],
 ): Promise<DispatchResult> {
     const fileChanges: FileChange[] = [];
     const artifacts: ArtifactRef[] = [];
     const transcript: TranscriptMessage[] = [];
     const pullRequests: PullRequest[] = [];
     const tokenUsage: TokenCallRecord[] = [];
+    const newlyCompletedIds: string[] = [];
 
     // ── Story → branch mapping (shared across grouping + layer loop) ────
     const storyBranches = new Map<string, string>();
@@ -176,7 +188,8 @@ export async function dispatchDevelopers(
 
     // ── Topological sort within each branch, then process branches ────────
     // Branches with cross-branch dependencies are serialized via topoSort on assignments
-    const allAssignmentsSorted = topoSort(assignments);
+    const preSatisfied = new Set(completedAssignmentIds ?? []);
+    const allAssignmentsSorted = topoSort(assignments, preSatisfied);
 
     // Track which branches have been processed
     const processedBranches = new Set<string>();
@@ -205,6 +218,18 @@ export async function dispatchDevelopers(
 
         // Fan out branch PR workflows with concurrency limit
         for (let j = 0; j < branchesToProcess.length; j += MAX_CONCURRENT_DEVS) {
+            // Budget guard: stop dispatching new branch workflows when budget is exhausted
+            if (!getEffectiveLimits().allowNewBranchWorkflows) {
+                const undispatched = branchesToProcess.slice(j);
+                log.error(`Budget exhausted — stopping dispatch. ${undispatched.length} branch(es) not started: ${undispatched.join(', ')}`);
+                transcript.push({
+                    timestamp: new Date().toISOString(),
+                    agentId: 'dispatcher',
+                    phase: 'development' as PhaseName,
+                    message: `Budget exhausted — ${undispatched.length} branch(es) not dispatched: ${undispatched.join(', ')}`,
+                });
+                break;
+            }
             const batch = branchesToProcess.slice(j, j + MAX_CONCURRENT_DEVS);
             const promises = batch.map(branchName => {
                 const branchAssignments = branchGroups.get(branchName) ?? [];
@@ -226,6 +251,7 @@ export async function dispatchDevelopers(
                     projectSlug,
                     gitContext,
                     techStack,
+                    userStories,
                 });
             });
 
@@ -238,6 +264,7 @@ export async function dispatchDevelopers(
                     transcript.push(...prResult.transcript);
                     pullRequests.push(prResult.pullRequest);
                     if (prResult.tokenUsage) tokenUsage.push(...prResult.tokenUsage);
+                    newlyCompletedIds.push(...completedIdsFromPullRequests([prResult.pullRequest]));
                 } else {
                     log.error(`PR workflow failed: ${r.reason}`);
                     transcript.push({
@@ -257,6 +284,6 @@ export async function dispatchDevelopers(
         }
     }
 
-    log.info(`Dispatch complete: ${fileChanges.length} total file changes, ${pullRequests.length} PRs, ${artifacts.length} artifacts`);
-    return { fileChanges, artifacts, transcript, pullRequests, tokenUsage };
+    log.info(`Dispatch complete: ${fileChanges.length} total file changes, ${pullRequests.length} PRs, ${artifacts.length} artifacts, ${newlyCompletedIds.length} completed assignments`);
+    return { fileChanges, artifacts, transcript, pullRequests, tokenUsage, completedAssignmentIds: newlyCompletedIds };
 }

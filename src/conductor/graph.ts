@@ -2,11 +2,14 @@
  * Conductor Graph — the LangGraph state machine that orchestrates
  * all agents through the pipeline phases.
  *
- * Phases: intake → architect → PM → DBA → TL → development → QA → bugfix? → devops → finalize
+ * Phases: intake → architect → PM → DBA → TL → development → QA → bugfix? → devops → e2e → finalize
  */
-import { StateGraph, END } from '@langchain/langgraph';
+import { StateGraph, END, MemorySaver } from '@langchain/langgraph';
+import type { BaseCheckpointSaver } from '@langchain/langgraph';
 import { ProjectState } from './state';
-import { RUN_MODE, MAX_BUGFIX_ITERATIONS } from '../config';
+import { RUN_MODE, E2E_BUGFIX_ENABLED, CHECKPOINT_PERSIST } from '../config';
+import { FileCheckpointer } from './file-checkpointer';
+import { getEffectiveLimits } from '../utils/run-budget';
 import {
     intakeNode,
     codebaseAnalyzerNode,
@@ -18,6 +21,7 @@ import {
     qaNode,
     bugfixTriageNode,
     devopsNode,
+    e2eNode,
     finalizeNode,
 } from './nodes';
 import type { ProjectStateType } from './state';
@@ -34,16 +38,48 @@ const HITL_PHASES: PhaseName[] = [
     'development',
     'qa',
     'devops',
+    'e2e',
 ];
+
+// ─── Conductor options ──────────────────────────────────────────────────────
+
+export interface ConductorOptions {
+    /** Interrupt before each HITL phase. Defaults to the RUN_MODE env value. */
+    mode?: 'autonomous' | 'human';
+    /** Checkpointer. A MemorySaver is created when omitted. */
+    checkpointer?: BaseCheckpointSaver;
+    /** Output path — used to create a FileCheckpointer when CHECKPOINT_PERSIST=true. */
+    outputPath?: string;
+}
 
 // ─── Conditional edges ──────────────────────────────────────────────────────
 
-function afterQaRouter(state: ProjectStateType): string {
+export function afterQaRouter(state: ProjectStateType): string {
+    if (state.cancelled) return 'finalize';
     const hasFailures = (state.testReports ?? []).some(r => r.status === 'fail');
-    if (hasFailures && (state.iteration?.bugfix ?? 0) < MAX_BUGFIX_ITERATIONS) {
+    if (hasFailures && (state.iteration?.bugfix ?? 0) < getEffectiveLimits().maxBugfixIterations) {
         return 'bugfix-triage';
     }
     return 'devops';
+}
+
+/**
+ * After E2E, route to bugfix-triage only when ALL of:
+ * - E2E_BUGFIX_ENABLED is true (default false — keeps today's cost profile)
+ * - an E2E report has status === 'fail'
+ * - bugfix iterations remaining
+ *
+ * Otherwise route to finalize.
+ */
+export function afterE2eRouter(state: ProjectStateType): string {
+    if (state.cancelled) return 'finalize';
+    if (E2E_BUGFIX_ENABLED) {
+        const hasE2eFailures = (state.testReports ?? []).some(r => r.status === 'fail');
+        if (hasE2eFailures && (state.iteration?.bugfix ?? 0) < getEffectiveLimits().maxBugfixIterations) {
+            return 'bugfix-triage';
+        }
+    }
+    return 'finalize';
 }
 
 function afterBugfixRouter(state: ProjectStateType): string {
@@ -51,16 +87,50 @@ function afterBugfixRouter(state: ProjectStateType): string {
     return 'development';
 }
 
-function afterIntakeRouter(state: ProjectStateType): string {
+export function afterIntakeRouter(state: ProjectStateType): string {
     if (state.input.runType === 'maintain') {
         return 'codebase-analyzer';
     }
     return 'architect';
 }
 
+// ─── Rerun & cancel routers (HITL support) ──────────────────────────────────
+
+/**
+ * Route a phase back to itself when the user asked to enhance it.
+ *
+ * `pendingRerun` is cleared by the node itself at the start of its next
+ * execution, so a phase can only re-run once per request. This replaces the
+ * previous no-op "enhance" path, which stored feedback in `approvals` that no
+ * node ever read (PART A4.3).
+ */
+function rerunRouter(phase: PhaseName, next: string) {
+    return (state: ProjectStateType): string => {
+        if (state.cancelled) return 'finalize';
+        if (state.pendingRerun === phase) return phase;
+        return next;
+    };
+}
+
+/**
+ * Map of each HITL phase to its "normal" next destination.
+ * Used by rerunRouter to decide where to go when not re-running.
+ */
+const PHASE_NEXT: Partial<Record<PhaseName, string>> = {
+    'codebase-analyzer': 'architect',
+    'architect': 'product-manager',
+    'product-manager': 'dba',
+    'dba': 'team-leader',
+    'team-leader': 'development',
+    'development': 'qa',
+    // qa, devops, e2e have their own conditional routers so they are not here
+};
+
 // ─── Graph builder ──────────────────────────────────────────────────────────
 
-export function buildConductorGraph() {
+export function buildConductorGraph(opts: ConductorOptions = {}) {
+    const resolvedMode = opts.mode ?? RUN_MODE;
+
     const graph = new StateGraph(ProjectState)
         // Add all nodes
         .addNode('intake', intakeNode)
@@ -73,6 +143,7 @@ export function buildConductorGraph() {
         .addNode('qa', qaNode)
         .addNode('bugfix-triage', bugfixTriageNode)
         .addNode('devops', devopsNode)
+        .addNode('e2e', e2eNode)
         .addNode('finalize', finalizeNode)
 
         // Linear edges for the main pipeline
@@ -84,32 +155,88 @@ export function buildConductorGraph() {
             'architect': 'architect',
         })
 
-        // Analyzer always flows to architect
-        .addEdge('codebase-analyzer', 'architect')
-        .addEdge('architect', 'product-manager')
-        .addEdge('product-manager', 'dba')
-        .addEdge('dba', 'team-leader')
-        .addEdge('team-leader', 'development')
-        .addEdge('development', 'qa')
+        // Phases with rerun support — use conditional edges so "enhance" can loop back
+        .addConditionalEdges('codebase-analyzer', rerunRouter('codebase-analyzer', 'architect'), {
+            'codebase-analyzer': 'codebase-analyzer',
+            'architect': 'architect',
+            'finalize': 'finalize',
+        })
+        .addConditionalEdges('architect', rerunRouter('architect', 'product-manager'), {
+            'architect': 'architect',
+            'product-manager': 'product-manager',
+            'finalize': 'finalize',
+        })
+        .addConditionalEdges('product-manager', rerunRouter('product-manager', 'dba'), {
+            'product-manager': 'product-manager',
+            'dba': 'dba',
+            'finalize': 'finalize',
+        })
+        .addConditionalEdges('dba', rerunRouter('dba', 'team-leader'), {
+            'dba': 'dba',
+            'team-leader': 'team-leader',
+            'finalize': 'finalize',
+        })
+        .addConditionalEdges('team-leader', rerunRouter('team-leader', 'development'), {
+            'team-leader': 'team-leader',
+            'development': 'development',
+            'finalize': 'finalize',
+        })
+        .addConditionalEdges('development', rerunRouter('development', 'qa'), {
+            'development': 'development',
+            'qa': 'qa',
+            'finalize': 'finalize',
+        })
 
-        // Conditional: after QA, either bugfix or devops
-        .addConditionalEdges('qa', afterQaRouter, {
+        // Conditional: after QA, either bugfix or devops (includes cancel + rerun)
+        .addConditionalEdges('qa', (state: ProjectStateType) => {
+            if (state.cancelled) return 'finalize';
+            if (state.pendingRerun === 'qa') return 'qa';
+            return afterQaRouter(state);
+        }, {
+            'qa': 'qa',
             'bugfix-triage': 'bugfix-triage',
             'devops': 'devops',
+            'finalize': 'finalize',
         })
 
         // After bugfix, back to development
         .addEdge('bugfix-triage', 'development')
 
-        // After devops, finalize
-        .addEdge('devops', 'finalize')
+        // After devops — rerun support + route to e2e
+        .addConditionalEdges('devops', rerunRouter('devops', 'e2e'), {
+            'devops': 'devops',
+            'e2e': 'e2e',
+            'finalize': 'finalize',
+        })
+
+        // After E2E: either bugfix (if enabled and failures) or finalize (includes cancel + rerun)
+        .addConditionalEdges('e2e', (state: ProjectStateType) => {
+            if (state.cancelled) return 'finalize';
+            if (state.pendingRerun === 'e2e') return 'e2e';
+            return afterE2eRouter(state);
+        }, {
+            'e2e': 'e2e',
+            'bugfix-triage': 'bugfix-triage',
+            'finalize': 'finalize',
+        })
 
         // Finalize is the end
         .addEdge('finalize', END);
 
+    // ── Resolve checkpointer ────────────────────────────────────────────
+    let checkpointer: BaseCheckpointSaver;
+    if (opts.checkpointer) {
+        checkpointer = opts.checkpointer;
+    } else if (CHECKPOINT_PERSIST && opts.outputPath) {
+        checkpointer = new FileCheckpointer(opts.outputPath);
+    } else {
+        checkpointer = new MemorySaver();
+    }
+
     return graph.compile({
+        checkpointer,
         // In human mode, interrupt before each HITL phase so the user can approve
-        ...(RUN_MODE === 'human'
+        ...(resolvedMode === 'human'
             ? { interruptBefore: HITL_PHASES }
             : {}),
     });
@@ -118,6 +245,6 @@ export function buildConductorGraph() {
 /**
  * Convenience: build and return the compiled graph ready for invoke/stream.
  */
-export function createConductor() {
-    return buildConductorGraph();
+export function createConductor(opts: ConductorOptions = {}) {
+    return buildConductorGraph(opts);
 }

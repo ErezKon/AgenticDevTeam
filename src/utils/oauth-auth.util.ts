@@ -13,8 +13,17 @@ let inflightPromise: Promise<string> | null = null;
  * Fetch a fresh Bearer token using OAuth2 client-credentials flow.
  * Caches the token in-process and refreshes 60s before expiry.
  * Concurrent callers share the same in-flight request.
+ *
+ * In LLM_CASSETTE_MODE=replay, returns a constant so replays work
+ * without OAuth credentials (the cassette contains pre-recorded responses).
  */
 export async function getAccessToken(): Promise<string> {
+    // In replay mode, skip the real OAuth flow entirely — the cassette
+    // has all the LLM responses we need and no real network call is made.
+    if (process.env.LLM_CASSETTE_MODE === 'replay') {
+        return 'cassette-replay-token';
+    }
+
     // Return cached token if still valid (with 60s safety margin)
     if (cachedToken && Date.now() < expiresAtMs - 60_000) {
         return cachedToken;

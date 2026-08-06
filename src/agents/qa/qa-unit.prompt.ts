@@ -64,6 +64,9 @@ ${conventionsBlock}
 <output_rules>
     - Return a TestReport with accurate counts and failure details.
     - Include fileChanges for all test files created.
+    - In the \`cases\` array, EVERY entry MUST carry the \`storyId\` and
+      \`acIndex\` from the test plan item it implements. If a test covers a
+      whole story, set acIndex to -1.
 </output_rules>
 `;
 }

@@ -9,6 +9,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { getLogger } from './logger';
+import { emitRunEvent } from './event-bus';
 
 const log = getLogger('[TokenTracker]', 220);
 
@@ -48,7 +49,7 @@ export interface RunUsageSummary {
 
 // ─── Run status ─────────────────────────────────────────────────────────────
 
-export type RunStatus = 'in-progress' | 'completed' | 'failed';
+export type RunStatus = 'in-progress' | 'completed' | 'failed' | 'cancelled';
 
 // ─── Singleton ──────────────────────────────────────────────────────────────
 
@@ -111,6 +112,16 @@ class TokenTracker {
             } catch (e) {
                 log.warn(`Refresh callback failed: ${(e as Error).message}`);
             }
+            // Emit tokens:update for the live dashboard
+            try {
+                const summary = this.getRunSummary();
+                emitRunEvent('tokens:update', {
+                    totalCalls: summary.totalCalls,
+                    totalTokens: summary.totalTokens,
+                    totalInputTokens: summary.totalInputTokens,
+                    totalOutputTokens: summary.totalOutputTokens,
+                });
+            } catch { /* best-effort */ }
         }, TokenTracker.REFRESH_DEBOUNCE_MS);
     }
 

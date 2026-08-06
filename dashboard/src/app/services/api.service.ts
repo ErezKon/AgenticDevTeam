@@ -39,6 +39,12 @@ export interface WsMessage {
   timestamp: string;
 }
 
+export interface RunEvent {
+  type: string;
+  ts: string;
+  payload: Record<string, unknown>;
+}
+
 @Injectable({ providedIn: 'root' })
 export class ApiService {
   private ws: WebSocket | null = null;
@@ -56,6 +62,10 @@ export class ApiService {
 
   getRunState(id: string): Observable<any> {
     return this.http.get(`/api/run/${id}`);
+  }
+
+  getRecentEvents(limit = 100): Observable<RunEvent[]> {
+    return this.http.get<RunEvent[]>(`/api/events?limit=${limit}`);
   }
 
   approvePhase(id: string, approved: boolean, feedback?: string): Observable<any> {

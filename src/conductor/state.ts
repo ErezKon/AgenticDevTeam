@@ -120,6 +120,12 @@ export const ProjectState = Annotation.Root({
         default: () => [],
     }),
 
+    // ── Completed assignment ids (prevents bug-fix loop re-runs) ──────────
+    completedAssignmentIds: Annotation<string[]>({
+        reducer: appendReducer,
+        default: () => [],
+    }),
+
     // ── Developer outputs ────────────────────────────────────────────────
     fileChanges: Annotation<FileChange[]>({
         reducer: appendReducer,
@@ -139,11 +145,21 @@ export const ProjectState = Annotation.Root({
         reducer: appendReducer,
         default: () => [],
     }),
+    fixedBugIds: Annotation<string[]>({
+        reducer: appendReducer,
+        default: () => [],
+    }),
 
     // ── DevOps outputs ───────────────────────────────────────────────────
     devopsPlan: Annotation<DevOpsPlan | null>({
         reducer: replaceReducer,
         default: () => null,
+    }),
+
+    // ── Running containers (for teardown in finalize) ────────────────────
+    runningContainers: Annotation<string[]>({
+        reducer: replaceReducer,
+        default: () => [],
     }),
 
     // ── PR & branching ────────────────────────────────────────────────────
@@ -170,6 +186,32 @@ export const ProjectState = Annotation.Root({
     approvals: Annotation<Approval[]>({
         reducer: appendReducer,
         default: () => [],
+    }),
+
+    // ── HITL re-run support ──────────────────────────────────────────────
+
+    /** When set, the named phase will re-run itself once (cleared by the node at re-entry). */
+    pendingRerun: Annotation<PhaseName | null>({
+        reducer: replaceReducer,
+        default: () => null,
+    }),
+
+    /** Accumulated user feedback per phase. Entries concatenate across enhance rounds. */
+    phaseFeedback: Annotation<Record<string, string[]>>({
+        reducer: (existing: Record<string, string[]>, incoming: Record<string, string[]>) => {
+            const merged = { ...existing };
+            for (const [key, values] of Object.entries(incoming)) {
+                merged[key] = (merged[key] ?? []).concat(values);
+            }
+            return merged;
+        },
+        default: () => ({}),
+    }),
+
+    /** Set to true when a HITL deny is issued, so the graph routes to finalize. */
+    cancelled: Annotation<boolean>({
+        reducer: replaceReducer,
+        default: () => false,
     }),
 
     // ── Agent artifacts (markdown mission reports) ───────────────────────

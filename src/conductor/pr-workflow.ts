@@ -17,17 +17,30 @@ import { buildDevAgent } from '../agents/developers/dev-agent.builder';
 import { buildReviewerAgent } from '../agents/developers/reviewer-agent.builder';
 import { getDevAgent, DEV_AGENTS } from '../agents/developers/registry';
 import { resolveConventionFiles } from '../utils/coding-conventions';
+import { gitExec, gitPush, findGitRoot } from '../utils/git-exec';
 import {
     GITHUB_TOKEN, GITHUB_OWNER, GITHUB_REPO,
-    MAX_REVIEW_ITERATIONS, DEV_RECURSION_LIMIT, REVIEWER_RECURSION_LIMIT,
+    DEV_RECURSION_LIMIT, REVIEWER_RECURSION_LIMIT,
     GIT_USER_NAME, GIT_USER_EMAIL,
     PRINCIPAL_DEV_MODEL, SENIOR_DEV_MODEL, JUNIOR_DEV_MODEL,
-    PR_TEST_INSTALL_TIMEOUT_MS, PR_TEST_TIMEOUT_MS, PR_TEST_REPAIR_ATTEMPTS,
+    PR_TEST_INSTALL_TIMEOUT_MS, PR_TEST_TIMEOUT_MS,
+    CONTEXT_COMPACT,
+    SECURITY_GATE_IN_PR,
 } from '../config';
+import { getEffectiveLimits } from '../utils/run-budget';
+import { emitRunEvent } from '../utils/event-bus';
+import { GITHUB_MODE, createLocalGitHub } from '../utils/github-local';
+import { storiesForIds } from './context-builder';
 import { isBlockingReview, evaluateProgress, MAX_NO_PROGRESS_ITERATIONS } from './review-policy';
+import { runQualityGates, gateReportToMarkdown } from './quality-gates';
+import { scanForSecrets, securityReportToMarkdown } from './security-gates';
+import { parseAgentJson, validateAgentOutput } from '../utils/structured-output';
+import { DeveloperOutputSchema } from '../agents/developers/schemas/dev-output.schema';
+import { ReviewOutputSchema } from '../agents/developers/schemas/review-output.schema';
+import type { GateReport } from './quality-gates';
 import type {
     Assignment, FileChange, ArtifactRef, TranscriptMessage,
-    PhaseName, PullRequest, PRReview, GitContext, TechDecision,
+    PhaseName, PullRequest, PRReview, GitContext, TechDecision, UserStory,
 } from '../agents/_shared/base-schemas';
 import type { DeveloperOutput } from '../agents/developers/schemas/dev-output.schema';
 import type { ReviewOutput } from '../agents/developers/schemas/review-output.schema';
@@ -52,6 +65,9 @@ export interface PRWorkflowInput {
     projectSlug: string;
     gitContext?: GitContext | null;
     techStack?: TechDecision[];
+    /** User stories from the PM — when present, only the stories for this branch's
+     *  assignments are injected into the dev prompt (fixes A8: every dev got all stories). */
+    userStories?: UserStory[];
 }
 
 export interface PRWorkflowResult {
@@ -70,38 +86,22 @@ function msg(agentId: string, message: string): TranscriptMessage {
     return { timestamp: ts(), agentId, phase: 'development' as PhaseName, message };
 }
 
-function gitExec(workspacePath: string, args: string): string {
-    try {
-        return execSync(`git ${args}`, {
-            cwd: workspacePath, encoding: 'utf-8',
-            timeout: 30_000, maxBuffer: 1024 * 1024 * 5,
-            env: {
-                ...process.env,
-                GIT_TERMINAL_PROMPT: '0', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null',
-                GIT_AUTHOR_NAME: GIT_USER_NAME, GIT_AUTHOR_EMAIL: GIT_USER_EMAIL,
-                GIT_COMMITTER_NAME: GIT_USER_NAME, GIT_COMMITTER_EMAIL: GIT_USER_EMAIL,
-            },
-        }).trim();
-    } catch (err: any) {
-        return `Error: ${err.stderr?.toString() ?? err.message}`.trim();
-    }
-}
+// gitExec, gitPush, findGitRoot imported from ../utils/git-exec
 
-function gitPush(workspacePath: string, branchName: string, gitContext?: GitContext | null): string {
-    const token = gitContext?.token ?? GITHUB_TOKEN;
-    const owner = gitContext?.owner ?? GITHUB_OWNER;
-    const repo = gitContext?.repo ?? GITHUB_REPO;
-    const authUrl = `https://x-access-token:${token}@github.com/${owner}/${repo}.git`;
-    const result = gitExec(workspacePath, `push ${authUrl} HEAD:refs/heads/${branchName}`);
-    if (result.startsWith('Error:')) {
-        log.error(`Push failed for ${branchName}: ${result}`);
-    } else {
-        log.info(`Pushed branch ${branchName}`);
-    }
-    return result;
+/** Local-mode bare repo path, resolved once per process from gitContext. */
+let _localBareRepoPath: string | null = null;
+
+/** Set the bare repo path for local GitHub mode (called by intakeNode). */
+export function setLocalBareRepoPath(p: string): void {
+    _localBareRepoPath = p;
 }
 
 function getOctokit(gitContext?: GitContext | null): Octokit {
+    if (GITHUB_MODE === 'local') {
+        // Return a local GitHub stand-in backed by a bare repo
+        const bareRepoPath = _localBareRepoPath ?? gitContext?.repo ?? '';
+        return createLocalGitHub(bareRepoPath) as unknown as Octokit;
+    }
     const token = gitContext?.token ?? GITHUB_TOKEN;
     if (!token) {
         throw new Error('GITHUB_TOKEN is not set. Cannot perform GitHub API operations.');
@@ -141,74 +141,9 @@ function slugify(text: string): string {
         .slice(0, 50);
 }
 
-/**
- * Install dependencies (once) and run the project's test script.
- *
- * Runs 5 & 6 produced a stream of `npm test` exit-code-1 failures and review
- * comments like "Cannot find module" simply because node_modules was missing.
- *
- * Returns null if no test script exists or the project is not Node-based.
- */
-function ensureDepsAndRunTests(workspacePath: string): { passed: boolean; output: string } | null {
-    const pkgPath = path.join(workspacePath, 'package.json');
-    if (!fs.existsSync(pkgPath)) return null;
+// ensureDepsAndRunTests removed — replaced by runQualityGates (fixes A6)
 
-    let pkg: any;
-    try {
-        pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
-    } catch {
-        return null;
-    }
-
-    const testScript = pkg?.scripts?.test;
-    if (!testScript || testScript.includes('no test specified')) return null;
-
-    // Install dependencies if node_modules is missing and there are deps
-    const hasDeps = pkg.dependencies || pkg.devDependencies;
-    const nodeModulesPath = path.join(workspacePath, 'node_modules');
-    if (hasDeps && !fs.existsSync(nodeModulesPath)) {
-        log.info('Installing dependencies before running tests...');
-        try {
-            execSync('npm install --no-audit --no-fund --loglevel=error 2>&1', {
-                cwd: workspacePath,
-                encoding: 'utf-8',
-                timeout: PR_TEST_INSTALL_TIMEOUT_MS,
-                maxBuffer: 1024 * 1024 * 5,
-                env: { ...process.env, CI: 'true' },
-            });
-            log.info('Dependencies installed successfully');
-        } catch (installErr: any) {
-            const installOutput = (installErr.stdout ?? installErr.stderr ?? installErr.message ?? '').toString().trim();
-            log.warn(`npm install failed (non-fatal): ${installOutput.slice(-500)}`);
-        }
-    }
-
-    // Run the test script
-    try {
-        const result = execSync('npm test --silent 2>&1', {
-            cwd: workspacePath,
-            encoding: 'utf-8',
-            timeout: PR_TEST_TIMEOUT_MS,
-            maxBuffer: 1024 * 1024 * 2,
-            env: { ...process.env, CI: 'true', NODE_ENV: 'test' },
-        });
-        return { passed: true, output: result.trim().slice(-2000) };
-    } catch (err: any) {
-        // execSync throws on non-zero exit code
-        const output = (err.stdout ?? err.stderr ?? err.message ?? '').toString().trim();
-        return { passed: false, output: output.slice(-2000) };
-    }
-}
-
-function findGitRoot(startPath: string): string {
-    let dir = path.resolve(startPath);
-    while (true) {
-        if (fs.existsSync(path.join(dir, '.git'))) return dir;
-        const parent = path.dirname(dir);
-        if (parent === dir) throw new Error(`Not inside a git repository: ${startPath}`);
-        dir = parent;
-    }
-}
+// findGitRoot imported from ../utils/git-exec
 
 // ─── PR title & description builders ─────────────────────────────────────────
 
@@ -312,29 +247,17 @@ async function invokeDevAgent(
         }
 
         const raw = typeof last.content === 'string' ? last.content : JSON.stringify(last.content);
-        try {
-            return { output: JSON.parse(raw), tokenUsage };
-        } catch {
-            // Try extracting JSON from markdown code fence
-            const match = raw.match(/```(?:json)?\s*([\s\S]*?)```/);
-            if (match) {
-                try {
-                    return { output: JSON.parse(match[1].trim()), tokenUsage };
-                } catch {
-                    // Fall through to error below
-                }
-            }
-            // Try extracting any JSON object from the response
-            const objMatch = raw.match(/\{[\s\S]*\}/);
-            if (objMatch) {
-                try {
-                    return { output: JSON.parse(objMatch[0]), tokenUsage };
-                } catch {
-                    // Fall through to error below
-                }
-            }
-            throw new Error(`Invalid JSON output from dev agent: ${raw.slice(0, 200)}`);
+        const parseResult = parseAgentJson(raw);
+        if (!parseResult.ok) {
+            throw new Error(`Invalid JSON output from dev agent: ${parseResult.error}`);
         }
+
+        // Validate against DeveloperOutputSchema — log issues but return the object
+        const validation = validateAgentOutput(DeveloperOutputSchema, parseResult.value);
+        if (!validation.ok) {
+            log.warn(`Dev agent ${agentId} output schema issues:\n${validation.issues}`);
+        }
+        return { output: (validation.ok ? validation.value : parseResult.value) as DeveloperOutput, tokenUsage };
     }, `dev-${threadSuffix}`);
 }
 
@@ -375,27 +298,18 @@ async function invokeReviewerAgent(
         }
 
         const raw = typeof last.content === 'string' ? last.content : JSON.stringify(last.content);
-        try {
-            return { output: JSON.parse(raw), tokenUsage };
-        } catch {
-            const match = raw.match(/```(?:json)?\s*([\s\S]*?)```/);
-            if (match) {
-                try {
-                    return { output: JSON.parse(match[1].trim()), tokenUsage };
-                } catch {
-                    // Fall through
-                }
-            }
-            const objMatch = raw.match(/\{[\s\S]*\}/);
-            if (objMatch) {
-                try {
-                    return { output: JSON.parse(objMatch[0]), tokenUsage };
-                } catch {
-                    // Fall through
-                }
-            }
-            throw new Error(`Invalid JSON output from reviewer agent: ${raw.slice(0, 200)}`);
+        const parseResult = parseAgentJson(raw);
+        if (!parseResult.ok) {
+            throw new Error(`Invalid JSON output from reviewer agent: ${parseResult.error}`);
         }
+
+        // Validate against ReviewOutputSchema — log issues, default to approved on garbage
+        const validation = validateAgentOutput(ReviewOutputSchema, parseResult.value);
+        if (!validation.ok) {
+            log.warn(`Reviewer ${agentId} output schema issues (defaulting to approved):\n${validation.issues}`);
+            return { output: { status: 'approved', summary: `Reviewer returned invalid schema: ${validation.issues}`, comments: [] }, tokenUsage };
+        }
+        return { output: validation.value as ReviewOutput, tokenUsage };
     }, `review-${threadSuffix}`);
 }
 
@@ -430,7 +344,7 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
     const {
         branchName, baseBranch, assignments, reviewerAgentIds, taskType,
         workspacePath, apiKey, contextPrompt, currentState, projectSlug, gitContext,
-        techStack,
+        techStack, userStories,
     } = input;
 
     // Resolve owner/repo from gitContext (falls back to config constants)
@@ -469,22 +383,33 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
     gitExec(gitRoot, `branch -D ${branchName}`);
     // Fetch latest base branch from remote (may fail if not pushed yet)
     gitExec(gitRoot, `fetch origin ${baseBranch}`);
-    // Create worktree with a new branch — try remote ref first, fall back to local
-    let wtResult = gitExec(gitRoot, `worktree add "${worktreeDir}" -b ${branchName} origin/${baseBranch}`);
-    if (wtResult.startsWith('Error:')) {
-        log.warn(`Remote ref origin/${baseBranch} not found, falling back to local branch`);
-        wtResult = gitExec(gitRoot, `worktree add "${worktreeDir}" -b ${branchName} ${baseBranch}`);
+    // Create worktree with a new branch — try remote ref first, fall back to local.
+    // Wrapped in try/catch so a failed creation cleans up the partial directory
+    // before re-throwing (fixes A11 worktree leak).
+    try {
+        let wtResult = gitExec(gitRoot, `worktree add "${worktreeDir}" -b ${branchName} origin/${baseBranch}`);
+        if (wtResult.startsWith('Error:')) {
+            log.warn(`Remote ref origin/${baseBranch} not found, falling back to local branch`);
+            wtResult = gitExec(gitRoot, `worktree add "${worktreeDir}" -b ${branchName} ${baseBranch}`);
+        }
+        if (wtResult.startsWith('Error:')) {
+            throw new Error(`Failed to create worktree for ${branchName}: ${wtResult}`);
+        }
+        log.info(`Worktree created: ${wtResult}`);
+        // Set git identity in the worktree so agent shell commands have valid author
+        gitExec(worktreeDir, `config user.name "${GIT_USER_NAME}"`);
+        gitExec(worktreeDir, `config user.email "${GIT_USER_EMAIL}"`);
+        // Ensure the workspace sub-directory exists in the worktree
+        fs.mkdirSync(worktreeWorkspace, { recursive: true });
+        allTranscript.push(msg('conductor', `Created isolated worktree for branch: ${branchName} from ${baseBranch}`));
+    } catch (wtCreateErr) {
+        // Clean up any partial worktree directory so it does not leak (fixes A11)
+        if (fs.existsSync(worktreeDir)) {
+            gitExec(gitRoot, `worktree remove "${worktreeDir}" --force`);
+        }
+        gitExec(gitRoot, 'worktree prune');
+        throw wtCreateErr;
     }
-    if (wtResult.startsWith('Error:')) {
-        throw new Error(`Failed to create worktree for ${branchName}: ${wtResult}`);
-    }
-    log.info(`Worktree created: ${wtResult}`);
-    // Set git identity in the worktree so agent shell commands have valid author
-    gitExec(worktreeDir, `config user.name "${GIT_USER_NAME}"`);
-    gitExec(worktreeDir, `config user.email "${GIT_USER_EMAIL}"`);
-    // Ensure the workspace sub-directory exists in the worktree
-    fs.mkdirSync(worktreeWorkspace, { recursive: true });
-    allTranscript.push(msg('conductor', `Created isolated worktree for branch: ${branchName} from ${baseBranch}`));
 
     try {
         // ── 1. Run dev agent(s) on assignments ──────────────────────────
@@ -513,8 +438,15 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                 `Assignment ${a.id} [${a.priority}/${a.complexity}]: ${a.description}`
             ).join('\n\n');
 
+            // Build the per-branch story section (fixes A8: every dev got all stories)
+            const branchStoryIds = [...new Set(devAssignments.map(a => a.storyId).filter(Boolean))] as string[];
+            const storySection = (CONTEXT_COMPACT && userStories?.length && branchStoryIds.length)
+                ? `\n## User Stories for This Branch\n\n${storiesForIds(userStories, branchStoryIds)}`
+                : '';
+
             const message = [
                 contextPrompt,
+                storySection,
                 `\n## Project Slug: ${projectSlug}`,
                 `\n## Your Branch: ${branchName}`,
                 `\nYou are already on this branch. Do NOT create or switch branches — your workspace is isolated for this branch.`,
@@ -562,24 +494,31 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
         }
         gitPush(worktreeWorkspace, branchName, gitContext);
 
-        // ── 1a. Post-development test verification ────────────────────
-        // Install deps (once) and run project tests to detect failures early.
-        // If tests fail and PR_TEST_REPAIR_ATTEMPTS > 0, give the dev agent
-        // one repair attempt before opening the PR (Sub-Plan 5, Change 5).
-        let testResult: { passed: boolean; output: string } | null = null;
+        // ── 1a. Post-development quality gate verification (fixes A6) ──
+        // Run multi-language quality gates (install/build/lint/test) to detect
+        // failures early. If gates fail and effective prTestRepairAttempts > 0, give
+        // the dev agent a repair attempt before opening the PR.
+        let gateReport: GateReport | null = null;
         try {
-            testResult = ensureDepsAndRunTests(worktreeWorkspace);
-            if (testResult) {
-                if (testResult.passed) {
-                    log.info(`Tests passed on branch ${branchName}`);
-                    allTranscript.push(msg('conductor', `Tests passed on branch ${branchName}`));
+            gateReport = runQualityGates(worktreeWorkspace, {
+                timeoutMs: PR_TEST_TIMEOUT_MS,
+                installTimeoutMs: PR_TEST_INSTALL_TIMEOUT_MS,
+            });
+            if (gateReport && gateReport.results.length > 0) {
+                if (gateReport.passed) {
+                    log.info(`Quality gates passed on branch ${branchName}`);
+                    allTranscript.push(msg('conductor', `Quality gates passed on branch ${branchName}`));
                 } else {
-                    log.warn(`Tests FAILED on branch ${branchName} — giving dev agent a repair attempt`);
-                    allTranscript.push(msg('conductor', `WARNING: Tests failed on branch ${branchName}:\n${testResult.output.slice(0, 500)}`));
+                    const failingSteps = gateReport.results
+                        .filter(r => !r.passed && !r.skipped)
+                        .map(r => `${r.step}: ${r.output.slice(0, 200)}`);
+                    log.warn(`Quality gates FAILED on branch ${branchName} — giving dev agent a repair attempt`);
+                    allTranscript.push(msg('conductor', `WARNING: Quality gates failed on branch ${branchName}:\n${failingSteps.join('\n').slice(0, 500)}`));
 
-                    // Automated repair: re-invoke the primary dev agent with test output
-                    if (PR_TEST_REPAIR_ATTEMPTS > 0) {
-                        for (let repair = 0; repair < PR_TEST_REPAIR_ATTEMPTS; repair++) {
+                    // Automated repair: re-invoke the primary dev agent with failing step output
+                    const effectiveRepairAttempts = getEffectiveLimits().prTestRepairAttempts;
+                    if (effectiveRepairAttempts > 0) {
+                        for (let repair = 0; repair < effectiveRepairAttempts; repair++) {
                             try {
                                 const primaryDevId = assignments[0].devAgentId;
                                 const primaryEntry = getDevAgent(primaryDevId);
@@ -587,6 +526,13 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
 
                                 const repairConventions = resolveConventionFiles(primaryEntry.languages, techStack);
                                 const repairAgent = buildDevAgent(apiKey, primaryEntry, worktreeWorkspace, gitContext, baseBranch, repairConventions);
+
+                                // Feed only the failing steps to the repair agent
+                                const failDetails = gateReport.results
+                                    .filter(r => !r.passed && !r.skipped)
+                                    .map(r => `### ${r.step} (\`${r.command}\`)\n\`\`\`\n${r.output.slice(-1000)}\n\`\`\``)
+                                    .join('\n\n');
+
                                 const repairMsg = [
                                     contextPrompt,
                                     `\n## Project Slug: ${projectSlug}`,
@@ -595,12 +541,12 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                                     `\n## IMPORTANT: Workspace Context`,
                                     `Your current working directory IS the project root.`,
                                     `Do NOT prefix paths with "generated-projects/${projectSlug}/" — all file operations are relative to the project root.`,
-                                    `\n## Test Failure Output\n\n\`\`\`\n${testResult!.output.slice(-1500)}\n\`\`\``,
+                                    `\n## Failing Quality Gate Steps\n\n${failDetails}`,
                                     `\n## Instructions`,
-                                    `Fix the failing tests. Do not disable or delete tests to make them pass. Commit and push.`,
+                                    `Fix the failing tests. Do not disable or delete tests to make them pass. Do not weaken lint rules or skip build steps. Commit and push.`,
                                 ].join('\n');
 
-                                log.info(`Test repair attempt ${repair + 1}/${PR_TEST_REPAIR_ATTEMPTS}`);
+                                log.info(`Quality gate repair attempt ${repair + 1}/${effectiveRepairAttempts}`);
                                 const repairModel = getModelForRank(primaryEntry.rank as DevRank);
                                 const { output: repairOutput, tokenUsage: repairTokenUsage } = await invokeDevAgent(
                                     repairAgent, repairMsg, `repair-${primaryEntry.id}-${branchName}`, primaryEntry.id, repairModel,
@@ -612,26 +558,29 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                                 gitExec(worktreeWorkspace, 'add .');
                                 const repairStatus = gitExec(worktreeWorkspace, 'status --short');
                                 if (repairStatus && !repairStatus.includes('nothing to commit')) {
-                                    gitExec(worktreeWorkspace, `commit -m "[${projectSlug}]-[${primaryStoryId}]-fix: repair failing tests"`);
+                                    gitExec(worktreeWorkspace, `commit -m "[${projectSlug}]-[${primaryStoryId}]-fix: repair failing quality gates"`);
                                 }
                                 gitPush(worktreeWorkspace, branchName, gitContext);
 
-                                // Re-run tests
-                                testResult = ensureDepsAndRunTests(worktreeWorkspace);
-                                if (testResult?.passed) {
-                                    log.info(`Tests passed after repair attempt ${repair + 1}`);
-                                    allTranscript.push(msg('conductor', `Tests passed after repair attempt ${repair + 1}`));
+                                // Re-run quality gates
+                                gateReport = runQualityGates(worktreeWorkspace, {
+                                    timeoutMs: PR_TEST_TIMEOUT_MS,
+                                    installTimeoutMs: PR_TEST_INSTALL_TIMEOUT_MS,
+                                });
+                                if (gateReport?.passed) {
+                                    log.info(`Quality gates passed after repair attempt ${repair + 1}`);
+                                    allTranscript.push(msg('conductor', `Quality gates passed after repair attempt ${repair + 1}`));
                                     break;
                                 }
                             } catch (repairErr: any) {
-                                log.warn(`Test repair attempt failed (non-fatal): ${repairErr.message}`);
+                                log.warn(`Quality gate repair attempt failed (non-fatal): ${repairErr.message}`);
                             }
                         }
                     }
                 }
             }
         } catch (testErr: any) {
-            log.warn(`Post-dev test check error: ${testErr.message}`);
+            log.warn(`Post-dev quality gate error: ${testErr.message}`);
         }
 
         // ── 1b. Check for actual commits before creating PR ─────────────
@@ -669,12 +618,29 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
         // ── 2. Create GitHub PR ─────────────────────────────────────────
         const prTitle = buildPRTitle(assignments, taskType, projectSlug);
         let prBody = buildPRDescription(assignments, allFileChanges, taskType, currentState, assignments[0].devAgentId);
-        // Append test results to the PR description
-        if (testResult) {
-            if (testResult.passed) {
-                prBody += '\n\n## Tests\n\n:white_check_mark: All tests passed.';
-            } else {
-                prBody += `\n\n## Tests\n\n:warning: **Tests failed.** Review output:\n\n\`\`\`\n${testResult.output.slice(0, 1000)}\n\`\`\``;
+        // Append quality gate results to the PR description
+        if (gateReport && gateReport.results.length > 0) {
+            prBody += `\n\n## Quality Gates\n\n${gateReportToMarkdown(gateReport)}`;
+        }
+
+        // ── 1c. Secret scan before PR (when SECURITY_GATE_IN_PR=true) ────
+        let secretsBlockMerge = false;
+        if (SECURITY_GATE_IN_PR) {
+            try {
+                const secretFindings = scanForSecrets(worktreeWorkspace);
+                if (secretFindings.length > 0) {
+                    const criticalCount = secretFindings.filter(f => f.severity === 'critical').length;
+                    log.warn(`Secret scan: ${secretFindings.length} finding(s), ${criticalCount} critical`);
+                    prBody += `\n\n## Security Scan\n\n${securityReportToMarkdown({ findings: secretFindings, passed: criticalCount === 0 })}`;
+                    // A critical secret finding blocks the merge
+                    if (criticalCount > 0) {
+                        secretsBlockMerge = true;
+                        log.error(`Critical secrets detected — merge will be blocked`);
+                        allTranscript.push(msg('security-gates', `PR ${branchName}: BLOCKED — ${criticalCount} critical secret(s) detected`));
+                    }
+                }
+            } catch (secErr: any) {
+                log.warn(`PR secret scan error (non-fatal): ${secErr.message}`);
             }
         }
 
@@ -692,10 +658,15 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
             });
             ghPr = { number: data.number, html_url: data.html_url, node_id: data.node_id };
         } catch (octokitErr: any) {
+            if (GITHUB_MODE === 'local') {
+                // In local mode, Octokit is a local stand-in — if it fails, do not fall back to curl
+                throw octokitErr;
+            }
             log.warn(`Octokit PR creation failed (${octokitErr.status ?? 'unknown'}), falling back to curl`);
             ghPr = createPRViaCurl(prTitle, prBody, branchName, baseBranch, gitContext);
         }
         log.info(`PR #${ghPr.number} created: ${ghPr.html_url}`);
+        emitRunEvent('pr:opened', { prNumber: ghPr.number, title: prTitle, branch: branchName, baseBranch });
         allTranscript.push(msg('conductor', `PR #${ghPr.number} created: ${prTitle}`));
 
         // Post simulated review-request comment
@@ -739,8 +710,9 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
             'dist/*', 'build/*', '.next/*',
         ].map(p => `':!${p}'`).join(' ');
 
-        for (let iteration = 1; iteration <= MAX_REVIEW_ITERATIONS; iteration++) {
-            log.info(`Review iteration ${iteration}/${MAX_REVIEW_ITERATIONS}`);
+        for (let iteration = 1; iteration <= getEffectiveLimits().maxReviewIterations; iteration++) {
+            const effectiveReviewLimit = getEffectiveLimits().maxReviewIterations;
+            log.info(`Review iteration ${iteration}/${effectiveReviewLimit}`);
 
             // ── No-progress detection (Change 1) ────────────────────────
             // NOTE: the decision must be taken BEFORE `lastReviewedSha` is
@@ -774,10 +746,13 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
             const reviewResults: { reviewerId: string; output: ReviewOutput }[] = [];
 
             if (!skipReviewPhase) {
+                // Truncate reviewer list to the budget-effective limit
+                const { maxReviewers } = getEffectiveLimits();
+                const activeReviewerIds = reviewerAgentIds.slice(0, Math.max(maxReviewers, 0));
                 // Determine which reviewers need to (re-)review
                 const pendingReviewers = iteration === 1
-                    ? reviewerAgentIds
-                    : reviewerAgentIds.filter(rid => {
+                    ? activeReviewerIds
+                    : activeReviewerIds.filter(rid => {
                         const lastReview = allReviews
                             .filter(r => r.reviewerId === rid)
                             .sort((a, b) => b.iteration - a.iteration)[0];
@@ -869,6 +844,7 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
 
                         reviewResults.push({ reviewerId, output: reviewOutput });
                         reviewerLog.info(`Decision: ${reviewOutput.status} (${reviewOutput.comments?.length ?? 0} comments)`);
+                        emitRunEvent('pr:reviewed', { prNumber: ghPr.number, reviewerId, status: reviewOutput.status, comments: reviewOutput.comments?.length ?? 0 });
 
                         // B2: Log individual review comments to the run log
                         for (const c of reviewOutput.comments ?? []) {
@@ -954,7 +930,7 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                     .filter(r => r.iteration === lastReviewedIteration && r.status === 'changes_requested')
                     .map(r => ({ reviewerId: r.reviewerId, output: { status: 'changes_requested' as const, summary: '', comments: r.comments } }))
                 : reviewResults.filter(r => r.output.status === 'changes_requested');
-            if (changesRequested.length > 0 && iteration < MAX_REVIEW_ITERATIONS) {
+            if (changesRequested.length > 0 && iteration < effectiveReviewLimit) {
                 log.info(`${changesRequested.length} reviewer(s) requested changes. Re-invoking dev agent(s)...`);
 
                 const requestedComments = changesRequested.flatMap(r =>
@@ -1064,7 +1040,7 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
         if (prStatus === 'open') {
             // Use the last iteration that actually produced reviews — the loop can
             // now end early (no-progress / rate-limit exhaustion), in which case
-            // there are no reviews at MAX_REVIEW_ITERATIONS to escalate on.
+            // there are no reviews at the effective limit to escalate on.
             const finalIteration = allReviews.reduce((m, r) => Math.max(m, r.iteration), 0);
             const lastReviews = allReviews.filter(r => r.iteration === finalIteration);
             const hasCritical = lastReviews.some(r =>
@@ -1072,7 +1048,8 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
             );
 
             if (hasCritical) {
-                log.warn(`PR #${ghPr.number} has unresolved CRITICALs after ${MAX_REVIEW_ITERATIONS} iterations. Escalating developer...`);
+                const reviewLimit = getEffectiveLimits().maxReviewIterations;
+                log.warn(`PR #${ghPr.number} has unresolved CRITICALs after ${reviewLimit} iterations. Escalating developer...`);
                 allTranscript.push(msg('conductor', `Escalating: unresolved CRITICALs after max iterations`));
 
                 // Find escalated dev (higher rank than original dev)
@@ -1152,7 +1129,7 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                                 `\n## Base Branch: ${baseBranch} (already applied to all diff tools — never pass a baseBranch argument yourself)`,
                                 `\n## PR Description\n\n${prBody.slice(0, 2000)}`,
                                 `\n## Diff\n\n${escalatedDiffContent}`,
-                                `\n## Context: This is an escalated review after ${MAX_REVIEW_ITERATIONS} iterations. A higher-rank dev has already applied fixes.`,
+                                `\n## Context: This is an escalated review after ${reviewLimit} iterations. A higher-rank dev has already applied fixes.`,
                             ].join('\n');
 
                             try {
@@ -1184,7 +1161,7 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                                         severity: c.severity ?? 'info',
                                         resolved: false,
                                     })),
-                                    iteration: MAX_REVIEW_ITERATIONS + 1,
+                                    iteration: reviewLimit + 1,
                                 });
 
                                 if (escalatedReviewOutput.status === 'approved') {
@@ -1243,7 +1220,23 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                 prStatus = 'open';
             }
 
-            if (prStatus === 'approved' || prStatus === 'open') {
+            // Block merge when critical secrets were detected
+            if (secretsBlockMerge) {
+                log.error(`Merge blocked for PR #${ghPr.number}: critical secrets detected`);
+                prStatus = 'open';
+                allTranscript.push(msg('security-gates', `Merge blocked for PR #${ghPr.number}: critical secrets detected`));
+                try {
+                    await octokit.issues.createComment({
+                        owner: ghOwner, repo: ghRepo,
+                        issue_number: ghPr.number,
+                        body: ':x: **Merge blocked by security gate** — critical secrets detected in this PR. Remove hard-coded credentials before merging.',
+                    });
+                } catch (commentErr: any) {
+                    log.warn(`Failed to post security block comment: ${commentErr.message}`);
+                }
+            }
+
+            if (!secretsBlockMerge && (prStatus === 'approved' || prStatus === 'open')) {
                 try {
                     await octokit.pulls.merge({
                         owner: ghOwner,
@@ -1253,6 +1246,7 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                     });
                     prStatus = 'merged';
                     log.info(`PR #${ghPr.number} merged to ${baseBranch}`);
+                    emitRunEvent('pr:merged', { prNumber: ghPr.number, branch: branchName, baseBranch });
                     allTranscript.push(msg('conductor', `PR #${ghPr.number} merged to ${baseBranch}`));
 
                     // Delete the remote feature branch
@@ -1305,6 +1299,8 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
             gitExec(gitRoot, `worktree remove "${worktreeDir}" --force`);
             log.info(`Cleaned up worktree: ${worktreeSlug}`);
         }
+        // Prune any dangling worktree tracking entries (fixes A11 leak-proofing)
+        gitExec(gitRoot, 'worktree prune');
         gitExec(gitRoot, `branch -D ${branchName}`);
     }
 }

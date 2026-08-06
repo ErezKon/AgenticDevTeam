@@ -100,6 +100,10 @@ export const RUN_MODE: 'autonomous' | 'human' =
 export const MAX_BUGFIX_ITERATIONS =
     parseInt(process.env.MAX_BUGFIX_ITERATIONS ?? '3', 10);
 
+/** Allow a hard reset to origin/<branch> when ff/rebase both fail during workspace sync. */
+export const WORKSPACE_SYNC_ALLOW_RESET =
+    (process.env.WORKSPACE_SYNC_ALLOW_RESET ?? 'true') === 'true';
+
 /**
  * LangGraph recursion limits per agent type.
  *
@@ -142,6 +146,10 @@ export const REVIEWER_MAX_TOOL_CALLS =
 export const AGENT_RECURSION_LIMIT =
     parseInt(process.env.AGENT_RECURSION_LIMIT ?? '30', 10);
 
+/** Max file-change entries injected into the dev context prompt. */
+export const DEV_CONTEXT_FILE_CHANGES_LIMIT =
+    parseInt(process.env.DEV_CONTEXT_FILE_CHANGES_LIMIT ?? '60', 10);
+
 /** Max parallel developer agents during fan-out. */
 export const MAX_CONCURRENT_DEVS =
     parseInt(process.env.MAX_CONCURRENT_DEVS ?? '2', 10);
@@ -167,6 +175,138 @@ export const OUTPUTS_DIR =
 /** Docker Engine host (defaults to local socket). */
 export const DOCKER_HOST =
     process.env.DOCKER_HOST ?? undefined;
+
+// ─── DevOps Verification ────────────────────────────────────────────────────
+
+/** Actually build/run Docker artifacts and health-check them after the DevOps agent finishes. */
+export const DEVOPS_VERIFY_ENABLED =
+    (process.env.DEVOPS_VERIFY_ENABLED ?? 'true') === 'true';
+
+/** Timeout (ms) for each shell step during deployment verification. */
+export const DEVOPS_VERIFY_TIMEOUT_MS =
+    parseInt(process.env.DEVOPS_VERIFY_TIMEOUT_MS ?? '600000', 10);
+
+/** First host port for mapping container EXPOSE ports during Dockerfile-mode verification. */
+export const DEVOPS_VERIFY_BASE_PORT =
+    parseInt(process.env.DEVOPS_VERIFY_BASE_PORT ?? '18080', 10);
+
+/** Number of retries for each health-check URL. */
+export const DEVOPS_HEALTH_RETRIES =
+    parseInt(process.env.DEVOPS_HEALTH_RETRIES ?? '5', 10);
+
+/** Delay (ms) between health-check retries. */
+export const DEVOPS_HEALTH_DELAY_MS =
+    parseInt(process.env.DEVOPS_HEALTH_DELAY_MS ?? '3000', 10);
+
+/** Tear down containers started by verifyDeployment during finalize. */
+export const DEVOPS_TEARDOWN =
+    (process.env.DEVOPS_TEARDOWN ?? 'true') === 'true';
+
+/** Allow E2E test failures to trigger a bugfix loop (default: false to preserve cost profile). */
+export const E2E_BUGFIX_ENABLED =
+    (process.env.E2E_BUGFIX_ENABLED ?? 'false') === 'true';
+
+// ─── Run Budget ─────────────────────────────────────────────────────────────
+
+/** Max total tokens for a run. 0 = unlimited (default). All three limits are checked; the closest one binds. */
+export const MAX_RUN_TOKENS =
+    parseInt(process.env.MAX_RUN_TOKENS ?? '0', 10);
+
+/** Max estimated USD cost for a run. 0 = unlimited (default). */
+export const MAX_RUN_COST_USD =
+    parseFloat(process.env.MAX_RUN_COST_USD ?? '0');
+
+/** Max wall-clock time (ms) for a run. 0 = unlimited (default). */
+export const MAX_RUN_WALL_MS =
+    parseInt(process.env.MAX_RUN_WALL_MS ?? '0', 10);
+
+/** Utilisation threshold for budget warning level (default: 0.70). */
+export const BUDGET_WARN_AT =
+    parseFloat(process.env.BUDGET_WARN_AT ?? '0.70');
+
+/** Utilisation threshold for budget degrade level (default: 0.90). */
+export const BUDGET_DEGRADE_AT =
+    parseFloat(process.env.BUDGET_DEGRADE_AT ?? '0.90');
+
+// ─── Agent Output Validation ────────────────────────────────────────────────
+
+/** Number of repair attempts when agent output fails schema validation (0 disables). */
+export const AGENT_OUTPUT_REPAIR_ATTEMPTS =
+    parseInt(process.env.AGENT_OUTPUT_REPAIR_ATTEMPTS ?? '1', 10);
+
+// ─── Context Budget ─────────────────────────────────────────────────────────
+
+/** Use compact summarisers instead of raw JSON.stringify dumps (default: true).
+ *  Set to false to restore the old verbatim behaviour for A/B testing. */
+export const CONTEXT_COMPACT =
+    (process.env.CONTEXT_COMPACT ?? 'true') === 'true';
+
+/** Hard character budget for assembled context per agent prompt. */
+export const CONTEXT_MAX_CHARS =
+    parseInt(process.env.CONTEXT_MAX_CHARS ?? '24000', 10);
+
+/** Max characters for clipped descriptions in architecture summaries. */
+export const CONTEXT_MAX_DESC_CHARS =
+    parseInt(process.env.CONTEXT_MAX_DESC_CHARS ?? '200', 10);
+
+/** Strip deep description fields from injected JSON Schema to save tokens (default: true). */
+export const RESPONSE_SCHEMA_COMPACT =
+    (process.env.RESPONSE_SCHEMA_COMPACT ?? 'true') === 'true';
+
+// ─── Quality Gates ──────────────────────────────────────────────────────────
+
+/** Enable multi-language quality gates (install/build/lint/test) in PR workflow and QA. */
+export const QUALITY_GATES_ENABLED =
+    (process.env.QUALITY_GATES_ENABLED ?? 'true') === 'true';
+
+/** Which gate steps to run (comma-separated). */
+export const QUALITY_GATE_STEPS =
+    (process.env.QUALITY_GATE_STEPS ?? 'install,build,lint,test').split(',') as ('install' | 'build' | 'lint' | 'test')[];
+
+/** Timeout (ms) for each quality gate step (default 5 min). */
+export const QUALITY_GATE_TIMEOUT_MS =
+    parseInt(process.env.QUALITY_GATE_TIMEOUT_MS ?? '300000', 10);
+
+/** Fail the gate when a stack's toolchain is missing (default: false — missing tools produce 'skipped'). */
+export const QUALITY_GATE_STRICT_TOOLCHAIN =
+    (process.env.QUALITY_GATE_STRICT_TOOLCHAIN ?? 'false') === 'true';
+
+// ─── Security Gates ─────────────────────────────────────────────────────────
+
+/** Enable security gates (secret scan, dependency audit, licence check) in QA. */
+export const SECURITY_GATES_ENABLED =
+    (process.env.SECURITY_GATES_ENABLED ?? 'true') === 'true';
+
+/** When true, critical security findings become Bugs that feed the bug-fix loop. */
+export const SECURITY_GATE_BLOCKING =
+    (process.env.SECURITY_GATE_BLOCKING ?? 'false') === 'true';
+
+/** Run scanForSecrets on PR worktrees before opening PRs. A critical secret blocks the merge. */
+export const SECURITY_GATE_IN_PR =
+    (process.env.SECURITY_GATE_IN_PR ?? 'false') === 'true';
+
+/** Enable deep dependency audit (e.g. OWASP dependency-check for Maven). Downloads large CVE DB. */
+export const SECURITY_DEEP_AUDIT =
+    (process.env.SECURITY_DEEP_AUDIT ?? 'false') === 'true';
+
+/** Comma-separated SPDX licence IDs to deny (e.g. GPL-3.0,AGPL-3.0). Empty = no licence check. */
+export const LICENCE_DENYLIST =
+    (process.env.LICENCE_DENYLIST ?? '').split(',').map(s => s.trim()).filter(Boolean);
+
+// ─── Shell Tool ─────────────────────────────────────────────────────────────
+
+/** Allow agents to run shell commands on the host (default: true).
+ *  Set to false to disable all host shell execution. */
+export const SHELL_ALLOW_HOST =
+    (process.env.SHELL_ALLOW_HOST ?? 'true') === 'true';
+
+/** Default timeout (seconds) for shell commands when none is specified. */
+export const SHELL_DEFAULT_TIMEOUT_S =
+    parseInt(process.env.SHELL_DEFAULT_TIMEOUT_S ?? '60', 10);
+
+/** Maximum timeout (seconds) for shell commands — agent-requested values are clamped to this. */
+export const SHELL_MAX_TIMEOUT_S =
+    parseInt(process.env.SHELL_MAX_TIMEOUT_S ?? '900', 10);
 
 // ─── Playwright MCP ─────────────────────────────────────────────────────────
 
@@ -219,6 +359,50 @@ export const GITHUB_PROJECT_TOKEN = process.env.GITHUB_PROJECT_TOKEN ?? '';
 
 /** Owner for project-specific repos (falls back to GITHUB_OWNER). */
 export const GITHUB_PROJECT_OWNER = process.env.GITHUB_PROJECT_OWNER ?? '';
+
+// ─── HITL / Checkpointing ───────────────────────────────────────────────────
+
+/** Persist graph checkpoints to disk so a HITL or crashed run can survive a server restart. */
+export const CHECKPOINT_PERSIST =
+    (process.env.CHECKPOINT_PERSIST ?? 'false') === 'true';
+
+// ─── Observability ──────────────────────────────────────────────────────────
+
+/** Max events kept in the ring buffer for backfilling reconnecting dashboards. */
+export const EVENT_BUFFER_SIZE =
+    parseInt(process.env.EVENT_BUFFER_SIZE ?? '500', 10);
+
+// ─── Requirements Traceability ──────────────────────────────────────────────
+
+/** Minimum AC coverage percentage to pass the QA gate (0 = off). */
+export const MIN_AC_COVERAGE_PCT =
+    parseInt(process.env.MIN_AC_COVERAGE_PCT ?? '0', 10);
+
+/** Max bugs synthesised when AC coverage is below the gate threshold. */
+export const MIN_AC_COVERAGE_MAX_BUGS =
+    parseInt(process.env.MIN_AC_COVERAGE_MAX_BUGS ?? '10', 10);
+
+// ─── LLM Cassettes ──────────────────────────────────────────────────────────
+
+/** Cassette mode: 'off' (default), 'record', or 'replay'. */
+export const LLM_CASSETTE_MODE =
+    process.env.LLM_CASSETTE_MODE ?? 'off';
+
+/** Name of the cassette file (without extension). Used in record and replay modes. */
+export const CASSETTE_NAME =
+    process.env.CASSETTE_NAME ?? '';
+
+/** Behaviour on a replay miss: 'strict' (throws) or 'passthrough' (calls real LLM). */
+export const LLM_CASSETTE_ON_MISS =
+    process.env.LLM_CASSETTE_ON_MISS ?? 'strict';
+
+/** Warn when a cassette file exceeds this size (MB). */
+export const CASSETTE_MAX_MB =
+    parseInt(process.env.CASSETTE_MAX_MB ?? '25', 10);
+
+/** GitHub mode: 'live' (default) or 'local' (offline, bare-repo backed). */
+export const GITHUB_MODE_CONFIG =
+    process.env.GITHUB_MODE ?? 'live';
 
 // ─── Dashboard ──────────────────────────────────────────────────────────────
 

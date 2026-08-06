@@ -49,6 +49,7 @@ a:hover { text-decoration: underline; }
 .badge-red { background: var(--accent-red); color: white; }
 .badge-yellow { background: var(--accent-yellow); color: black; }
 .badge-purple { background: var(--accent-purple); color: white; }
+.badge-cyan { background: #00bcd4; color: white; }
 
 button {
   cursor: pointer;

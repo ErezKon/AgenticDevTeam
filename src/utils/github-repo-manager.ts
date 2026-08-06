@@ -9,6 +9,7 @@ import { Octokit } from '@octokit/rest';
 import { execSync } from 'child_process';
 import { GIT_USER_NAME, GIT_USER_EMAIL } from '../config';
 import { getLogger } from './logger';
+import { GITHUB_MODE } from './github-local';
 
 const logger = getLogger('[RepoManager]', 33);
 
@@ -44,6 +45,17 @@ export async function createGitHubRepo(
     repoName: string,
     isPrivate: boolean = true,
 ): Promise<CreateRepoResult> {
+    // In local mode, return synthetic results — the actual repo is managed locally
+    if (GITHUB_MODE === 'local') {
+        logger.info(`[local] Synthetic createGitHubRepo: ${owner}/${repoName}`);
+        return {
+            fullName: `${owner}/${repoName}`,
+            htmlUrl: `local://repos/${owner}/${repoName}`,
+            cloneUrl: `local://repos/${owner}/${repoName}.git`,
+            defaultBranch: 'main',
+        };
+    }
+
     const octokit = new Octokit({ auth: token });
 
     // Determine if the owner is the authenticated user or an org
@@ -88,6 +100,19 @@ export async function validateGitHubRepo(
     owner: string,
     repoName: string,
 ): Promise<ValidateRepoResult> {
+    // In local mode, always return "exists" with synthetic data
+    if (GITHUB_MODE === 'local') {
+        logger.info(`[local] Synthetic validateGitHubRepo: ${owner}/${repoName}`);
+        return {
+            exists: true,
+            fullName: `${owner}/${repoName}`,
+            htmlUrl: `local://repos/${owner}/${repoName}`,
+            cloneUrl: `local://repos/${owner}/${repoName}.git`,
+            defaultBranch: 'main',
+            private: false,
+        };
+    }
+
     const octokit = new Octokit({ auth: token });
 
     logger.info(`Validating repo: ${owner}/${repoName}`);

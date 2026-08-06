@@ -24,6 +24,7 @@ import type { RepoTarget } from './agents/_shared/base-schemas';
 import { GITHUB_PROJECT_OWNER, GITHUB_OWNER } from './config';
 import { tokenTracker } from './utils/token-tracker';
 import { refreshTokenReport } from './utils/token-report';
+import { redactState } from './utils/run-snapshot';
 
 const TAG = `${color256(46)}[CLI]${LogColors.RESET}`;
 
@@ -57,13 +58,6 @@ process.on('unhandledRejection', (reason) => {
     flushTokenReportOnExit('unhandledRejection');
     process.exit(1);
 });
-
-/** Redact sensitive fields (tokens) from state before printing. */
-function redactState(state: any): any {
-    const copy = JSON.parse(JSON.stringify(state));
-    if (copy.gitContext?.token) copy.gitContext.token = '***REDACTED***';
-    return copy;
-}
 
 // ─── Readline setup ─────────────────────────────────────────────────────────
 
@@ -340,22 +334,32 @@ async function startHitlRun() {
             case 'a': {
                 console.log(`${TAG} Approved. Continuing...\n`);
                 try {
-                    await session.resume(true);
+                    await session.resume('approve');
                 } catch (err: any) {
                     console.error(`${TAG} ${LogColors.RED}Error: ${err.message}${LogColors.RESET}`);
                 }
                 break;
             }
             case 'd': {
-                console.log(`${TAG} Run denied by user.`);
+                const denyFeedback = await ask('Reason for denial (optional): ');
+                console.log(`${TAG} Run denied by user. Cancelling...\n`);
+                try {
+                    await session.resume('deny', denyFeedback || undefined);
+                } catch (err: any) {
+                    console.error(`${TAG} ${LogColors.RED}Error: ${err.message}${LogColors.RESET}`);
+                }
                 running = false;
                 break;
             }
             case 'e': {
                 const feedback = await ask('Enhancement feedback: ');
+                if (!feedback) {
+                    console.log(`${TAG} Feedback is required for enhance.`);
+                    break;
+                }
                 console.log(`${TAG} Enhancing with feedback...\n`);
                 try {
-                    await session.resume(true, feedback);
+                    await session.resume('enhance', feedback);
                 } catch (err: any) {
                     console.error(`${TAG} ${LogColors.RED}Error: ${err.message}${LogColors.RESET}`);
                 }
@@ -480,20 +484,28 @@ async function startMaintainRun() {
                 switch (decision.toLowerCase()) {
                     case 'a': {
                         console.log(`${TAG} Approved. Continuing...\n`);
-                        try { await session.resume(true); } catch (err: any) {
+                        try { await session.resume('approve'); } catch (err: any) {
                             console.error(`${TAG} ${LogColors.RED}Error: ${err.message}${LogColors.RESET}`);
                         }
                         break;
                     }
                     case 'd': {
-                        console.log(`${TAG} Run denied by user.`);
+                        const denyFeedback = await ask('Reason for denial (optional): ');
+                        console.log(`${TAG} Run denied by user. Cancelling...\n`);
+                        try { await session.resume('deny', denyFeedback || undefined); } catch (err: any) {
+                            console.error(`${TAG} ${LogColors.RED}Error: ${err.message}${LogColors.RESET}`);
+                        }
                         running = false;
                         break;
                     }
                     case 'e': {
                         const feedback = await ask('Enhancement feedback: ');
+                        if (!feedback) {
+                            console.log(`${TAG} Feedback is required for enhance.`);
+                            break;
+                        }
                         console.log(`${TAG} Enhancing with feedback...\n`);
-                        try { await session.resume(true, feedback); } catch (err: any) {
+                        try { await session.resume('enhance', feedback); } catch (err: any) {
                             console.error(`${TAG} ${LogColors.RED}Error: ${err.message}${LogColors.RESET}`);
                         }
                         break;

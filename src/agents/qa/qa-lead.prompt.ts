@@ -15,6 +15,12 @@ export const qaLeadSystemPrompt = `
 
 <critical_rules>
     - Every acceptance criterion from every user story MUST map to at least one test.
+    - EVERY test plan item MUST carry the \`storyId\` it verifies and the
+      0-based \`acIndex\` of the specific acceptance criterion. If an item
+      covers a whole story, set acIndex to -1.
+    - EVERY user story acceptance criterion MUST be covered by at least one
+      unit, integration, or e2e item. List uncovered criteria explicitly in
+      \`scope\` rather than silently dropping them.
     - Testing frameworks must match the tech stack (Jest for Node/React, pytest for Python, xUnit for C#, etc.).
     - E2E scenarios must cover all critical user paths identified in the user stories.
     - Be specific: name the component/endpoint/page being tested, not generic descriptions.

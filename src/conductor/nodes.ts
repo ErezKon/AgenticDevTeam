@@ -8,7 +8,7 @@ import { getAccessToken } from '../utils/oauth-auth.util';
 import { getLogger, setRunLogPath } from '../utils/logger';
 import { retryWithBackoff } from '../utils/retry';
 import { writeArtifact } from '../agents/_shared/artifact';
-import { createProjectWorkspace, createRunOutputDir } from '../utils/workspace';
+import { createProjectWorkspace, createRunOutputDir, ensureProjectGitignore } from '../utils/workspace';
 import { parseRequirementsFile } from '../tools/requirements/parse-requirements';
 import { createCodebaseAnalyzerAgent } from '../agents/codebase-analyzer/codebase-analyzer.agent';
 import { writeCodebaseAnalysis, readExistingAnalysis } from '../utils/codebase-analysis-writer';
@@ -19,19 +19,53 @@ import { createTeamLeaderAgent } from '../agents/team-leader/team-leader.agent';
 import { dispatchDevelopers } from '../agents/developers/dispatcher';
 import { createQaLeadAgent, createQaUnitAgent, createQaE2eAgent } from '../agents/qa/qa.agents';
 import { createDevOpsAgent } from '../agents/devops/devops.agent';
-import { deployAllConventionsToWorkspace, resolveConventionFiles } from '../utils/coding-conventions';
+import { deployConventionsToWorkspace, resolveConventionFiles } from '../utils/coding-conventions';
+import { getDevAgent } from '../agents/developers/registry';
 import { getPlaywrightMcpTools, closePlaywrightMcp } from '../tools/mcp/playwright-mcp';
 import {
-    MAX_BUGFIX_ITERATIONS, GIT_DEFAULT_BRANCH, PIPELINE_RECURSION_LIMIT,
+    GIT_DEFAULT_BRANCH, PIPELINE_RECURSION_LIMIT,
     TOOL_PIPELINE_RECURSION_LIMIT,
-    GITHUB_TOKEN, GITHUB_OWNER, GITHUB_REPO, GIT_USER_NAME, GIT_USER_EMAIL,
+    GITHUB_TOKEN, GITHUB_OWNER, GITHUB_REPO,
     GITHUB_PROJECT_TOKEN, GITHUB_PROJECT_OWNER,
     ARCHITECT_MODEL, PRODUCT_MANAGER_MODEL, DBA_MODEL, TEAM_LEADER_MODEL,
     DEVOPS_MODEL, CODEBASE_ANALYZER_MODEL, QA_MODEL, LLM_MODEL,
-    MODEL_PRICING,
+    MODEL_PRICING, DEV_CONTEXT_FILE_CHANGES_LIMIT,
+    DEVOPS_VERIFY_ENABLED, DEVOPS_TEARDOWN,
+    AGENT_OUTPUT_REPAIR_ATTEMPTS,
+    CONTEXT_COMPACT, CONTEXT_MAX_CHARS,
+    MIN_AC_COVERAGE_PCT, MIN_AC_COVERAGE_MAX_BUGS,
+    SECURITY_GATES_ENABLED,
 } from '../config';
 import { sanitizeMermaidLabels } from '../tools/diagram/diagram-tools';
 import { createGitHubRepo, validateGitHubRepo, initializeRepoLocally } from '../utils/github-repo-manager';
+import { gitExec, gitPush, findGitRoot } from '../utils/git-exec';
+import { GITHUB_MODE } from '../utils/github-local';
+import { setLocalBareRepoPath } from './pr-workflow';
+import { syncWorkspaceToBranch, looksSourceless } from './workspace-sync';
+import { selectPendingAssignments, dedupeBugs, namespaceBugfixAssignments } from './assignment-policy';
+import { verifyDeployment, teardownDeployment } from './devops-verify';
+import { runQualityGates, gateReportToTestReport, synthesiseGateBugs } from './quality-gates';
+import { runSecurityGates, synthesiseSecurityBugs, securityReportToMarkdown } from './security-gates';
+import {
+    summariseArchitecture, summariseTechStack, summariseDbDesign,
+    summariseStories, storiesForIds, summariseTasks,
+    summariseFileChanges, summariseCodebaseAnalysis,
+    buildContext, recordContextChars, getContextStats,
+} from './context-builder';
+import type { ContextSection } from './context-builder';
+import {
+    parseAgentJson, validateAgentOutput, buildRepairMessage,
+    getValidationStats, logValidationStats,
+    _recordValidated, _recordRepaired, _recordFailed,
+} from '../utils/structured-output';
+import { z } from 'zod';
+import { CodebaseAnalysisSchema } from '../agents/_shared/base-schemas';
+import { ArchitectOutputSchema } from '../agents/architect/schemas/architect-output.schema';
+import { ProductManagerOutputSchema } from '../agents/product-manager/schemas/pm-output.schema';
+import { DbaOutputSchema } from '../agents/dba/schemas/dba-output.schema';
+import { TeamLeaderOutputSchema } from '../agents/team-leader/schemas/tl-output.schema';
+import { QaLeadOutputSchema, QaUnitOutputSchema, QaE2eOutputSchema } from '../agents/qa/schemas/qa-output.schema';
+import { DevOpsOutputSchema } from '../agents/devops/schemas/devops-output.schema';
 import { execSync } from 'child_process';
 import type { ProjectStateType } from './state';
 import type { PhaseName, TranscriptMessage, Bug, CodebaseAnalysis, GitContext } from '../agents/_shared/base-schemas';
@@ -39,6 +73,11 @@ import { tokenTracker, type TokenCallRecord } from '../utils/token-tracker';
 import { extractTokenUsageFromMessages } from '../utils/token-usage-extractor';
 import { generateTokenReport, refreshTokenReport } from '../utils/token-report';
 import { getThrottleStats, logThrottleStats } from '../utils/llm-throttle';
+import { estimateCost } from '../utils/cost';
+import { startRunBudget, getBudgetStatus, getEffectiveLimits } from '../utils/run-budget';
+import { emitRunEvent } from '../utils/event-bus';
+import { writeStateSnapshot, writeRunManifest } from '../utils/run-snapshot';
+import { buildTraceabilityReport, renderTraceabilityMarkdown } from '../utils/traceability';
 import * as path from 'path';
 import * as fs from 'fs';
 
@@ -70,39 +109,46 @@ function detectDefaultBranch(workspacePath: string): string {
     return GIT_DEFAULT_BRANCH;
 }
 
-function gitExec(workspacePath: string, args: string): string {
-    try {
-        return execSync(`git ${args}`, {
-            cwd: workspacePath, encoding: 'utf-8',
-            timeout: 30_000, maxBuffer: 1024 * 1024 * 5,
-            env: {
-                ...process.env,
-                GIT_TERMINAL_PROMPT: '0', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null',
-                GIT_AUTHOR_NAME: GIT_USER_NAME, GIT_AUTHOR_EMAIL: GIT_USER_EMAIL,
-                GIT_COMMITTER_NAME: GIT_USER_NAME, GIT_COMMITTER_EMAIL: GIT_USER_EMAIL,
-            },
-        }).trim();
-    } catch (err: any) {
-        return `Error: ${err.stderr?.toString() ?? err.message}`.trim();
-    }
-}
-
-function gitPush(workspacePath: string, branchName: string, gitContext?: GitContext | null): string {
-    const token = gitContext?.token ?? GITHUB_TOKEN;
-    const owner = gitContext?.owner ?? GITHUB_OWNER;
-    const repo = gitContext?.repo ?? GITHUB_REPO;
-    const authUrl = `https://x-access-token:${token}@github.com/${owner}/${repo}.git`;
-    return gitExec(workspacePath, `push ${authUrl} HEAD:refs/heads/${branchName}`);
-}
+// gitExec, gitPush, findGitRoot imported from ../utils/git-exec
 
 function msg(agentId: string, phase: PhaseName, message: string): TranscriptMessage {
+    emitRunEvent('transcript', { agentId, phase, message });
     return { timestamp: ts(), agentId, phase, message };
+}
+
+/**
+ * Build a highest-priority feedback section for a phase's user message when
+ * `state.phaseFeedback[phase]` is non-empty.
+ *
+ * This is the change that makes "enhance" real — the user's feedback is
+ * injected into the agent's prompt so it can address the specific concerns.
+ */
+function buildFeedbackSection(state: ProjectStateType, phase: PhaseName): string {
+    const feedback = state.phaseFeedback?.[phase];
+    if (!feedback || feedback.length === 0) return '';
+    const numbered = feedback.map((f, i) => `${i + 1}. ${f}`).join('\n');
+    return `## Reviewer Feedback — you MUST address this\n${numbered}`;
+}
+
+/**
+ * Check if this node is being re-run via pendingRerun, and return
+ * partial state updates to clear the flag. Also logs the re-run.
+ */
+function checkRerun(state: ProjectStateType, phase: PhaseName, logger: ReturnType<typeof getLogger>): Partial<ProjectStateType> | null {
+    if (state.pendingRerun === phase) {
+        logger.info(`Re-running ${phase} with user feedback`);
+        return { pendingRerun: null as any };
+    }
+    return null;
 }
 
 /**
  * Stage, commit, and push any new/modified files in the workspace.
  * Used by planning agents (architect, PM) that produce doc artifacts
  * but don't go through the PR workflow.
+ *
+ * Syncs with origin before committing, and retries the push once after
+ * a sync if the first push fails (non-fast-forward after squash merges).
  */
 function commitAndPushArtifacts(
     workspacePath: string,
@@ -110,16 +156,37 @@ function commitAndPushArtifacts(
     gitContext?: GitContext | null,
     logger?: ReturnType<typeof getLogger>,
 ): void {
+    // Resolve git root for sync operations
+    let gitRoot: string;
+    try {
+        gitRoot = findGitRoot(workspacePath);
+    } catch {
+        gitRoot = workspacePath;
+    }
+
+    // Sync before committing to avoid non-fast-forward pushes
+    const currentBranch = gitExec(gitRoot, 'rev-parse --abbrev-ref HEAD');
+    if (currentBranch && !currentBranch.startsWith('Error:')) {
+        syncWorkspaceToBranch(gitRoot, currentBranch, gitContext);
+    }
+
     gitExec(workspacePath, 'add .');
     const status = gitExec(workspacePath, 'status --short');
     if (!status || status.includes('nothing to commit')) return;
 
     gitExec(workspacePath, `commit -m "${commitMessage}"`);
-    const currentBranch = gitExec(workspacePath, 'rev-parse --abbrev-ref HEAD');
     if (currentBranch && !currentBranch.startsWith('Error:')) {
         const pushResult = gitPush(workspacePath, currentBranch, gitContext);
         if (pushResult.startsWith('Error:')) {
-            logger?.error?.(`Failed to push artifacts: ${pushResult}`);
+            // Retry once: sync again then push
+            logger?.warn?.(`Push failed, retrying after sync: ${pushResult}`);
+            syncWorkspaceToBranch(gitRoot, currentBranch, gitContext);
+            const retryResult = gitPush(workspacePath, currentBranch, gitContext);
+            if (retryResult.startsWith('Error:')) {
+                logger?.error?.(`Failed to push artifacts after retry: ${retryResult}`);
+            } else {
+                logger?.info?.(`Committed and pushed artifacts on ${currentBranch} (after retry)`);
+            }
         } else {
             logger?.info?.(`Committed and pushed artifacts on ${currentBranch}`);
         }
@@ -142,42 +209,106 @@ function getModelForAgent(agentId: string): string {
     return modelMap[agentId] ?? LLM_MODEL;
 }
 
+const invokeLog = getLogger('[InvokeAgent]', 183);
+
 async function invokeAgent(
     agent: any, userMessage: string, threadSuffix: string,
     agentId: string, phase: string,
-    opts?: { recursionLimit?: number },
+    opts?: { recursionLimit?: number; schema?: z.ZodTypeAny },
 ): Promise<{ output: any; tokenUsage: TokenCallRecord | null }> {
     const recursionLimit = opts?.recursionLimit ?? PIPELINE_RECURSION_LIMIT;
     return retryWithBackoff(async () => {
+        const threadId = `conductor-${threadSuffix}-${Date.now()}`;
+        const model = getModelForAgent(agentId);
+        const startMs = Date.now();
+        emitRunEvent('agent:start', { agentId, phase, model });
+
         const result = await agent.invoke(
             { messages: [{ role: 'user', content: userMessage }] },
-            { configurable: { thread_id: `conductor-${threadSuffix}-${Date.now()}` }, recursionLimit },
+            { configurable: { thread_id: threadId }, recursionLimit },
         );
 
         // Extract per-invocation token usage from messages (complementary to callback tracking)
-        const model = getModelForAgent(agentId);
         const tokenUsage = extractTokenUsageFromMessages(result, agentId, model, phase);
 
+        const emitEnd = (extra?: Record<string, unknown>) => {
+            const durationMs = Date.now() - startMs;
+            emitRunEvent('agent:end', {
+                agentId, phase, model, durationMs,
+                inputTokens: tokenUsage?.inputTokens ?? 0,
+                outputTokens: tokenUsage?.outputTokens ?? 0,
+                ...extra,
+            });
+        };
+
         const last = result.messages[result.messages.length - 1];
-        if (typeof last.content !== 'string') return { output: last.content, tokenUsage };
+        if (typeof last.content !== 'string') {
+            emitEnd();
+            return { output: last.content, tokenUsage };
+        }
 
-        // Try direct JSON parse first
+        // Extract JSON from the response using the shared parser
         const raw = last.content.trim();
-        try { return { output: JSON.parse(raw), tokenUsage }; } catch { /* fall through */ }
-
-        // Try to extract JSON from markdown code blocks or raw braces
-        const codeBlock = raw.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
-        if (codeBlock) {
-            try { return { output: JSON.parse(codeBlock[1].trim()), tokenUsage }; } catch { /* fall through */ }
-        }
-        const braces = raw.match(/(\{[\s\S]*\})/);
-        if (braces) {
-            try { return { output: JSON.parse(braces[1]), tokenUsage }; } catch { /* fall through */ }
+        const parseResult = parseAgentJson(raw);
+        if (!parseResult.ok) {
+            emitEnd({ error: parseResult.error });
+            throw new SyntaxError(
+                `Agent "${threadSuffix}" did not return valid JSON. ${parseResult.error}`
+            );
         }
 
-        throw new SyntaxError(
-            `Agent "${threadSuffix}" did not return valid JSON. Response starts with: ${raw.substring(0, 200)}`
-        );
+        let parsed = parseResult.value;
+
+        // ── Schema validation with repair loop (fixes A7) ────────────────
+        if (opts?.schema) {
+            _recordValidated();
+            const validation = validateAgentOutput(opts.schema, parsed);
+            if (validation.ok) {
+                emitEnd();
+                return { output: validation.value, tokenUsage };
+            }
+
+            // Attempt repair: re-invoke the agent with the issue summary
+            invokeLog.warn(`Agent "${threadSuffix}" output failed schema validation:\n${validation.issues}`);
+            for (let attempt = 0; attempt < AGENT_OUTPUT_REPAIR_ATTEMPTS; attempt++) {
+                invokeLog.info(`Repair attempt ${attempt + 1}/${AGENT_OUTPUT_REPAIR_ATTEMPTS} for "${threadSuffix}"...`);
+                const repairMsg = buildRepairMessage(validation.issues, userMessage);
+                const repairResult = await agent.invoke(
+                    { messages: [{ role: 'user', content: repairMsg }] },
+                    { configurable: { thread_id: threadId }, recursionLimit },
+                );
+                const repairLast = repairResult.messages[repairResult.messages.length - 1];
+                if (typeof repairLast.content !== 'string') {
+                    // Non-string content — try validating it directly
+                    const rv = validateAgentOutput(opts.schema, repairLast.content);
+                    if (rv.ok) {
+                        _recordRepaired();
+                        invokeLog.info(`Agent "${threadSuffix}" repaired on attempt ${attempt + 1}`);
+                        emitEnd({ repaired: true, repairAttempt: attempt + 1 });
+                        return { output: rv.value, tokenUsage };
+                    }
+                    continue;
+                }
+                const repairParse = parseAgentJson(repairLast.content.trim());
+                if (!repairParse.ok) continue;
+                const rv = validateAgentOutput(opts.schema, repairParse.value);
+                if (rv.ok) {
+                    _recordRepaired();
+                    invokeLog.info(`Agent "${threadSuffix}" repaired on attempt ${attempt + 1}`);
+                    emitEnd({ repaired: true, repairAttempt: attempt + 1 });
+                    return { output: rv.value, tokenUsage };
+                }
+            }
+
+            // All repair attempts failed — log ERROR and return the unvalidated object
+            _recordFailed();
+            invokeLog.error(`Agent "${threadSuffix}" output still invalid after ${AGENT_OUTPUT_REPAIR_ATTEMPTS} repair attempt(s):\n${validation.issues}`);
+            emitEnd({ validationFailed: true });
+            return { output: parsed, tokenUsage };
+        }
+
+        emitEnd();
+        return { output: parsed, tokenUsage };
     }, threadSuffix);
 }
 
@@ -187,7 +318,9 @@ const intakeLog = getLogger('[Intake]', 255);
 
 export async function intakeNode(state: ProjectStateType): Promise<Partial<ProjectStateType>> {
     intakeLog.info('Starting intake phase...');
+    emitRunEvent('phase:start', { phase: 'intake' });
     tokenTracker.reset();
+    startRunBudget();
 
     let requirementsText = state.input.requirementsText;
     if (state.input.requirementsDocPath && !requirementsText) {
@@ -236,13 +369,13 @@ export async function intakeNode(state: ProjectStateType): Promise<Partial<Proje
         const projectToken = GITHUB_PROJECT_TOKEN || GITHUB_TOKEN;
         const projectOwner = GITHUB_PROJECT_OWNER || GITHUB_OWNER;
 
-        if (!projectToken) {
+        if (!projectToken && GITHUB_MODE !== 'local') {
             throw new Error(
                 'No GitHub token available for project repo. ' +
                 'Set GITHUB_PROJECT_TOKEN or GITHUB_TOKEN in your environment.',
             );
         }
-        if (!projectOwner) {
+        if (!projectOwner && GITHUB_MODE !== 'local') {
             throw new Error(
                 'No GitHub owner available for project repo. ' +
                 'Set GITHUB_PROJECT_OWNER or GITHUB_OWNER in your environment.',
@@ -305,25 +438,30 @@ export async function intakeNode(state: ProjectStateType): Promise<Partial<Proje
         };
     } else {
         // ── Same-repo: existing behavior ─────────────────────────────────
-        // Walk up from workspacePath to find the nearest .git directory.
-        let foundGitRoot: string | null = null;
-        let search = workspacePath;
-        while (true) {
-            if (fs.existsSync(path.join(search, '.git'))) {
-                foundGitRoot = search;
-                break;
+        try {
+            gitRoot = findGitRoot(workspacePath);
+        } catch {
+            if (GITHUB_MODE === 'local') {
+                // In local mode, init a repo and create a bare origin on the fly
+                // so the system can run without any GitHub account (fixes A12).
+                const bareRepoPath = path.join(outputPath, 'origin.git');
+                execSync(`git init --bare "${bareRepoPath}"`, { encoding: 'utf-8', timeout: 10_000 });
+                execSync(`git init -b main`, { cwd: workspacePath, encoding: 'utf-8', timeout: 10_000 });
+                execSync(`git config user.name "AgenticDevTeam"`, { cwd: workspacePath, encoding: 'utf-8' });
+                execSync(`git config user.email "agenticdevteam@noreply.github.com"`, { cwd: workspacePath, encoding: 'utf-8' });
+                execSync(`git remote add origin "${bareRepoPath}"`, { cwd: workspacePath, encoding: 'utf-8' });
+                execSync('git add -A && git commit --allow-empty -m "Initial commit"', { cwd: workspacePath, encoding: 'utf-8', timeout: 10_000 });
+                execSync(`git push origin main`, { cwd: workspacePath, encoding: 'utf-8', timeout: 10_000 });
+                intakeLog.info(`Local mode: initialized git repo and bare origin at ${bareRepoPath}`);
+                gitRoot = workspacePath;
+                setLocalBareRepoPath(bareRepoPath);
+            } else {
+                throw new Error(
+                    `Workspace is not inside a Git repository: ${workspacePath}. ` +
+                    `Initialize with 'git init' in a parent directory and configure a GitHub remote before running.`
+                );
             }
-            const parent = path.dirname(search);
-            if (parent === search) break; // reached filesystem root
-            search = parent;
         }
-        if (!foundGitRoot) {
-            throw new Error(
-                `Workspace is not inside a Git repository: ${workspacePath}. ` +
-                `Initialize with 'git init' in a parent directory and configure a GitHub remote before running.`
-            );
-        }
-        gitRoot = foundGitRoot;
         defaultBranch = detectDefaultBranch(gitRoot);
 
         gitContext = {
@@ -332,6 +470,20 @@ export async function intakeNode(state: ProjectStateType): Promise<Partial<Proje
             repo: GITHUB_REPO,
             defaultBranch,
         };
+
+        // In local mode, record the bare repo path for pr-workflow
+        if (GITHUB_MODE === 'local') {
+            // If we didn't just create it, derive the bare repo path from outputPath
+            const bareRepoPath = path.join(outputPath, 'origin.git');
+            if (!fs.existsSync(bareRepoPath)) {
+                // The repo may already exist (e.g. in same-repo mode with a real git root)
+                // In that case, create the bare repo as a clone of origin
+                execSync(`git init --bare "${bareRepoPath}"`, { encoding: 'utf-8', timeout: 10_000 });
+                // Push existing content to it
+                gitExec(gitRoot, `remote set-url origin "${bareRepoPath}"`);
+            }
+            setLocalBareRepoPath(bareRepoPath);
+        }
     }
 
     intakeLog.info(`Git repo validated. Default branch: ${defaultBranch}, separate repo: ${isSeparateRepo}`);
@@ -390,12 +542,41 @@ export async function intakeNode(state: ProjectStateType): Promise<Partial<Proje
         intakeLog.info(`Pushed system branch: ${systemBranch}`);
     }
 
+    // ── Keep scaffolding out of the delivered product (fixes A11) ──────────
+    ensureProjectGitignore(workspacePath, ['.conventions/', '.worktrees/']);
+
+    // ── Sweep stale worktree leftovers from previous runs ────────────────
+    try {
+        gitExec(gitRoot, 'worktree prune');
+        const worktreesDir = path.join(gitRoot, '.worktrees');
+        if (fs.existsSync(worktreesDir)) {
+            // List directories that git no longer tracks as active worktrees
+            const trackedRaw = gitExec(gitRoot, 'worktree list --porcelain');
+            const trackedPaths = new Set(
+                trackedRaw.split('\n')
+                    .filter(l => l.startsWith('worktree '))
+                    .map(l => l.slice('worktree '.length).trim()),
+            );
+            for (const entry of fs.readdirSync(worktreesDir)) {
+                const entryPath = path.join(worktreesDir, entry);
+                if (!fs.statSync(entryPath).isDirectory()) continue;
+                if (!trackedPaths.has(entryPath)) {
+                    fs.rmSync(entryPath, { recursive: true, force: true });
+                    intakeLog.info(`Removed stale worktree leftover: ${entry}`);
+                }
+            }
+        }
+    } catch (sweepErr) {
+        intakeLog.warn(`Worktree sweep failed (non-fatal): ${sweepErr}`);
+    }
+
     intakeLog.info(`Workspace: ${workspacePath}`);
     intakeLog.info(`Output: ${outputPath}`);
     intakeLog.info(`Run type: ${state.input.runType ?? 'greenfield'}`);
 
     const nextPhase = state.input.runType === 'maintain' ? 'codebase-analyzer' : 'architect';
 
+    emitRunEvent('phase:end', { phase: 'intake', nextPhase });
     return {
         input: { ...state.input, requirementsText },
         workspacePath,
@@ -412,6 +593,8 @@ export async function intakeNode(state: ProjectStateType): Promise<Partial<Proje
 const analyzerLog = getLogger('[Analyzer]', 147);
 
 export async function codebaseAnalyzerNode(state: ProjectStateType): Promise<Partial<ProjectStateType>> {
+    emitRunEvent('phase:start', { phase: 'codebase-analyzer' });
+    const rerunUpdate = checkRerun(state, 'codebase-analyzer', analyzerLog);
     analyzerLog.info('Starting codebase analysis...');
     const apiKey = await getAccessToken();
     const agent = createCodebaseAnalyzerAgent(apiKey, state.workspacePath);
@@ -419,6 +602,8 @@ export async function codebaseAnalyzerNode(state: ProjectStateType): Promise<Par
     // Check for existing analysis to use as baseline
     const existingAnalysis = readExistingAnalysis(state.workspacePath);
     const contextParts: string[] = [];
+    const feedbackSection = buildFeedbackSection(state, 'codebase-analyzer');
+    if (feedbackSection) contextParts.push(feedbackSection);
     if (existingAnalysis) {
         analyzerLog.info('Found existing codebase-analysis.md — using as baseline');
         contextParts.push(`## Previous Codebase Analysis (use as baseline, update what changed)\n\n${existingAnalysis}`);
@@ -426,7 +611,7 @@ export async function codebaseAnalyzerNode(state: ProjectStateType): Promise<Par
     contextParts.push(`## Task\n\nAnalyze the codebase at the workspace root and produce a comprehensive CodebaseAnalysis.`);
 
     const userMsg = contextParts.join('\n\n');
-    const { output, tokenUsage } = await invokeAgent(agent, userMsg, 'codebase-analyzer', 'codebase-analyzer', 'codebase-analyzer', { recursionLimit: TOOL_PIPELINE_RECURSION_LIMIT });
+    const { output, tokenUsage } = await invokeAgent(agent, userMsg, 'codebase-analyzer', 'codebase-analyzer', 'codebase-analyzer', { recursionLimit: TOOL_PIPELINE_RECURSION_LIMIT, schema: CodebaseAnalysisSchema });
 
     analyzerLog.info(`Analysis complete: ${output.modules?.length ?? 0} modules, ${output.primaryLanguages?.length ?? 0} languages`);
     analyzerLog.info(`Architecture: ${output.architecture?.style ?? 'unknown'}`);
@@ -461,7 +646,9 @@ export async function codebaseAnalyzerNode(state: ProjectStateType): Promise<Par
         analyzerLog,
     );
 
+    emitRunEvent('phase:end', { phase: 'codebase-analyzer', nextPhase: 'architect' });
     return {
+        ...rerunUpdate,
         codebaseAnalysis: output as CodebaseAnalysis,
         phase: 'architect' as PhaseName,
         artifacts: [artifact],
@@ -475,17 +662,35 @@ export async function codebaseAnalyzerNode(state: ProjectStateType): Promise<Par
 const archLog = getLogger('[Architect]', 39);
 
 export async function architectNode(state: ProjectStateType): Promise<Partial<ProjectStateType>> {
+    emitRunEvent('phase:start', { phase: 'architect' });
+    const rerunUpdate = checkRerun(state, 'architect', archLog);
     archLog.info('Starting architecture phase...');
     const apiKey = await getAccessToken();
     const agent = createArchitectAgent(apiKey);
 
-    const userMsgParts = [`## System Requirements\n\n${state.input.requirementsText}`];
-    if (state.codebaseAnalysis) {
-        userMsgParts.unshift(`## Existing Codebase Analysis\n\n${JSON.stringify(state.codebaseAnalysis, null, 2)}`);
-        userMsgParts.push(`\n## NOTE: This is MAINTAIN mode. Design CHANGES to the existing system, not a new system from scratch.`);
+    let userMsg: string;
+    if (CONTEXT_COMPACT) {
+        const sections: ContextSection[] = [
+            { title: 'System Requirements', body: state.input.requirementsText, priority: 1 },
+        ];
+        const feedbackSection = buildFeedbackSection(state, 'architect');
+        if (feedbackSection) sections.unshift({ title: 'Reviewer Feedback', body: feedbackSection, priority: 1 });
+        if (state.codebaseAnalysis) {
+            sections.unshift({ title: 'Existing Codebase Analysis', body: summariseCodebaseAnalysis(state.codebaseAnalysis), priority: 2 });
+            sections.push({ title: 'NOTE', body: 'This is MAINTAIN mode. Design CHANGES to the existing system, not a new system from scratch.', priority: 1 });
+        }
+        userMsg = buildContext(sections, CONTEXT_MAX_CHARS);
+    } else {
+        const userMsgParts = [`## System Requirements\n\n${state.input.requirementsText}`];
+        if (state.codebaseAnalysis) {
+            userMsgParts.unshift(`## Existing Codebase Analysis\n\n${JSON.stringify(state.codebaseAnalysis, null, 2)}`);
+            userMsgParts.push(`\n## NOTE: This is MAINTAIN mode. Design CHANGES to the existing system, not a new system from scratch.`);
+        }
+        userMsg = userMsgParts.join('\n');
     }
-    const userMsg = userMsgParts.join('\n');
-    const { output, tokenUsage } = await invokeAgent(agent, userMsg, 'architect', 'architect', 'architect');
+    archLog.info(`Context [architect]: ${userMsg.length} chars`);
+    recordContextChars('architect', userMsg.length);
+    const { output, tokenUsage } = await invokeAgent(agent, userMsg, 'architect', 'architect', 'architect', { schema: ArchitectOutputSchema });
 
     archLog.info(`Architecture: ${output.architecture?.components?.length ?? 0} components`);
     archLog.info(`Tech decisions: ${output.techStack?.length ?? 0}`);
@@ -513,7 +718,9 @@ export async function architectNode(state: ProjectStateType): Promise<Partial<Pr
         archLog,
     );
 
+    emitRunEvent('phase:end', { phase: 'architect', nextPhase: 'product-manager' });
     return {
+        ...rerunUpdate,
         architecture: output.architecture,
         techStack: output.techStack ?? [],
         epics: output.epics ?? [],
@@ -529,23 +736,44 @@ export async function architectNode(state: ProjectStateType): Promise<Partial<Pr
 const pmLog = getLogger('[Product Manager]', 214);
 
 export async function productManagerNode(state: ProjectStateType): Promise<Partial<ProjectStateType>> {
+    emitRunEvent('phase:start', { phase: 'product-manager' });
+    const rerunUpdate = checkRerun(state, 'product-manager', pmLog);
     pmLog.info('Starting product management phase...');
     const apiKey = await getAccessToken();
     const agent = createProductManagerAgent(apiKey);
 
-    const pmParts = [
-        `## Architecture\n\n${JSON.stringify(state.architecture, null, 2)}`,
-        `\n## Tech Stack\n\n${JSON.stringify(state.techStack, null, 2)}`,
-        `\n## Epics\n\n${JSON.stringify(state.epics, null, 2)}`,
-        `\n## Original Requirements\n\n${state.input.requirementsText}`,
-    ];
-    if (state.codebaseAnalysis) {
-        pmParts.unshift(`## Existing Codebase Analysis\n\n${JSON.stringify(state.codebaseAnalysis, null, 2)}`);
-        pmParts.push(`\n## NOTE: This is MAINTAIN mode. Create stories/tasks for CHANGES to the existing system.`);
+    let userMsg: string;
+    if (CONTEXT_COMPACT) {
+        const sections: ContextSection[] = [
+            { title: 'Architecture', body: summariseArchitecture(state.architecture), priority: 2 },
+            { title: 'Tech Stack', body: summariseTechStack(state.techStack), priority: 2 },
+            { title: 'Epics', body: JSON.stringify(state.epics, null, 2), priority: 1 },
+            { title: 'Original Requirements', body: state.input.requirementsText, priority: 1 },
+        ];
+        const feedbackSection = buildFeedbackSection(state, 'product-manager');
+        if (feedbackSection) sections.unshift({ title: 'Reviewer Feedback', body: feedbackSection, priority: 1 });
+        if (state.codebaseAnalysis) {
+            sections.unshift({ title: 'Existing Codebase Analysis', body: summariseCodebaseAnalysis(state.codebaseAnalysis), priority: 3 });
+            sections.push({ title: 'NOTE', body: 'This is MAINTAIN mode. Create stories/tasks for CHANGES to the existing system.', priority: 1 });
+        }
+        userMsg = buildContext(sections, CONTEXT_MAX_CHARS);
+    } else {
+        const pmParts = [
+            `## Architecture\n\n${JSON.stringify(state.architecture, null, 2)}`,
+            `\n## Tech Stack\n\n${JSON.stringify(state.techStack, null, 2)}`,
+            `\n## Epics\n\n${JSON.stringify(state.epics, null, 2)}`,
+            `\n## Original Requirements\n\n${state.input.requirementsText}`,
+        ];
+        if (state.codebaseAnalysis) {
+            pmParts.unshift(`## Existing Codebase Analysis\n\n${JSON.stringify(state.codebaseAnalysis, null, 2)}`);
+            pmParts.push(`\n## NOTE: This is MAINTAIN mode. Create stories/tasks for CHANGES to the existing system.`);
+        }
+        userMsg = pmParts.join('\n');
     }
-    const userMsg = pmParts.join('\n');
+    pmLog.info(`Context [product-manager]: ${userMsg.length} chars`);
+    recordContextChars('product-manager', userMsg.length);
 
-    const { output, tokenUsage } = await invokeAgent(agent, userMsg, 'pm', 'product-manager', 'product-manager');
+    const { output, tokenUsage } = await invokeAgent(agent, userMsg, 'pm', 'product-manager', 'product-manager', { schema: ProductManagerOutputSchema });
     pmLog.info(`Stories: ${output.userStories?.length ?? 0}, Tasks: ${output.tasks?.length ?? 0}`);
 
     const artifact = writeArtifact({
@@ -569,7 +797,9 @@ export async function productManagerNode(state: ProjectStateType): Promise<Parti
         pmLog,
     );
 
+    emitRunEvent('phase:end', { phase: 'product-manager', nextPhase: 'dba' });
     return {
+        ...rerunUpdate,
         userStories: output.userStories ?? [],
         tasks: output.tasks ?? [],
         phase: 'dba' as PhaseName,
@@ -584,23 +814,44 @@ export async function productManagerNode(state: ProjectStateType): Promise<Parti
 const dbaLog = getLogger('[DBA]', 100);
 
 export async function dbaNode(state: ProjectStateType): Promise<Partial<ProjectStateType>> {
+    emitRunEvent('phase:start', { phase: 'dba' });
+    const rerunUpdate = checkRerun(state, 'dba', dbaLog);
     dbaLog.info('Starting database design phase...');
     const apiKey = await getAccessToken();
     const agent = createDbaAgent(apiKey);
 
-    const dbaParts = [
-        `## Architecture\n\n${JSON.stringify(state.architecture, null, 2)}`,
-        `\n## Tech Stack\n\n${JSON.stringify(state.techStack, null, 2)}`,
-        `\n## User Stories\n\n${JSON.stringify(state.userStories, null, 2)}`,
-        `\n## Tasks\n\n${JSON.stringify(state.tasks, null, 2)}`,
-    ];
-    if (state.codebaseAnalysis) {
-        dbaParts.unshift(`## Existing Codebase Analysis\n\n${JSON.stringify(state.codebaseAnalysis, null, 2)}`);
-        dbaParts.push(`\n## NOTE: This is MAINTAIN mode. Design only the DB CHANGES needed, not the full schema from scratch.`);
+    let userMsg: string;
+    if (CONTEXT_COMPACT) {
+        const sections: ContextSection[] = [
+            { title: 'Architecture', body: summariseArchitecture(state.architecture), priority: 3 },
+            { title: 'Tech Stack', body: summariseTechStack(state.techStack), priority: 2 },
+            { title: 'User Stories', body: summariseStories(state.userStories), priority: 2 },
+            { title: 'Tasks', body: summariseTasks(state.tasks), priority: 3 },
+        ];
+        const feedbackSection = buildFeedbackSection(state, 'dba');
+        if (feedbackSection) sections.unshift({ title: 'Reviewer Feedback', body: feedbackSection, priority: 1 });
+        if (state.codebaseAnalysis) {
+            sections.unshift({ title: 'Existing Codebase Analysis', body: summariseCodebaseAnalysis(state.codebaseAnalysis), priority: 3 });
+            sections.push({ title: 'NOTE', body: 'This is MAINTAIN mode. Design only the DB CHANGES needed, not the full schema from scratch.', priority: 1 });
+        }
+        userMsg = buildContext(sections, CONTEXT_MAX_CHARS);
+    } else {
+        const dbaParts = [
+            `## Architecture\n\n${JSON.stringify(state.architecture, null, 2)}`,
+            `\n## Tech Stack\n\n${JSON.stringify(state.techStack, null, 2)}`,
+            `\n## User Stories\n\n${JSON.stringify(state.userStories, null, 2)}`,
+            `\n## Tasks\n\n${JSON.stringify(state.tasks, null, 2)}`,
+        ];
+        if (state.codebaseAnalysis) {
+            dbaParts.unshift(`## Existing Codebase Analysis\n\n${JSON.stringify(state.codebaseAnalysis, null, 2)}`);
+            dbaParts.push(`\n## NOTE: This is MAINTAIN mode. Design only the DB CHANGES needed, not the full schema from scratch.`);
+        }
+        userMsg = dbaParts.join('\n');
     }
-    const userMsg = dbaParts.join('\n');
+    dbaLog.info(`Context [dba]: ${userMsg.length} chars`);
+    recordContextChars('dba', userMsg.length);
 
-    const { output, tokenUsage } = await invokeAgent(agent, userMsg, 'dba', 'dba', 'dba');
+    const { output, tokenUsage } = await invokeAgent(agent, userMsg, 'dba', 'dba', 'dba', { schema: DbaOutputSchema });
     dbaLog.info(`DB engine: ${output.dbDesign?.engine}, Entities: ${output.dbDesign?.entities?.length ?? 0}`);
 
     const artifact = writeArtifact({
@@ -625,7 +876,9 @@ export async function dbaNode(state: ProjectStateType): Promise<Partial<ProjectS
         dbaLog,
     );
 
+    emitRunEvent('phase:end', { phase: 'dba', nextPhase: 'team-leader' });
     return {
+        ...rerunUpdate,
         dbDesign: output.dbDesign,
         phase: 'team-leader' as PhaseName,
         artifacts: [artifact],
@@ -639,27 +892,50 @@ export async function dbaNode(state: ProjectStateType): Promise<Partial<ProjectS
 const tlLog = getLogger('[Team Leader]', 213);
 
 export async function teamLeaderNode(state: ProjectStateType): Promise<Partial<ProjectStateType>> {
+    emitRunEvent('phase:start', { phase: 'team-leader' });
+    const rerunUpdate = checkRerun(state, 'team-leader', tlLog);
     tlLog.info('Starting assignment phase...');
     const apiKey = await getAccessToken();
     const agent = createTeamLeaderAgent(apiKey);
 
     const projectSlug = state.systemBranch.replace(/^project\//, '');
 
-    const tlParts = [
-        `## Architecture\n\n${JSON.stringify(state.architecture, null, 2)}`,
-        `\n## Tech Stack\n\n${JSON.stringify(state.techStack, null, 2)}`,
-        `\n## DB Design\n\n${JSON.stringify(state.dbDesign, null, 2)}`,
-        `\n## User Stories\n\n${JSON.stringify(state.userStories, null, 2)}`,
-        `\n## Tasks\n\n${JSON.stringify(state.tasks, null, 2)}`,
-        `\n## Project Slug: ${projectSlug}\nUse this slug as the prefix for all branch names (e.g., "${projectSlug}/feature/US-001-description").`,
-    ];
-    if (state.codebaseAnalysis) {
-        tlParts.unshift(`## Existing Codebase Analysis\n\n${JSON.stringify(state.codebaseAnalysis, null, 2)}`);
-        tlParts.push(`\n## NOTE: This is MAINTAIN mode. Assignments may involve modifying existing files.`);
+    let userMsg: string;
+    if (CONTEXT_COMPACT) {
+        const sections: ContextSection[] = [
+            { title: 'Architecture', body: summariseArchitecture(state.architecture), priority: 2 },
+            { title: 'Tech Stack', body: summariseTechStack(state.techStack), priority: 2 },
+            { title: 'DB Design', body: summariseDbDesign(state.dbDesign, 'compact'), priority: 3 },
+            { title: 'User Stories', body: summariseStories(state.userStories), priority: 1 },
+            { title: 'Tasks', body: summariseTasks(state.tasks), priority: 1 },
+            { title: 'Project Slug', body: `${projectSlug}\nUse this slug as the prefix for all branch names (e.g., "${projectSlug}/feature/US-001-description").`, priority: 1 },
+        ];
+        const feedbackSection = buildFeedbackSection(state, 'team-leader');
+        if (feedbackSection) sections.unshift({ title: 'Reviewer Feedback', body: feedbackSection, priority: 1 });
+        if (state.codebaseAnalysis) {
+            sections.unshift({ title: 'Existing Codebase Analysis', body: summariseCodebaseAnalysis(state.codebaseAnalysis), priority: 3 });
+            sections.push({ title: 'NOTE', body: 'This is MAINTAIN mode. Assignments may involve modifying existing files.', priority: 1 });
+        }
+        userMsg = buildContext(sections, CONTEXT_MAX_CHARS);
+    } else {
+        const tlParts = [
+            `## Architecture\n\n${JSON.stringify(state.architecture, null, 2)}`,
+            `\n## Tech Stack\n\n${JSON.stringify(state.techStack, null, 2)}`,
+            `\n## DB Design\n\n${JSON.stringify(state.dbDesign, null, 2)}`,
+            `\n## User Stories\n\n${JSON.stringify(state.userStories, null, 2)}`,
+            `\n## Tasks\n\n${JSON.stringify(state.tasks, null, 2)}`,
+            `\n## Project Slug: ${projectSlug}\nUse this slug as the prefix for all branch names (e.g., "${projectSlug}/feature/US-001-description").`,
+        ];
+        if (state.codebaseAnalysis) {
+            tlParts.unshift(`## Existing Codebase Analysis\n\n${JSON.stringify(state.codebaseAnalysis, null, 2)}`);
+            tlParts.push(`\n## NOTE: This is MAINTAIN mode. Assignments may involve modifying existing files.`);
+        }
+        userMsg = tlParts.join('\n');
     }
-    const userMsg = tlParts.join('\n');
+    tlLog.info(`Context [team-leader]: ${userMsg.length} chars`);
+    recordContextChars('team-leader', userMsg.length);
 
-    const { output, tokenUsage } = await invokeAgent(agent, userMsg, 'tl', 'team-leader', 'team-leader');
+    const { output, tokenUsage } = await invokeAgent(agent, userMsg, 'tl', 'team-leader', 'team-leader', { schema: TeamLeaderOutputSchema });
     tlLog.info(`Assignments: ${output.assignments?.length ?? 0}`);
 
     const artifact = writeArtifact({
@@ -683,7 +959,9 @@ export async function teamLeaderNode(state: ProjectStateType): Promise<Partial<P
         tlLog,
     );
 
+    emitRunEvent('phase:end', { phase: 'team-leader', nextPhase: 'development' });
     return {
+        ...rerunUpdate,
         assignments: output.assignments ?? [],
         phase: 'development' as PhaseName,
         artifacts: [artifact],
@@ -697,37 +975,101 @@ export async function teamLeaderNode(state: ProjectStateType): Promise<Partial<P
 const devLog = getLogger('[Development]', 226);
 
 export async function developmentNode(state: ProjectStateType): Promise<Partial<ProjectStateType>> {
+    emitRunEvent('phase:start', { phase: 'development' });
+    const rerunUpdate = checkRerun(state, 'development', devLog);
     devLog.info(`Starting development with ${state.assignments.length} assignments...`);
+
+    // ── Filter to only pending assignments (fixes A2) ────────────────────
+    const pending = selectPendingAssignments(state.assignments, state.completedAssignmentIds);
+    devLog.info(`Development: ${pending.length} pending of ${state.assignments.length} total assignments (${state.completedAssignmentIds.length} already complete)`);
+    if (pending.length === 0) {
+        devLog.warn('No pending assignments — skipping development phase');
+        emitRunEvent('phase:end', { phase: 'development', nextPhase: 'qa', skipped: true });
+        return { phase: 'qa' as PhaseName, transcript: [msg('conductor', 'development', 'No pending assignments')] };
+    }
+
     const apiKey = await getAccessToken();
 
-    // Deploy coding convention files to the workspace for agents to read
-    deployAllConventionsToWorkspace(state.workspacePath);
+    // Deploy only the convention files the dispatched agents need (fixes A11)
+    const devLanguages = [...new Set(
+        pending.flatMap(a => getDevAgent(a.devAgentId)?.languages ?? []),
+    )];
+    const devConventionFiles = resolveConventionFiles(devLanguages, state.techStack);
+    deployConventionsToWorkspace(state.workspacePath, devConventionFiles);
 
-    const devParts = [
-        `## Architecture\n\n${JSON.stringify(state.architecture, null, 2)}`,
-        `\n## Tech Stack\n\n${JSON.stringify(state.techStack, null, 2)}`,
-        `\n## DB Design\n\n${JSON.stringify(state.dbDesign, null, 2)}`,
-        `\n## User Stories\n\n${JSON.stringify(state.userStories, null, 2)}`,
-        `\n## Existing File Changes\n\n${JSON.stringify(state.fileChanges, null, 2)}`,
-    ];
-    if (state.codebaseAnalysis) {
-        devParts.unshift(`## Existing Codebase Analysis\n\n${JSON.stringify(state.codebaseAnalysis, null, 2)}`);
-        devParts.push(`\n## NOTE: This is MAINTAIN mode. Modify existing files where appropriate rather than creating new ones.`);
+    let contextPrompt: string;
+    if (CONTEXT_COMPACT) {
+        // Build the shared context sections (stories are added per-branch in the dispatcher)
+        const sections: ContextSection[] = [
+            { title: 'Architecture', body: summariseArchitecture(state.architecture), priority: 2 },
+            { title: 'Tech Stack', body: summariseTechStack(state.techStack), priority: 1 },
+            { title: 'DB Design', body: summariseDbDesign(state.dbDesign, 'compact'), priority: 3 },
+            { title: 'Files Already Written', body: summariseFileChanges(state.fileChanges, DEV_CONTEXT_FILE_CHANGES_LIMIT), priority: 3 },
+        ];
+        if (state.codebaseAnalysis) {
+            sections.unshift({ title: 'Existing Codebase Analysis', body: summariseCodebaseAnalysis(state.codebaseAnalysis), priority: 3 });
+            sections.push({ title: 'NOTE', body: 'This is MAINTAIN mode. Modify existing files where appropriate rather than creating new ones.', priority: 1 });
+        }
+        contextPrompt = buildContext(sections, CONTEXT_MAX_CHARS);
+    } else {
+        // ── Cap the fileChanges blob (fixes A2 cost) ─────────────────────────
+        const recent = state.fileChanges.slice(-DEV_CONTEXT_FILE_CHANGES_LIMIT);
+        const fileChangesSummary = recent.length > 0
+            ? `\n## Files Already Written (${state.fileChanges.length} total, showing last ${recent.length})\n\n`
+              + recent.map(c => `- ${(c as any).action ?? 'modify'} ${(c as any).path}`).join('\n')
+            : '';
+
+        const devParts = [
+            `## Architecture\n\n${JSON.stringify(state.architecture, null, 2)}`,
+            `\n## Tech Stack\n\n${JSON.stringify(state.techStack, null, 2)}`,
+            `\n## DB Design\n\n${JSON.stringify(state.dbDesign, null, 2)}`,
+            `\n## User Stories\n\n${JSON.stringify(state.userStories, null, 2)}`,
+            fileChangesSummary,
+        ];
+        if (state.codebaseAnalysis) {
+            devParts.unshift(`## Existing Codebase Analysis\n\n${JSON.stringify(state.codebaseAnalysis, null, 2)}`);
+            devParts.push(`\n## NOTE: This is MAINTAIN mode. Modify existing files where appropriate rather than creating new ones.`);
+        }
+        contextPrompt = devParts.join('\n');
     }
-    const contextPrompt = devParts.join('\n');
+    devLog.info(`Context [development]: ${contextPrompt.length} chars`);
+    recordContextChars('development', contextPrompt.length);
     const projectSlug = state.systemBranch.replace(/^project\//, '');
 
-    const result = await dispatchDevelopers(apiKey, state.assignments, state.workspacePath, contextPrompt, state.systemBranch, projectSlug, state.gitContext, state.techStack);
+    const result = await dispatchDevelopers(apiKey, pending, state.workspacePath, contextPrompt, state.systemBranch, projectSlug, state.gitContext, state.techStack, state.completedAssignmentIds, state.userStories);
 
     devLog.info(`Development complete: ${result.fileChanges.length} file changes, ${result.pullRequests.length} PRs`);
 
+    // ── Sync workspace to merged system branch (fixes A1) ────────────────
+    let gitRoot: string;
+    try {
+        gitRoot = findGitRoot(state.workspacePath);
+    } catch {
+        gitRoot = state.workspacePath;
+    }
+    const syncResult = syncWorkspaceToBranch(gitRoot, state.systemBranch, state.gitContext);
+    devLog.info(`Workspace synced to origin/${state.systemBranch}: ${syncResult.details}`);
+
+    // Warn if the workspace still looks sourceless after sync
+    const lsFiles = gitExec(gitRoot, 'ls-files');
+    if (!lsFiles.startsWith('Error:')) {
+        const files = lsFiles.split('\n').filter(Boolean);
+        if (looksSourceless(files)) {
+            devLog.error(`WARNING: Workspace appears sourceless after sync — QA and DevOps will see no application code. Files: ${files.length}`);
+            result.transcript.push(msg('conductor', 'development', `ERROR: Workspace is sourceless after development sync — PR merges may not have landed`));
+        }
+    }
+
+    emitRunEvent('phase:end', { phase: 'development', nextPhase: 'qa', fileChanges: result.fileChanges.length, prs: result.pullRequests.length });
     return {
+        ...rerunUpdate,
         fileChanges: result.fileChanges,
         artifacts: result.artifacts,
         pullRequests: result.pullRequests,
+        completedAssignmentIds: result.completedAssignmentIds,
         transcript: [
             ...result.transcript,
-            msg('conductor', 'development', `Development phase complete: ${result.fileChanges.length} files changed, ${result.pullRequests.length} PRs merged`),
+            msg('conductor', 'development', `Development phase complete: ${result.fileChanges.length} files changed, ${result.pullRequests.length} PRs merged. Sync: ${syncResult.details}`),
         ],
         phase: 'qa' as PhaseName,
         tokenUsage: result.tokenUsage ?? [],
@@ -739,16 +1081,26 @@ export async function developmentNode(state: ProjectStateType): Promise<Partial<
 const qaLog = getLogger('[QA Lead]', 198);
 
 export async function qaNode(state: ProjectStateType): Promise<Partial<ProjectStateType>> {
+    emitRunEvent('phase:start', { phase: 'qa' });
+    const rerunUpdate = checkRerun(state, 'qa', qaLog);
     qaLog.info('Starting QA phase...');
     const apiKey = await getAccessToken();
     const transcript: TranscriptMessage[] = [];
     const allBugs: Bug[] = [];
 
-    // Deploy conventions (idempotent — skips if already deployed)
-    deployAllConventionsToWorkspace(state.workspacePath);
+    // ── Sync workspace before QA (idempotent — protects HITL resume) ─────
+    let qaGitRoot: string;
+    try {
+        qaGitRoot = findGitRoot(state.workspacePath);
+    } catch {
+        qaGitRoot = state.workspacePath;
+    }
+    const qaSyncResult = syncWorkspaceToBranch(qaGitRoot, state.systemBranch, state.gitContext);
+    qaLog.info(`Workspace synced to origin/${state.systemBranch}: ${qaSyncResult.details}`);
 
-    // Resolve convention files for QA agents based on tech stack
+    // Deploy only the convention files QA agents need (fixes A11)
     const qaConventionFiles = resolveConventionFiles([], state.techStack);
+    deployConventionsToWorkspace(state.workspacePath, qaConventionFiles);
 
     // 7a. QA Lead — create test plan
     qaLog.info('QA Lead creating test plan...');
@@ -757,13 +1109,26 @@ export async function qaNode(state: ProjectStateType): Promise<Partial<ProjectSt
     let leadArtifact: any = null;
     try {
         const qaLeadAgent = createQaLeadAgent(apiKey);
-        const leadMsg = [
-            `## Architecture\n\n${JSON.stringify(state.architecture, null, 2)}`,
-            `\n## User Stories\n\n${JSON.stringify(state.userStories, null, 2)}`,
-            `\n## Tech Stack\n\n${JSON.stringify(state.techStack, null, 2)}`,
-            `\n## DB Design\n\n${JSON.stringify(state.dbDesign, null, 2)}`,
-        ].join('\n');
-        const r = await invokeAgent(qaLeadAgent, leadMsg, 'qa-lead', 'qa-lead', 'qa');
+        let leadMsg: string;
+        if (CONTEXT_COMPACT) {
+            const sections: ContextSection[] = [
+                { title: 'Architecture', body: summariseArchitecture(state.architecture), priority: 2 },
+                { title: 'Tech Stack', body: summariseTechStack(state.techStack), priority: 2 },
+                { title: 'DB Design', body: summariseDbDesign(state.dbDesign, 'compact'), priority: 3 },
+                { title: 'Test Plan', body: JSON.stringify(state.testPlan ?? { unit: [], integration: [], e2e: [] }, null, 2), priority: 1 },
+            ];
+            leadMsg = buildContext(sections, CONTEXT_MAX_CHARS);
+        } else {
+            leadMsg = [
+                `## Architecture\n\n${JSON.stringify(state.architecture, null, 2)}`,
+                `\n## User Stories\n\n${JSON.stringify(state.userStories, null, 2)}`,
+                `\n## Tech Stack\n\n${JSON.stringify(state.techStack, null, 2)}`,
+                `\n## DB Design\n\n${JSON.stringify(state.dbDesign, null, 2)}`,
+            ].join('\n');
+        }
+        qaLog.info(`Context [qa-lead]: ${leadMsg.length} chars`);
+        recordContextChars('qa', leadMsg.length);
+        const r = await invokeAgent(qaLeadAgent, leadMsg, 'qa-lead', 'qa-lead', 'qa', { schema: QaLeadOutputSchema });
         leadOutput = r.output;
         if (r.tokenUsage) qaTokenUsage.push(r.tokenUsage);
         qaLog.info(`Test plan: ${leadOutput.testPlan?.unit?.length ?? 0} unit, ${leadOutput.testPlan?.e2e?.length ?? 0} e2e`);
@@ -786,12 +1151,24 @@ export async function qaNode(state: ProjectStateType): Promise<Partial<ProjectSt
     let unitArtifact: any = null;
     try {
         const qaUnitAgent = createQaUnitAgent(apiKey, state.workspacePath, qaConventionFiles);
-        const unitMsg = [
-            `## Test Plan (unit + integration)\n\n${JSON.stringify({ unit: leadOutput.testPlan?.unit ?? [], integration: leadOutput.testPlan?.integration ?? [] }, null, 2)}`,
-            `\n## Architecture\n\n${JSON.stringify(state.architecture, null, 2)}`,
-            `\n## Tech Stack\n\n${JSON.stringify(state.techStack, null, 2)}`,
-        ].join('\n');
-        const r = await invokeAgent(qaUnitAgent, unitMsg, 'qa-unit', 'qa-unit', 'qa', { recursionLimit: TOOL_PIPELINE_RECURSION_LIMIT });
+        let unitMsg: string;
+        if (CONTEXT_COMPACT) {
+            const sections: ContextSection[] = [
+                { title: 'Test Plan (unit + integration)', body: JSON.stringify({ unit: leadOutput.testPlan?.unit ?? [], integration: leadOutput.testPlan?.integration ?? [] }, null, 2), priority: 1 },
+                { title: 'Architecture', body: summariseArchitecture(state.architecture), priority: 2 },
+                { title: 'Tech Stack', body: summariseTechStack(state.techStack), priority: 2 },
+            ];
+            unitMsg = buildContext(sections, CONTEXT_MAX_CHARS);
+        } else {
+            unitMsg = [
+                `## Test Plan (unit + integration)\n\n${JSON.stringify({ unit: leadOutput.testPlan?.unit ?? [], integration: leadOutput.testPlan?.integration ?? [] }, null, 2)}`,
+                `\n## Architecture\n\n${JSON.stringify(state.architecture, null, 2)}`,
+                `\n## Tech Stack\n\n${JSON.stringify(state.techStack, null, 2)}`,
+            ].join('\n');
+        }
+        qaLog.info(`Context [qa-unit]: ${unitMsg.length} chars`);
+        recordContextChars('qa', unitMsg.length);
+        const r = await invokeAgent(qaUnitAgent, unitMsg, 'qa-unit', 'qa-unit', 'qa', { recursionLimit: TOOL_PIPELINE_RECURSION_LIMIT, schema: QaUnitOutputSchema });
         unitOutput = r.output;
         if (r.tokenUsage) qaTokenUsage.push(r.tokenUsage);
         qaLog.info(`Unit tests: ${unitOutput.testReport?.passed ?? 0} passed, ${unitOutput.testReport?.failed ?? 0} failed`);
@@ -809,57 +1186,119 @@ export async function qaNode(state: ProjectStateType): Promise<Partial<ProjectSt
         transcript.push(msg('qa-unit', 'qa', `QA Unit failed: ${err.message}`));
     }
 
-    // 7c. QA E2E — Playwright MCP testing (only if services are running)
-    let e2eReport = null;
-    let e2eArtifact = null;
-    if (state.devopsPlan?.serviceUrls && state.devopsPlan.serviceUrls.length > 0) {
-        qaLog.info('QA E2E running Playwright tests...');
-        try {
-            const mcpTools = await getPlaywrightMcpTools();
-            const qaE2eAgent = createQaE2eAgent(apiKey, mcpTools, qaConventionFiles);
-            const e2eMsg = [
-                `## Test Plan (e2e)\n\n${JSON.stringify(leadOutput.testPlan?.e2e ?? [], null, 2)}`,
-                `\n## Service URLs\n\n${JSON.stringify(state.devopsPlan.serviceUrls, null, 2)}`,
-            ].join('\n');
-            const { output: e2eOutput, tokenUsage: e2eTokenUsage } = await invokeAgent(qaE2eAgent, e2eMsg, 'qa-e2e', 'qa-e2e', 'qa', { recursionLimit: TOOL_PIPELINE_RECURSION_LIMIT });
-            if (e2eTokenUsage) qaTokenUsage.push(e2eTokenUsage);
-            e2eReport = e2eOutput.testReport;
-            if (e2eOutput.bugs) allBugs.push(...e2eOutput.bugs);
-            qaLog.info(`E2E tests: ${e2eReport?.passed ?? 0} passed, ${e2eReport?.failed ?? 0} failed`);
-
-            e2eArtifact = writeArtifact({
-                agentId: 'qa-e2e', colorCode: 118, workspacePath: state.workspacePath,
-                title: 'QA E2E — Test Report',
-                content: `## Results\n\n${JSON.stringify(e2eReport, null, 2)}`,
-            });
-            transcript.push(msg('qa-e2e', 'qa', `E2E tests: ${e2eReport?.passed ?? 0}/${e2eReport?.total ?? 0} passed`));
-            await closePlaywrightMcp();
-        } catch (err: any) {
-            qaLog.error(`E2E testing failed: ${err.message}`);
-            transcript.push(msg('qa-e2e', 'qa', `E2E testing failed: ${err.message}`));
-        }
-    } else {
-        qaLog.info('Skipping E2E tests — no running services');
-        transcript.push(msg('qa-e2e', 'qa', 'Skipped — no running services'));
-    }
-
-    // B11: Commit QA-generated files to the system branch
+    // Commit QA-generated files via the shared helper (includes sync + retry)
     const systemSlug = path.basename(state.workspacePath);
-    gitExec(state.workspacePath, 'add .');
-    const qaStatus = gitExec(state.workspacePath, 'status --short');
-    if (qaStatus && !qaStatus.includes('nothing to commit')) {
-        gitExec(state.workspacePath, `commit -m "[${systemSlug}]-chore: QA unit test files"`);
-        const currentBranch = gitExec(state.workspacePath, 'rev-parse --abbrev-ref HEAD');
-        if (currentBranch && !currentBranch.startsWith('Error:')) {
-            gitPush(state.workspacePath, currentBranch, state.gitContext);
-            qaLog.info(`Committed and pushed QA test files on ${currentBranch}`);
+    commitAndPushArtifacts(
+        state.workspacePath,
+        `[${systemSlug}]-chore: QA unit test files`,
+        state.gitContext,
+        qaLog,
+    );
+
+    const testReports = [unitOutput?.testReport].filter(Boolean);
+    const artifacts = [...(leadArtifact ? [leadArtifact] : []), ...(unitArtifact ? [unitArtifact] : [])];
+
+    // ── Deterministic quality gate (fixes A6) ────────────────────────────
+    // Run the real build/lint/test pipeline and compare with the agent's
+    // self-report. The gate report drives afterQaRouter, so a hallucinated
+    // 'pass' from qa-unit can no longer suppress the bug-fix loop.
+    try {
+        const gateReport = runQualityGates(state.workspacePath);
+        const gateTestReport = gateReportToTestReport(gateReport, 'quality-gates');
+        if (gateTestReport) {
+            testReports.push(gateTestReport);
+
+            // Warn when the agent claimed pass but the gate failed
+            const agentClaimedPass = unitOutput?.testReport?.status === 'pass';
+            if (agentClaimedPass && gateTestReport.status === 'fail') {
+                qaLog.warn(`QA agent reported status='pass' but quality gates FAILED — keeping both reports (gate report drives bug-fix loop)`);
+                transcript.push(msg('quality-gates', 'qa', `WARNING: QA agent self-reported pass but quality gates failed — deterministic gate overrides`));
+            }
+
+            // Synthesise bugs for failing gate steps
+            const gateBugs = synthesiseGateBugs(gateReport);
+            if (gateBugs.length > 0) {
+                allBugs.push(...gateBugs);
+                qaLog.info(`Quality gates synthesised ${gateBugs.length} bug(s): ${gateBugs.map(b => b.id).join(', ')}`);
+            }
+
+            transcript.push(msg('quality-gates', 'qa',
+                `Quality gates: ${gateReport.passed ? 'PASSED' : 'FAILED'} — ${gateReport.stacks.join(',')} — ${gateReport.results.filter(r => !r.skipped).length} steps executed, ${gateReport.results.filter(r => !r.passed && !r.skipped).length} failed`));
         }
+    } catch (gateErr: any) {
+        qaLog.warn(`Quality gate execution error (non-fatal): ${gateErr.message}`);
     }
 
-    const testReports = [unitOutput?.testReport, ...(e2eReport ? [e2eReport] : [])].filter(Boolean);
-    const artifacts = [...(leadArtifact ? [leadArtifact] : []), ...(unitArtifact ? [unitArtifact] : []), ...(e2eArtifact ? [e2eArtifact] : [])];
+    // ── Security gate (secret scan, dependency audit, licence check) ────
+    try {
+        const securityReport = runSecurityGates(state.workspacePath);
 
+        // Write Security Report artifact
+        writeArtifact({
+            agentId: 'security-gates', colorCode: 196, workspacePath: state.workspacePath,
+            title: 'Security Report',
+            content: `## Security Report\n\n${securityReportToMarkdown(securityReport)}`,
+        });
+
+        if (securityReport.findings.length > 0) {
+            qaLog.warn(`Security gate: ${securityReport.findings.length} finding(s), ${securityReport.findings.filter(f => f.severity === 'critical').length} critical`);
+
+            // Synthesise bugs for critical/major findings when SECURITY_GATE_BLOCKING=true
+            const secBugs = synthesiseSecurityBugs(securityReport);
+            if (secBugs.length > 0) {
+                allBugs.push(...secBugs);
+                qaLog.info(`Security gate synthesised ${secBugs.length} bug(s): ${secBugs.map(b => b.id).join(', ')}`);
+            }
+
+            transcript.push(msg('security-gates', 'qa',
+                `Security gate: ${securityReport.passed ? 'PASSED (non-critical)' : 'FAILED'} — ${securityReport.findings.length} finding(s), ${securityReport.findings.filter(f => f.severity === 'critical').length} critical`));
+        } else {
+            transcript.push(msg('security-gates', 'qa', 'Security gate: clean — no findings'));
+        }
+    } catch (secErr: any) {
+        qaLog.warn(`Security gate execution error (non-fatal): ${secErr.message}`);
+    }
+
+    // ── Optional AC coverage gate ──────────────────────────────────────
+    try {
+        if (MIN_AC_COVERAGE_PCT > 0) {
+            const traceReport = buildTraceabilityReport({
+                ...state,
+                testPlan: leadOutput?.testPlan ?? state.testPlan,
+                testReports,
+            } as ProjectStateType);
+            const pct = traceReport.totals.coveragePct * 100;
+            if (pct < MIN_AC_COVERAGE_PCT) {
+                const gaps = traceReport.rows.filter(r =>
+                    r.status === 'missing' || r.status === 'implemented-untested'
+                );
+                const acBugs: Bug[] = gaps.slice(0, MIN_AC_COVERAGE_MAX_BUGS).map(row => ({
+                    id: `AC-${row.storyId}-${row.acIndex}`,
+                    title: `Acceptance criterion not verified: ${row.storyId} AC#${row.acIndex}`,
+                    severity: 'major' as const,
+                    stepsToReproduce: `Check story ${row.storyId}, acceptance criterion ${row.acIndex}: "${row.acText}"`,
+                    expectedBehavior: `Criterion should be implemented and verified by a passing test`,
+                    actualBehavior: `Status is "${row.status}" — ${row.status === 'missing' ? 'no assignment references this story' : 'implemented but no test verifies it'}`,
+                    suspectedArea: row.assignmentIds[0] ? `Assignment ${row.assignmentIds[0]}` : `Story ${row.storyId}`,
+                    reportedBy: 'ac-coverage-gate',
+                }));
+                if (acBugs.length > 0) {
+                    allBugs.push(...acBugs);
+                    qaLog.info(`AC coverage gate: ${pct.toFixed(0)}% < ${MIN_AC_COVERAGE_PCT}% — synthesised ${acBugs.length} bug(s)`);
+                    transcript.push(msg('quality-gates', 'qa',
+                        `AC coverage gate: ${pct.toFixed(0)}% < ${MIN_AC_COVERAGE_PCT}% — ${acBugs.length} bugs synthesised for ${gaps.length} uncovered criteria`));
+                }
+            } else {
+                qaLog.info(`AC coverage gate: ${pct.toFixed(0)}% >= ${MIN_AC_COVERAGE_PCT}% — passed`);
+            }
+        }
+    } catch (acErr: any) {
+        qaLog.warn(`AC coverage gate error (non-fatal): ${acErr.message}`);
+    }
+
+    emitRunEvent('phase:end', { phase: 'qa', testReports: testReports.length, bugs: allBugs.length });
     return {
+        ...rerunUpdate,
         testPlan: leadOutput?.testPlan,
         testReports,
         bugs: allBugs,
@@ -876,12 +1315,19 @@ export async function qaNode(state: ProjectStateType): Promise<Partial<ProjectSt
 const bugLog = getLogger('[BugTriage]', 196);
 
 export async function bugfixTriageNode(state: ProjectStateType): Promise<Partial<ProjectStateType>> {
+    emitRunEvent('phase:start', { phase: 'bugfix-triage' });
     const iteration = state.iteration.bugfix + 1;
-    bugLog.info(`Bug-fix triage iteration ${iteration}/${MAX_BUGFIX_ITERATIONS}`);
+    bugLog.info(`Bug-fix triage iteration ${iteration}/${getEffectiveLimits().maxBugfixIterations}`);
 
-    const openBugs = state.bugs.filter(b => b.severity === 'critical' || b.severity === 'major');
+    // ── Deduplicate and filter already-fixed bugs ────────────────────────
+    const fixedSet = new Set(state.fixedBugIds ?? []);
+    const openBugs = dedupeBugs(state.bugs)
+        .filter(b => !fixedSet.has(b.id))
+        .filter(b => b.severity === 'critical' || b.severity === 'major');
+
     if (openBugs.length === 0) {
         bugLog.info('No critical/major bugs — skipping to DevOps');
+        emitRunEvent('phase:end', { phase: 'bugfix-triage', nextPhase: 'devops', skipped: true });
         return {
             phase: 'devops' as PhaseName,
             iteration: { bugfix: iteration },
@@ -893,22 +1339,45 @@ export async function bugfixTriageNode(state: ProjectStateType): Promise<Partial
     const apiKey = await getAccessToken();
     const agent = createTeamLeaderAgent(apiKey);
 
-    const userMsg = [
-        `## Bug-fix Triage — Iteration ${iteration}`,
-        `\n## Open Bugs\n\n${JSON.stringify(openBugs, null, 2)}`,
-        `\n## Architecture\n\n${JSON.stringify(state.architecture, null, 2)}`,
-        `\n## Existing Assignments\n\n${JSON.stringify(state.assignments, null, 2)}`,
-        `\n\nPlease create NEW assignments to fix these bugs. Assign each bug to the most appropriate developer.`,
-    ].join('\n');
+    let userMsg: string;
+    if (CONTEXT_COMPACT) {
+        const sections: ContextSection[] = [
+            { title: `Bug-fix Triage — Iteration ${iteration}`, body: '', priority: 1 },
+            { title: 'Open Bugs', body: JSON.stringify(openBugs, null, 2), priority: 1 },
+            { title: 'Architecture', body: summariseArchitecture(state.architecture), priority: 2 },
+            { title: 'Existing Assignments', body: state.assignments.map(a => `- ${a.id} [${a.devAgentId}]: ${a.description?.slice(0, 100)}`).join('\n'), priority: 3 },
+            { title: 'Instructions', body: 'Please create NEW assignments to fix these bugs. Assign each bug to the most appropriate developer.', priority: 1 },
+        ];
+        userMsg = buildContext(sections, CONTEXT_MAX_CHARS);
+    } else {
+        userMsg = [
+            `## Bug-fix Triage — Iteration ${iteration}`,
+            `\n## Open Bugs\n\n${JSON.stringify(openBugs, null, 2)}`,
+            `\n## Architecture\n\n${JSON.stringify(state.architecture, null, 2)}`,
+            `\n## Existing Assignments\n\n${JSON.stringify(state.assignments, null, 2)}`,
+            `\n\nPlease create NEW assignments to fix these bugs. Assign each bug to the most appropriate developer.`,
+        ].join('\n');
+    }
+    bugLog.info(`Context [bugfix-triage]: ${userMsg.length} chars`);
+    recordContextChars('bugfix-triage', userMsg.length);
 
-    const { output, tokenUsage } = await invokeAgent(agent, userMsg, `tl-bugfix-${iteration}`, 'team-leader', 'bugfix-triage');
-    bugLog.info(`Created ${output.assignments?.length ?? 0} bugfix assignments`);
+    const { output, tokenUsage } = await invokeAgent(agent, userMsg, `tl-bugfix-${iteration}`, 'team-leader', 'bugfix-triage', { schema: TeamLeaderOutputSchema });
 
+    // ── Namespace bugfix assignment ids to avoid collisions ──────────────
+    const rawAssignments = output.assignments ?? [];
+    const namespacedAssignments = namespaceBugfixAssignments(rawAssignments, iteration);
+    bugLog.info(`Created ${namespacedAssignments.length} bugfix assignments (iteration ${iteration})`);
+
+    // Track which bugs are being addressed in this iteration
+    const bugIdsBeingFixed = openBugs.map(b => b.id);
+
+    emitRunEvent('phase:end', { phase: 'bugfix-triage', nextPhase: 'development', bugs: bugIdsBeingFixed.length, assignments: namespacedAssignments.length });
     return {
-        assignments: output.assignments ?? [],
+        assignments: namespacedAssignments,
+        fixedBugIds: bugIdsBeingFixed,
         iteration: { bugfix: iteration },
         phase: 'development' as PhaseName,
-        transcript: [msg('team-leader', 'bugfix-triage', `Iteration ${iteration}: reassigned ${output.assignments?.length ?? 0} bug fixes`)],
+        transcript: [msg('team-leader', 'bugfix-triage', `Iteration ${iteration}: reassigned ${namespacedAssignments.length} bug fixes for ${bugIdsBeingFixed.length} bugs`)],
         tokenUsage: tokenUsage ? [tokenUsage] : [],
     };
 }
@@ -918,35 +1387,63 @@ export async function bugfixTriageNode(state: ProjectStateType): Promise<Partial
 const opsLog = getLogger('[DevOps]', 33);
 
 export async function devopsNode(state: ProjectStateType): Promise<Partial<ProjectStateType>> {
+    emitRunEvent('phase:start', { phase: 'devops' });
+    const rerunUpdate = checkRerun(state, 'devops', opsLog);
     opsLog.info('Starting DevOps phase...');
     const apiKey = await getAccessToken();
 
-    // Deploy conventions (idempotent — skips if already deployed)
-    deployAllConventionsToWorkspace(state.workspacePath);
+    // ── Sync workspace before DevOps (idempotent — protects HITL resume) ──
+    let devopsGitRoot: string;
+    try {
+        devopsGitRoot = findGitRoot(state.workspacePath);
+    } catch {
+        devopsGitRoot = state.workspacePath;
+    }
+    const devopsSyncResult = syncWorkspaceToBranch(devopsGitRoot, state.systemBranch, state.gitContext);
+    opsLog.info(`Workspace synced to origin/${state.systemBranch}: ${devopsSyncResult.details}`);
 
-    // Resolve convention files for DevOps agent based on tech stack
+    // Deploy only the convention files DevOps agent needs (fixes A11)
     const devopsConventionFiles = resolveConventionFiles([], state.techStack);
+    deployConventionsToWorkspace(state.workspacePath, devopsConventionFiles);
 
     let output: any = { devops: { buildStatus: 'failed', runStatus: 'failed', serviceUrls: [], healthChecks: [] }, fileChanges: [] };
     let tokenUsage: TokenCallRecord | null = null;
     const transcript: TranscriptMessage[] = [];
+    let verifiedContainers: string[] = [];
 
     try {
         const agent = createDevOpsAgent(apiKey, state.workspacePath, devopsConventionFiles);
 
-        const devopsParts = [
-            `## Architecture\n\n${JSON.stringify(state.architecture, null, 2)}`,
-            `\n## Tech Stack\n\n${JSON.stringify(state.techStack, null, 2)}`,
-            `\n## DB Design\n\n${JSON.stringify(state.dbDesign, null, 2)}`,
-            `\n## File Changes\n\n${JSON.stringify(state.fileChanges, null, 2)}`,
-        ];
-        if (state.codebaseAnalysis) {
-            devopsParts.unshift(`## Existing Codebase Analysis\n\n${JSON.stringify(state.codebaseAnalysis, null, 2)}`);
-            devopsParts.push(`\n## NOTE: This is MAINTAIN mode. Update existing Docker/K8s configs rather than creating from scratch.`);
+        let userMsg: string;
+        if (CONTEXT_COMPACT) {
+            const sections: ContextSection[] = [
+                { title: 'Architecture', body: summariseArchitecture(state.architecture), priority: 2 },
+                { title: 'Tech Stack', body: summariseTechStack(state.techStack), priority: 1 },
+                { title: 'DB Design', body: summariseDbDesign(state.dbDesign, 'compact'), priority: 3 },
+                { title: 'File Changes', body: summariseFileChanges(state.fileChanges, DEV_CONTEXT_FILE_CHANGES_LIMIT), priority: 3 },
+            ];
+            if (state.codebaseAnalysis) {
+                sections.unshift({ title: 'Existing Codebase Analysis', body: summariseCodebaseAnalysis(state.codebaseAnalysis), priority: 3 });
+                sections.push({ title: 'NOTE', body: 'This is MAINTAIN mode. Update existing Docker/K8s configs rather than creating from scratch.', priority: 1 });
+            }
+            userMsg = buildContext(sections, CONTEXT_MAX_CHARS);
+        } else {
+            const devopsParts = [
+                `## Architecture\n\n${JSON.stringify(state.architecture, null, 2)}`,
+                `\n## Tech Stack\n\n${JSON.stringify(state.techStack, null, 2)}`,
+                `\n## DB Design\n\n${JSON.stringify(state.dbDesign, null, 2)}`,
+                `\n## File Changes\n\n${JSON.stringify(state.fileChanges, null, 2)}`,
+            ];
+            if (state.codebaseAnalysis) {
+                devopsParts.unshift(`## Existing Codebase Analysis\n\n${JSON.stringify(state.codebaseAnalysis, null, 2)}`);
+                devopsParts.push(`\n## NOTE: This is MAINTAIN mode. Update existing Docker/K8s configs rather than creating from scratch.`);
+            }
+            userMsg = devopsParts.join('\n');
         }
-        const userMsg = devopsParts.join('\n');
+        opsLog.info(`Context [devops]: ${userMsg.length} chars`);
+        recordContextChars('devops', userMsg.length);
 
-        const r = await invokeAgent(agent, userMsg, 'devops', 'devops', 'devops', { recursionLimit: TOOL_PIPELINE_RECURSION_LIMIT });
+        const r = await invokeAgent(agent, userMsg, 'devops', 'devops', 'devops', { recursionLimit: TOOL_PIPELINE_RECURSION_LIMIT, schema: DevOpsOutputSchema });
         output = r.output;
         tokenUsage = r.tokenUsage;
         opsLog.info(`Build: ${output.devops?.buildStatus}, Run: ${output.devops?.runStatus}`);
@@ -956,40 +1453,134 @@ export async function devopsNode(state: ProjectStateType): Promise<Partial<Proje
         transcript.push(msg('devops', 'devops', `DevOps agent failed: ${err.message}`));
     }
 
+    // ── Verify deployment for real (fixes A5) ────────────────────────────
+    if (DEVOPS_VERIFY_ENABLED) {
+        const verified = await verifyDeployment(state.workspacePath, path.basename(state.workspacePath));
+        if (verified.buildStatus !== 'skipped') {
+            if (output.devops?.buildStatus !== verified.buildStatus) {
+                opsLog.warn(`DevOps agent reported buildStatus='${output.devops?.buildStatus}' but the real build was '${verified.buildStatus}' — using the verified value`);
+            }
+            output.devops = { ...output.devops, ...verified };
+        }
+        verifiedContainers = verified.containerNames;
+        transcript.push(msg('devops', 'devops', `Deployment verification: build=${verified.buildStatus}, run=${verified.runStatus}, services=${verified.serviceUrls.length}`));
+    }
+
+    const artifactContent = [
+        `## Build Status: ${output.devops?.buildStatus ?? 'unknown'}`,
+        `## Run Status: ${output.devops?.runStatus ?? 'unknown'}`,
+        `\n## Services\n\n${(output.devops?.serviceUrls ?? []).map((s: any) => `- **${s.service}**: ${s.url}`).join('\n')}`,
+        `\n## Health Checks\n\n${(output.devops?.healthChecks ?? []).map((h: any) => `- ${h.service}: ${h.status}`).join('\n')}`,
+    ];
+    if (DEVOPS_VERIFY_ENABLED && output.devops?.logs) {
+        artifactContent.push(`\n## Verification Logs\n\n\`\`\`\n${output.devops.logs}\n\`\`\``);
+    }
+
     const artifact = writeArtifact({
         agentId: 'devops', colorCode: 33, workspacePath: state.workspacePath,
         title: 'DevOps Mission Report',
-        content: [
-            `## Build Status: ${output.devops?.buildStatus ?? 'unknown'}`,
-            `## Run Status: ${output.devops?.runStatus ?? 'unknown'}`,
-            `\n## Services\n\n${(output.devops?.serviceUrls ?? []).map((s: any) => `- **${s.service}**: ${s.url}`).join('\n')}`,
-            `\n## Health Checks\n\n${(output.devops?.healthChecks ?? []).map((h: any) => `- ${h.service}: ${h.status}`).join('\n')}`,
-        ].join('\n'),
+        content: artifactContent.join('\n'),
     });
 
-    // B11: Commit DevOps-generated files to the system branch
+    // Commit DevOps-generated files via the shared helper (includes sync + retry)
     const devopsSlug = path.basename(state.workspacePath);
-    gitExec(state.workspacePath, 'add .');
-    const devopsStatus = gitExec(state.workspacePath, 'status --short');
-    if (devopsStatus && !devopsStatus.includes('nothing to commit')) {
-        gitExec(state.workspacePath, `commit -m "[${devopsSlug}]-chore: DevOps configuration files"`);
-        const currentBranch = gitExec(state.workspacePath, 'rev-parse --abbrev-ref HEAD');
-        if (currentBranch && !currentBranch.startsWith('Error:')) {
-            gitPush(state.workspacePath, currentBranch, state.gitContext);
-            opsLog.info(`Committed and pushed DevOps files on ${currentBranch}`);
-        }
-    }
+    commitAndPushArtifacts(
+        state.workspacePath,
+        `[${devopsSlug}]-chore: DevOps configuration files`,
+        state.gitContext,
+        opsLog,
+    );
 
     transcript.push(msg('devops', 'devops', `Build: ${output.devops?.buildStatus ?? 'unknown'}, Run: ${output.devops?.runStatus ?? 'unknown'}`));
 
+    emitRunEvent('phase:end', { phase: 'devops', nextPhase: 'e2e', buildStatus: output.devops?.buildStatus ?? 'unknown' });
     return {
+        ...rerunUpdate,
         devopsPlan: output.devops,
         fileChanges: output.fileChanges ?? [],
-        phase: 'finalize' as PhaseName,
+        runningContainers: verifiedContainers,
+        phase: 'e2e' as PhaseName,
         artifacts: [artifact],
         transcript,
         tokenUsage: tokenUsage ? [tokenUsage] : [],
     };
+}
+
+// ─── 9b. E2E Testing ────────────────────────────────────────────────────────
+
+const e2eLog = getLogger('[QA E2E]', 118);
+
+export async function e2eNode(state: ProjectStateType): Promise<Partial<ProjectStateType>> {
+    emitRunEvent('phase:start', { phase: 'e2e' });
+    const rerunUpdate = checkRerun(state, 'e2e', e2eLog);
+    e2eLog.info('Starting E2E testing phase...');
+    const transcript: TranscriptMessage[] = [];
+    const e2eTokenUsage: TokenCallRecord[] = [];
+
+    // Gate: only run if DevOps produced service URLs
+    if (!state.devopsPlan?.serviceUrls || state.devopsPlan.serviceUrls.length === 0) {
+        const reason = !DEVOPS_VERIFY_ENABLED
+            ? 'DEVOPS_VERIFY_ENABLED=false — no services were started'
+            : 'no service URLs from DevOps — deployment did not produce running services';
+        e2eLog.info(`Skipping E2E tests — ${reason}`);
+        transcript.push(msg('qa-e2e', 'e2e', `Skipped — ${reason}`));
+        emitRunEvent('phase:end', { phase: 'e2e', nextPhase: 'finalize', skipped: true, reason });
+        return {
+            phase: 'finalize' as PhaseName,
+            transcript,
+            tokenUsage: e2eTokenUsage,
+        };
+    }
+
+    e2eLog.info(`Running E2E tests against ${state.devopsPlan.serviceUrls.length} service(s)...`);
+    let e2eReport = null;
+    const allBugs: Bug[] = [];
+
+    try {
+        const apiKey = await getAccessToken();
+        const qaConventionFiles = resolveConventionFiles([], state.techStack);
+        const mcpTools = await getPlaywrightMcpTools();
+        const qaE2eAgent = createQaE2eAgent(apiKey, mcpTools, qaConventionFiles);
+        const e2eMsg = [
+            `## Test Plan (e2e)\n\n${JSON.stringify(state.testPlan?.e2e ?? [], null, 2)}`,
+            `\n## Service URLs\n\n${JSON.stringify(state.devopsPlan.serviceUrls, null, 2)}`,
+        ].join('\n');
+        const { output: e2eOutput, tokenUsage: e2eTU } = await invokeAgent(qaE2eAgent, e2eMsg, 'qa-e2e', 'qa-e2e', 'e2e', { recursionLimit: TOOL_PIPELINE_RECURSION_LIMIT, schema: QaE2eOutputSchema });
+        if (e2eTU) e2eTokenUsage.push(e2eTU);
+        e2eReport = e2eOutput.testReport;
+        if (e2eOutput.bugs) allBugs.push(...e2eOutput.bugs);
+        e2eLog.info(`E2E tests: ${e2eReport?.passed ?? 0} passed, ${e2eReport?.failed ?? 0} failed`);
+
+        const e2eArtifact = writeArtifact({
+            agentId: 'qa-e2e', colorCode: 118, workspacePath: state.workspacePath,
+            title: 'QA E2E — Test Report',
+            content: `## Results\n\n${JSON.stringify(e2eReport, null, 2)}`,
+        });
+        transcript.push(msg('qa-e2e', 'e2e', `E2E tests: ${e2eReport?.passed ?? 0}/${e2eReport?.total ?? 0} passed`));
+        await closePlaywrightMcp();
+
+        emitRunEvent('phase:end', { phase: 'e2e', nextPhase: 'finalize' });
+        return {
+            ...rerunUpdate,
+            testReports: e2eReport ? [e2eReport] : [],
+            bugs: allBugs,
+            artifacts: [e2eArtifact],
+            phase: 'finalize' as PhaseName,
+            transcript,
+            tokenUsage: e2eTokenUsage,
+        };
+    } catch (err: any) {
+        e2eLog.error(`E2E testing failed: ${err.message}`);
+        if (err?.stack) e2eLog.error(err.stack);
+        transcript.push(msg('qa-e2e', 'e2e', `E2E testing failed: ${err.message}`));
+        emitRunEvent('phase:end', { phase: 'e2e', nextPhase: 'finalize', error: err.message });
+        return {
+            ...rerunUpdate,
+            phase: 'finalize' as PhaseName,
+            transcript,
+            tokenUsage: e2eTokenUsage,
+        };
+    }
 }
 
 // ─── 10. Finalize ───────────────────────────────────────────────────────────
@@ -997,10 +1588,23 @@ export async function devopsNode(state: ProjectStateType): Promise<Partial<Proje
 const finalLog = getLogger('[Finalize]', 46);
 
 export async function finalizeNode(state: ProjectStateType): Promise<Partial<ProjectStateType>> {
+    emitRunEvent('phase:start', { phase: 'finalize' });
     finalLog.info('Finalizing run...');
 
-    // ── Mark run as completed ────────────────────────────────────────────
-    tokenTracker.setRunStatus('completed');
+    // ── Tear down containers started by deployment verification ──────────
+    if (DEVOPS_TEARDOWN && state.runningContainers && state.runningContainers.length > 0) {
+        try {
+            await teardownDeployment(state.workspacePath, state.runningContainers);
+            finalLog.info(`Tore down ${state.runningContainers.length} container(s)`);
+        } catch (err: any) {
+            finalLog.warn(`Container teardown failed: ${err.message}`);
+        }
+    }
+
+    // ── Mark run as completed (or cancelled if HITL denied) ───────────────
+    const finalStatus = state.cancelled ? 'cancelled' : 'completed';
+    tokenTracker.setRunStatus(finalStatus);
+    if (state.cancelled) finalLog.warn('Run was cancelled by HITL deny.');
 
     // ── Token usage summary ─────────────────────────────────────────────
     const usageSummary = tokenTracker.getRunSummary();
@@ -1029,10 +1633,67 @@ export async function finalizeNode(state: ProjectStateType): Promise<Partial<Pro
     summary.push(
         `Requests: ${throttle.total}, rate-limited: ${throttle.rateLimited}, total cooldown: ${(throttle.cooldownMsTotal / 1000).toFixed(0)}s`,
     );
+    summary.push('');
+    summary.push(`── Output Validation ──`);
+    const valStats = getValidationStats();
+    summary.push(
+        `Validated: ${valStats.validated}, repaired: ${valStats.repaired}, failed: ${valStats.failed}`,
+    );
+    summary.push('');
+    summary.push(`── Context ──`);
+    const ctxStats = getContextStats();
+    const ctxPhases = Object.entries(ctxStats);
+    if (ctxPhases.length > 0) {
+        const totalCtx = ctxPhases.reduce((sum, [, chars]) => sum + chars, 0);
+        summary.push(`Total context chars sent: ${totalCtx.toLocaleString()}`);
+        for (const [phase, chars] of ctxPhases) {
+            summary.push(`  ${phase}: ${chars.toLocaleString()} chars`);
+        }
+        summary.push(`Compact mode: ${CONTEXT_COMPACT ? 'enabled' : 'disabled'}`);
+    } else {
+        summary.push('No context stats recorded');
+    }
+    summary.push('');
+    summary.push(`── Budget ──`);
+    const budget = getBudgetStatus();
+    summary.push(
+        `Tokens: ${budget.usedTokens.toLocaleString()} / ${budget.maxTokens === 0 ? 'unlimited' : budget.maxTokens.toLocaleString()}`,
+    );
+    summary.push(
+        `Estimated cost: $${budget.estCostUsd.toFixed(4)} / ${budget.maxCostUsd === 0 ? 'unlimited' : '$' + budget.maxCostUsd.toFixed(2)}`,
+    );
+    summary.push(
+        `Wall clock: ${(budget.elapsedMs / 1000).toFixed(0)}s / ${budget.maxWallMs === 0 ? 'unlimited' : (budget.maxWallMs / 1000).toFixed(0) + 's'}`,
+    );
+    summary.push(
+        `Final level: ${budget.level}, binding: ${budget.binding}, utilisation: ${(budget.utilisation * 100).toFixed(1)}%`,
+    );
+
+    // ── Requirements traceability ────────────────────────────────────────
+    let traceReport: ReturnType<typeof buildTraceabilityReport> | null = null;
+    try {
+        traceReport = buildTraceabilityReport(state);
+        const t = traceReport.totals;
+        summary.push('');
+        summary.push(`── AC Coverage ──`);
+        summary.push(
+            `AC coverage: ${t.verified}/${t.criteria} verified (${(t.coveragePct * 100).toFixed(0)}%), ${t.implemented} implemented-untested, ${t.missing} missing`,
+        );
+        if (traceReport.orphanedStories.length > 0) {
+            summary.push(`Orphaned stories: ${traceReport.orphanedStories.join(', ')}`);
+        }
+        if (traceReport.orphanedAssignments.length > 0) {
+            summary.push(`Orphaned assignments: ${traceReport.orphanedAssignments.join(', ')}`);
+        }
+    } catch (traceErr: any) {
+        finalLog.warn(`Traceability report failed (non-fatal): ${traceErr.message}`);
+    }
+
     const summaryText = summary.join('\n');
 
     finalLog.info(`\n${summaryText}`);
     logThrottleStats();
+    logValidationStats();
 
     // Write final summary artifact
     writeArtifact({
@@ -1042,13 +1703,6 @@ export async function finalizeNode(state: ProjectStateType): Promise<Partial<Pro
         title: 'Run Summary',
         content: summaryText,
     });
-
-    // ── Cost estimation helper ────────────────────────────────────────────
-    function estimateCost(model: string, inputTokens: number, outputTokens: number): number {
-        const pricing = MODEL_PRICING[model];
-        if (!pricing) return 0;
-        return (inputTokens / 1000) * pricing.inputPer1k + (outputTokens / 1000) * pricing.outputPer1k;
-    }
 
     // ── Token usage report artifact ─────────────────────────────────────
     let totalEstimatedCost = 0;
@@ -1129,16 +1783,51 @@ export async function finalizeNode(state: ProjectStateType): Promise<Partial<Pro
         content: usageReportLines.join('\n'),
     });
 
+    // ── Requirements traceability artifact ─────────────────────────────
+    if (traceReport) {
+        const traceMd = renderTraceabilityMarkdown(traceReport);
+        writeArtifact({
+            agentId: 'conductor',
+            colorCode: 183,
+            workspacePath: state.workspacePath,
+            title: 'Requirements Traceability Matrix',
+            content: traceMd,
+        });
+        // Write to outputs/<run>/traceability.md
+        try {
+            const tracePath = path.join(state.outputPath, 'traceability.md');
+            fs.writeFileSync(tracePath, traceMd, 'utf-8');
+            finalLog.info(`Traceability matrix: ${tracePath}`);
+        } catch (err: any) {
+            finalLog.warn(`Failed to write traceability.md: ${err.message}`);
+        }
+    }
+
     // ── HTML token usage report + raw JSON ──────────────────────────────
     const { jsonPath, htmlPath } = generateTokenReport(
         usageSnapshot,
         state.outputPath,
         state.input.systemName,
-        'completed',
+        finalStatus,
     );
     finalLog.info(`Token usage JSON: ${jsonPath}`);
     finalLog.info(`Token usage HTML report: ${htmlPath}`);
 
+    // ── Write state snapshot and run manifest ─────────────────────────────
+    writeStateSnapshot(state.outputPath, state);
+    writeRunManifest(state.outputPath, state, finalStatus, {
+        traceability: traceReport ? {
+            criteria: traceReport.totals.criteria,
+            verified: traceReport.totals.verified,
+            implemented: traceReport.totals.implemented,
+            missing: traceReport.totals.missing,
+            coveragePct: traceReport.totals.coveragePct,
+            orphanedStories: traceReport.orphanedStories,
+            orphanedAssignments: traceReport.orphanedAssignments,
+        } : undefined,
+    });
+
+    emitRunEvent('phase:end', { phase: 'finalize', totalTokens: usageSummary.totalTokens, totalCalls: usageSummary.totalCalls });
     return {
         phase: 'finalize' as PhaseName,
         tokenUsage: usageSnapshot,
