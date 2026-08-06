@@ -765,6 +765,10 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                     break;
                 }
 
+                // ── Sequential per-reviewer passes: review → fix → next reviewer ──
+                // Each reviewer sees the code after the previous reviewer's
+                // comments have been addressed, avoiding duplicate observations
+                // and saving tokens.
                 for (const reviewerId of pendingReviewers) {
                     const reviewerEntry = getDevAgent(reviewerId);
                     if (!reviewerEntry) {
@@ -778,15 +782,18 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                     const reviewerConventions = resolveConventionFiles(reviewerEntry.languages, techStack);
                     const reviewerAgent = buildReviewerAgent(apiKey, reviewerEntry, worktreeWorkspace, gitContext, baseBranch, reviewerConventions);
 
+                    // Refresh diff for each reviewer so they see code after prior fixes
+                    const freshDiff = gitExec(worktreeWorkspace, `diff ${baseBranch}...${branchName} -- . ${DIFF_EXCLUDE_SPECS}`);
+
                     // B6: Context-aware diff truncation with stat fallback
                     let truncatedDiff: string;
-                    if (prDiff.length <= MAX_DIFF_CHARS) {
-                        truncatedDiff = prDiff;
+                    if (freshDiff.length <= MAX_DIFF_CHARS) {
+                        truncatedDiff = freshDiff;
                     } else {
                         // Diff too large — provide stat summary and instruct to use per-file tools
                         const diffStat = gitExec(worktreeWorkspace, `diff --stat ${baseBranch}...${branchName} -- . ${DIFF_EXCLUDE_SPECS}`);
                         truncatedDiff = [
-                            `[DIFF TOO LARGE — ${prDiff.length} chars. Showing file summary instead]\n`,
+                            `[DIFF TOO LARGE — ${freshDiff.length} chars. Showing file summary instead]\n`,
                             diffStat,
                             `\nUse the "git_diff_file" tool with a specific file path to review individual files.`,
                             `Use the "git_diff_stat" tool to see the full list of changed files.`,
@@ -899,6 +906,84 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                         });
 
                         allTranscript.push(msg(reviewerId, `Review: ${reviewOutput.status} — ${reviewOutput.summary?.slice(0, 100)}`));
+
+                        // ── Sequential fix: address this reviewer's comments
+                        //    before the next reviewer sees the code ────────────
+                        if (reviewOutput.status === 'changes_requested' && iteration < effectiveReviewLimit) {
+                            const thisReviewerComments = (reviewOutput.comments ?? [])
+                                .map((c: any) => ({
+                                    reviewer: reviewerId,
+                                    file: c.filePath,
+                                    line: c.line,
+                                    comment: c.body,
+                                    severity: c.severity,
+                                }))
+                                .filter((c: any) => {
+                                    const key = `${(c.file ?? '').toLowerCase()}::${(c.comment ?? '').slice(0, 100).toLowerCase()}`;
+                                    if (seenCommentKeys.has(key)) return false;
+                                    seenCommentKeys.add(key);
+                                    return true;
+                                });
+
+                            if (thisReviewerComments.length > 0) {
+                                const primaryDevId = assignments[0].devAgentId;
+                                const primaryEntry = getDevAgent(primaryDevId);
+                                if (primaryEntry) {
+                                    const devLog = getLogger(primaryEntry.tag, primaryEntry.colorCode);
+                                    devLog.info(`Fixing ${thisReviewerComments.length} review comments from ${reviewerId}...`);
+
+                                    const fixConventions = resolveConventionFiles(primaryEntry.languages, techStack);
+                                    const fixAgent = buildDevAgent(apiKey, primaryEntry, worktreeWorkspace, gitContext, baseBranch, fixConventions);
+                                    const fixMsg = [
+                                        contextPrompt,
+                                        `\n## Project Slug: ${projectSlug}`,
+                                        `\n## Your Branch: ${branchName}`,
+                                        `\nYou are already on this branch. Do NOT switch branches. Fix the review comments below.`,
+                                        `\n## IMPORTANT: Workspace Context`,
+                                        `Your current working directory IS the project root.`,
+                                        `Do NOT prefix paths with "generated-projects/${projectSlug}/" — all file operations are relative to the project root.`,
+                                        `\n## Review Comments to Fix\n\n${JSON.stringify(thisReviewerComments, null, 2)}`,
+                                        `\n## Instructions`,
+                                        `Address ALL review comments. For each comment:`,
+                                        `1. Read the file and understand the issue.`,
+                                        `2. Make the fix.`,
+                                        `3. Commit with a message like "fix: address review comment — <description>".`,
+                                        `4. Push when done.`,
+                                    ].join('\n');
+
+                                    try {
+                                        const fixModel = getModelForRank(primaryEntry.rank as DevRank);
+                                        const { output: fixOutput, tokenUsage: fixTokenUsage } = await invokeDevAgent(
+                                            fixAgent, fixMsg, `fix-${primaryEntry.id}-${reviewerId}-iter${iteration}`,
+                                            primaryEntry.id, fixModel,
+                                        );
+                                        if (fixTokenUsage) allTokenUsage.push(fixTokenUsage);
+                                        if (fixOutput.fileChanges) allFileChanges.push(...fixOutput.fileChanges);
+                                        devLog.info(`Fix complete: ${fixOutput.fileChanges?.length ?? 0} changes (from ${reviewerId})`);
+                                        allTranscript.push(msg(primaryDevId, `Fixed ${fixOutput.fileChanges?.length ?? 0} files from ${reviewerId}'s review`));
+
+                                        // Ensure pushed
+                                        gitExec(worktreeWorkspace, 'add .');
+                                        const fixStatus = gitExec(worktreeWorkspace, 'status --short');
+                                        if (fixStatus && !fixStatus.includes('nothing to commit')) {
+                                            gitExec(worktreeWorkspace, `commit -m "[${projectSlug}]-[${primaryStoryId}]-fix: address ${reviewerId} review (iteration ${iteration})"`);
+                                        }
+                                        gitPush(worktreeWorkspace, branchName, gitContext);
+                                    } catch (fixErr: any) {
+                                        log.error(`Fix attempt for ${reviewerId}'s comments failed: ${fixErr.message}`);
+                                        allTranscript.push(msg(primaryDevId, `Fix failed for ${reviewerId}: ${fixErr.message}`));
+                                        // Rate-limit handling
+                                        if (fixErr.message?.includes('429') || fixErr.message?.includes('rate limit') || fixErr.message?.includes('Rate limit') || fixErr.message?.includes('Request limit')) {
+                                            if (fixRateLimitRetries < MAX_FIX_RATE_LIMIT_RETRIES) {
+                                                fixRateLimitRetries++;
+                                                log.warn(`Rate-limited fix (retry ${fixRateLimitRetries}/${MAX_FIX_RATE_LIMIT_RETRIES}) — waiting`);
+                                                await new Promise(r => setTimeout(r, 30_000));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     } catch (err: any) {
                         log.error(`Reviewer ${reviewerId} failed: ${err.message}`);
                         allTranscript.push(msg(reviewerId, `Review failed: ${err.message}`));
@@ -920,117 +1005,97 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                 }
             } // end if (!skipReviewPhase)
 
-            // ── Fix requested changes ───────────────────────────────────
+            // ── Fix requested changes (skipReviewPhase fallback) ─────────
             // When skipReviewPhase is true, re-use the comments from the most
             // recent iteration that actually produced reviews — the previous
             // iteration may itself have been a skipped one.
-            const lastReviewedIteration = allReviews.reduce((m, r) => Math.max(m, r.iteration), 0);
-            const changesRequested = skipReviewPhase
-                ? allReviews
+            // In normal flow, fixes already happen per-reviewer above; this block
+            // only runs for no-progress retries.
+            if (skipReviewPhase) {
+                const lastReviewedIteration = allReviews.reduce((m, r) => Math.max(m, r.iteration), 0);
+                const changesRequested = allReviews
                     .filter(r => r.iteration === lastReviewedIteration && r.status === 'changes_requested')
-                    .map(r => ({ reviewerId: r.reviewerId, output: { status: 'changes_requested' as const, summary: '', comments: r.comments } }))
-                : reviewResults.filter(r => r.output.status === 'changes_requested');
-            if (changesRequested.length > 0 && iteration < effectiveReviewLimit) {
-                log.info(`${changesRequested.length} reviewer(s) requested changes. Re-invoking dev agent(s)...`);
+                    .map(r => ({ reviewerId: r.reviewerId, output: { status: 'changes_requested' as const, summary: '', comments: r.comments } }));
+                if (changesRequested.length > 0 && iteration < effectiveReviewLimit) {
+                    log.info(`${changesRequested.length} reviewer(s) requested changes (no-progress retry). Re-invoking dev agent(s)...`);
 
-                const requestedComments = changesRequested.flatMap(r =>
-                    (r.output.comments ?? []).map((c: any) => ({
-                        reviewer: r.reviewerId,
-                        file: c.filePath,
-                        line: c.line,
-                        comment: c.body,
-                        severity: c.severity,
-                    }))
-                );
+                    // On a no-progress retry the comments are deliberately the same
+                    // ones the failed fix attempt was given, so dedup is skipped.
+                    const requestedComments = changesRequested.flatMap(r =>
+                        (r.output.comments ?? []).map((c: any) => ({
+                            reviewer: r.reviewerId,
+                            file: c.filePath,
+                            line: c.line,
+                            comment: c.body,
+                            severity: c.severity,
+                        }))
+                    );
 
-                // Collect all review comments, deduplicating across iterations.
-                // On a no-progress retry the comments are deliberately the same
-                // ones the failed fix attempt was given, so dedup is skipped —
-                // otherwise the retry would find nothing to do.
-                const allComments = skipReviewPhase
-                    ? requestedComments
-                    : requestedComments.filter(c => {
-                        const key = `${(c.file ?? '').toLowerCase()}::${(c.comment ?? '').slice(0, 100).toLowerCase()}`;
-                        if (seenCommentKeys.has(key)) return false;
-                        seenCommentKeys.add(key);
-                        return true;
-                    });
+                    if (requestedComments.length > 0) {
+                        const primaryDevId = assignments[0].devAgentId;
+                        const primaryEntry = getDevAgent(primaryDevId);
+                        if (primaryEntry) {
+                            const devLog = getLogger(primaryEntry.tag, primaryEntry.colorCode);
+                            devLog.info(`Fixing ${requestedComments.length} review comments (no-progress retry)...`);
 
-                // If all comments are duplicates of prior iterations, treat as approved
-                if (allComments.length === 0) {
-                    log.info('All review comments are duplicates of prior iterations — treating as approved');
-                    prStatus = 'approved';
-                    break;
-                }
+                            const fixConventions = resolveConventionFiles(primaryEntry.languages, techStack);
+                            const fixAgent = buildDevAgent(apiKey, primaryEntry, worktreeWorkspace, gitContext, baseBranch, fixConventions);
+                            const fixMsg = [
+                                contextPrompt,
+                                `\n## Project Slug: ${projectSlug}`,
+                                `\n## Your Branch: ${branchName}`,
+                                `\nYou are already on this branch. Do NOT switch branches. Fix the review comments below.`,
+                                `\n## IMPORTANT: Workspace Context`,
+                                `Your current working directory IS the project root.`,
+                                `Do NOT prefix paths with "generated-projects/${projectSlug}/" — all file operations are relative to the project root.`,
+                                `\n## Review Comments to Fix\n\n${JSON.stringify(requestedComments, null, 2)}`,
+                                `\n## Instructions`,
+                                `Address ALL review comments. For each comment:`,
+                                `1. Read the file and understand the issue.`,
+                                `2. Make the fix.`,
+                                `3. Commit with a message like "fix: address review comment — <description>".`,
+                                `4. Push when done.`,
+                            ].join('\n');
 
-                // Re-invoke the primary dev agent with the review comments
-                const primaryDevId = assignments[0].devAgentId;
-                const primaryEntry = getDevAgent(primaryDevId);
-                if (primaryEntry) {
-                    const devLog = getLogger(primaryEntry.tag, primaryEntry.colorCode);
-                    devLog.info(`Fixing ${allComments.length} review comments...`);
+                            try {
+                                const fixModel = getModelForRank(primaryEntry.rank as DevRank);
+                                const { output: fixOutput, tokenUsage: fixTokenUsage } = await invokeDevAgent(fixAgent, fixMsg, `fix-${primaryEntry.id}-iter${iteration}`, primaryEntry.id, fixModel);
+                                if (fixTokenUsage) allTokenUsage.push(fixTokenUsage);
+                                if (fixOutput.fileChanges) allFileChanges.push(...fixOutput.fileChanges);
+                                devLog.info(`Fix complete: ${fixOutput.fileChanges?.length ?? 0} changes`);
+                                allTranscript.push(msg(primaryDevId, `Fixed ${fixOutput.fileChanges?.length ?? 0} files based on review comments`));
 
-                    const fixConventions = resolveConventionFiles(primaryEntry.languages, techStack);
-                    const fixAgent = buildDevAgent(apiKey, primaryEntry, worktreeWorkspace, gitContext, baseBranch, fixConventions);
-                    const fixMsg = [
-                        contextPrompt,
-                        `\n## Project Slug: ${projectSlug}`,
-                        `\n## Your Branch: ${branchName}`,
-                        `\nYou are already on this branch. Do NOT switch branches. Fix the review comments below.`,
-                        `\n## IMPORTANT: Workspace Context`,
-                        `Your current working directory IS the project root.`,
-                        `Do NOT prefix paths with "generated-projects/${projectSlug}/" — all file operations are relative to the project root.`,
-                        `\n## Review Comments to Fix\n\n${JSON.stringify(allComments, null, 2)}`,
-                        `\n## Instructions`,
-                        `Address ALL review comments. For each comment:`,
-                        `1. Read the file and understand the issue.`,
-                        `2. Make the fix.`,
-                        `3. Commit with a message like "fix: address review comment — <description>".`,
-                        `4. Push when done.`,
-                    ].join('\n');
-
-                    try {
-                        const fixModel = getModelForRank(primaryEntry.rank as DevRank);
-                        const { output: fixOutput, tokenUsage: fixTokenUsage } = await invokeDevAgent(fixAgent, fixMsg, `fix-${primaryEntry.id}-iter${iteration}`, primaryEntry.id, fixModel);
-                        if (fixTokenUsage) allTokenUsage.push(fixTokenUsage);
-                        if (fixOutput.fileChanges) allFileChanges.push(...fixOutput.fileChanges);
-                        devLog.info(`Fix complete: ${fixOutput.fileChanges?.length ?? 0} changes`);
-                        allTranscript.push(msg(primaryDevId, `Fixed ${fixOutput.fileChanges?.length ?? 0} files based on review comments`));
-
-                        // Ensure pushed
-                        gitExec(worktreeWorkspace, 'add .');
-                        const fixStatus = gitExec(worktreeWorkspace, 'status --short');
-                        if (fixStatus && !fixStatus.includes('nothing to commit')) {
-                            gitExec(worktreeWorkspace, `commit -m "[${projectSlug}]-[${primaryStoryId}]-fix: address review comments (iteration ${iteration})"`);
-                        }
-                        gitPush(worktreeWorkspace, branchName, gitContext);
-                    } catch (err: any) {
-                        log.error(`Fix attempt failed: ${err.message}`);
-                        // ── Bounded rate-limit retry (Change 2) ─────────────
-                        if (err.message?.includes('429') || err.message?.includes('rate limit') || err.message?.includes('Rate limit') || err.message?.includes('Request limit')) {
-                            if (fixRateLimitRetries < MAX_FIX_RATE_LIMIT_RETRIES) {
-                                fixRateLimitRetries++;
-                                log.warn(`Rate-limited fix (retry ${fixRateLimitRetries}/${MAX_FIX_RATE_LIMIT_RETRIES}) — waiting before the next iteration`);
-                                await new Promise(r => setTimeout(r, 30_000));
-                            } else {
-                                log.warn('Fix step exhausted its rate-limit retries — ending review loop.');
-                                break;
+                                // Ensure pushed
+                                gitExec(worktreeWorkspace, 'add .');
+                                const fixStatus = gitExec(worktreeWorkspace, 'status --short');
+                                if (fixStatus && !fixStatus.includes('nothing to commit')) {
+                                    gitExec(worktreeWorkspace, `commit -m "[${projectSlug}]-[${primaryStoryId}]-fix: address review comments (iteration ${iteration})"`);
+                                }
+                                gitPush(worktreeWorkspace, branchName, gitContext);
+                            } catch (err: any) {
+                                log.error(`Fix attempt failed: ${err.message}`);
+                                if (err.message?.includes('429') || err.message?.includes('rate limit') || err.message?.includes('Rate limit') || err.message?.includes('Request limit')) {
+                                    if (fixRateLimitRetries < MAX_FIX_RATE_LIMIT_RETRIES) {
+                                        fixRateLimitRetries++;
+                                        log.warn(`Rate-limited fix (retry ${fixRateLimitRetries}/${MAX_FIX_RATE_LIMIT_RETRIES}) — waiting before the next iteration`);
+                                        await new Promise(r => setTimeout(r, 30_000));
+                                    } else {
+                                        log.warn('Fix step exhausted its rate-limit retries — ending review loop.');
+                                        break;
+                                    }
+                                }
+                                if (err.message?.includes('recursion limit') || err.message?.includes('Recursion limit')) {
+                                    log.warn(`Recursion limit hit in fix attempt — will retry with fresh agent next iteration`);
+                                    allTranscript.push(msg(primaryDevId, `Fix hit recursion limit (iteration ${iteration}), will retry`));
+                                }
+                                if (err.message?.includes('Already borrowed')) {
+                                    log.warn(`Non-retriable error in fix attempt — skipping remaining fix iterations`);
+                                    allTranscript.push(msg(primaryDevId, `Fix skipped (non-retriable): ${err.message}`));
+                                    break;
+                                }
+                                allTranscript.push(msg(primaryDevId, `Fix failed: ${err.message}`));
                             }
                         }
-                        // Recursion limit: the agent ran out of steps, but a fresh
-                        // agent in the next review iteration gets a fresh budget.
-                        // Log and continue rather than aborting all remaining iterations.
-                        if (err.message?.includes('recursion limit') || err.message?.includes('Recursion limit')) {
-                            log.warn(`Recursion limit hit in fix attempt — will retry with fresh agent next iteration`);
-                            allTranscript.push(msg(primaryDevId, `Fix hit recursion limit (iteration ${iteration}), will retry`));
-                        }
-                        // Truly non-retriable errors (state corruption): abort fix loop
-                        if (err.message?.includes('Already borrowed')) {
-                            log.warn(`Non-retriable error in fix attempt — skipping remaining fix iterations`);
-                            allTranscript.push(msg(primaryDevId, `Fix skipped (non-retriable): ${err.message}`));
-                            break;
-                        }
-                        allTranscript.push(msg(primaryDevId, `Fix failed: ${err.message}`));
                     }
                 }
             }

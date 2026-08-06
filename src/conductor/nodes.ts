@@ -172,7 +172,21 @@ function commitAndPushArtifacts(
 
     gitExec(workspacePath, 'add .');
     const status = gitExec(workspacePath, 'status --short');
-    if (!status || status.includes('nothing to commit')) return;
+    if (!status || status.includes('nothing to commit')) {
+        // No new changes to commit, but check if we need to push existing commits
+        if (currentBranch && !currentBranch.startsWith('Error:')) {
+            const ahead = gitExec(workspacePath, `rev-list origin/${currentBranch}..HEAD --count`);
+            if (ahead && !ahead.startsWith('Error:') && parseInt(ahead.trim(), 10) > 0) {
+                const pushResult = gitPush(workspacePath, currentBranch, gitContext);
+                if (pushResult.startsWith('Error:')) {
+                    logger?.warn?.(`Push of existing commits failed: ${pushResult}`);
+                } else {
+                    logger?.info?.(`Pushed ${ahead.trim()} existing commit(s) on ${currentBranch}`);
+                }
+            }
+        }
+        return;
+    }
 
     gitExec(workspacePath, `commit -m "${commitMessage}"`);
     if (currentBranch && !currentBranch.startsWith('Error:')) {
@@ -189,6 +203,95 @@ function commitAndPushArtifacts(
             }
         } else {
             logger?.info?.(`Committed and pushed artifacts on ${currentBranch}`);
+        }
+    }
+}
+
+/**
+ * Ensure package-lock.json is in sync with package.json.
+ * If package.json exists but the lockfile is missing or stale, run `npm install`
+ * to regenerate it, then commit + push the result.
+ */
+function ensureNodeLockfileSync(
+    workspacePath: string,
+    systemBranch: string,
+    gitContext?: GitContext | null,
+    logger?: ReturnType<typeof getLogger>,
+): void {
+    const pkgPath = path.join(workspacePath, 'package.json');
+    if (!fs.existsSync(pkgPath)) return; // Not a Node.js project
+
+    logger?.info?.('Ensuring package-lock.json is in sync with package.json...');
+
+    try {
+        // Run npm install to regenerate lockfile
+        // Use --no-audit --no-fund to reduce noise
+        execSync('npm install --no-audit --no-fund', {
+            cwd: workspacePath,
+            timeout: 300_000, // 5 min
+            encoding: 'utf-8',
+            maxBuffer: 1024 * 1024 * 5,
+            env: { ...process.env, CI: 'true' },
+            stdio: ['pipe', 'pipe', 'pipe'],
+        });
+
+        // Check if lockfile was created/updated
+        const lockPath = path.join(workspacePath, 'package-lock.json');
+        if (fs.existsSync(lockPath)) {
+            // Stage and check for changes
+            gitExec(workspacePath, 'add package-lock.json');
+            const status = gitExec(workspacePath, 'status --short -- package-lock.json');
+            if (status && status.trim() && !status.includes('nothing to commit')) {
+                const slug = path.basename(workspacePath);
+                gitExec(workspacePath, `commit -m "[${slug}]-chore: sync package-lock.json"`);
+                const branch = gitExec(workspacePath, 'rev-parse --abbrev-ref HEAD');
+                if (branch && !branch.startsWith('Error:')) {
+                    gitPush(workspacePath, branch, gitContext);
+                }
+                logger?.info?.('package-lock.json synced and pushed');
+            } else {
+                logger?.info?.('package-lock.json already in sync');
+            }
+        }
+    } catch (err: any) {
+        logger?.warn?.(`Lockfile sync failed (non-fatal): ${err.message}`);
+    }
+}
+
+/**
+ * Ensure all Dockerfiles in the workspace have `npm config set strict-ssl false`
+ * before any `npm ci` or `npm install` RUN commands.
+ * This is a failsafe for corporate environments with self-signed SSL certificates.
+ */
+function patchDockerfilesSsl(workspacePath: string, logger?: ReturnType<typeof getLogger>): void {
+    const dockerfiles = ['Dockerfile'];
+    // Also look for Dockerfile.* variants
+    try {
+        const entries = fs.readdirSync(workspacePath);
+        for (const e of entries) {
+            if (e.startsWith('Dockerfile') && !dockerfiles.includes(e)) {
+                dockerfiles.push(e);
+            }
+        }
+    } catch { /* ignore */ }
+
+    for (const df of dockerfiles) {
+        const dfPath = path.join(workspacePath, df);
+        if (!fs.existsSync(dfPath)) continue;
+
+        let content = fs.readFileSync(dfPath, 'utf-8');
+        // Check if any RUN line has npm ci or npm install WITHOUT strict-ssl already set
+        const npmRunPattern = /^(RUN\s+(?:.*&&\s*)?)npm\s+(ci|install)\b/gm;
+        const sslAlready = /npm config set strict-ssl false/;
+
+        if (npmRunPattern.test(content) && !sslAlready.test(content)) {
+            // Inject `npm config set strict-ssl false && ` before `npm ci`/`npm install`
+            content = content.replace(
+                /npm\s+(ci|install)\b/g,
+                'npm config set strict-ssl false && npm $1',
+            );
+            fs.writeFileSync(dfPath, content, 'utf-8');
+            logger?.info?.(`Patched ${df}: added npm strict-ssl=false workaround`);
         }
     }
 }
@@ -1402,6 +1505,9 @@ export async function devopsNode(state: ProjectStateType): Promise<Partial<Proje
     const devopsSyncResult = syncWorkspaceToBranch(devopsGitRoot, state.systemBranch, state.gitContext);
     opsLog.info(`Workspace synced to origin/${state.systemBranch}: ${devopsSyncResult.details}`);
 
+    // ── Ensure Node.js lockfile is in sync before DevOps ─────────────────
+    ensureNodeLockfileSync(state.workspacePath, state.systemBranch, state.gitContext, opsLog);
+
     // Deploy only the convention files DevOps agent needs (fixes A11)
     const devopsConventionFiles = resolveConventionFiles([], state.techStack);
     deployConventionsToWorkspace(state.workspacePath, devopsConventionFiles);
@@ -1452,6 +1558,9 @@ export async function devopsNode(state: ProjectStateType): Promise<Partial<Proje
         if (err?.stack) opsLog.error(err.stack);
         transcript.push(msg('devops', 'devops', `DevOps agent failed: ${err.message}`));
     }
+
+    // ── Patch Dockerfiles for SSL (failsafe for self-signed certs) ────
+    patchDockerfilesSsl(state.workspacePath, opsLog);
 
     // ── Verify deployment for real (fixes A5) ────────────────────────────
     if (DEVOPS_VERIFY_ENABLED) {
