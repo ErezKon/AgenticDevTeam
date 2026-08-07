@@ -1,85 +1,76 @@
 # DBA Mission Report
 
 **Agent**: dba  
-**Generated**: 2026-08-07T13:00:10.419Z
+**Generated**: 2026-08-07T22:05:37.537Z
 
 ---
 
 ## Database Engine: PostgreSQL
 
-PostgreSQL provides strong ACID guarantees, rich data types, native UUID support, and powerful indexing options. It integrates seamlessly with FastAPI via async drivers (asyncpg) and fits the relational nature of the Battleship domain (players, games, ships, shots) while allowing future analytical queries (leaderboards, game statistics).
+PostgreSQL provides strong ACID guarantees, native UUID support, rich indexing options, and excellent Python integration via asyncpg/SQLAlchemy. It fits the FastAPI stack, is easy to run in Docker, and can scale later when the in‑memory state is moved to persistent storage.
 
-## Entities (6)
+## Entities (5)
 
-- **players**: 4 columns
-- **games**: 5 columns
-- **game_players**: 6 columns
-- **ships**: 8 columns
-- **ship_cells**: 6 columns
-- **shots**: 10 columns
+- **game**: 4 columns
+- **player**: 4 columns
+- **game_player**: 7 columns
+- **ship**: 11 columns
+- **shot**: 9 columns
 
 ## ERD
 
 ```mermaid
 erDiagram
-    players {
-        UUID id PK
-        VARCHAR name
-        TIMESTAMP created_at
-        TIMESTAMP updated_at
+    GAME {
+        UUID id PK "Primary key"
+        VARCHAR status "pending|in_progress|finished"
+        TIMESTAMPTZ created_at
+        TIMESTAMPTZ updated_at
     }
-    games {
+    PLAYER {
         UUID id PK
-        VARCHAR status
-        UUID winner_player_id FK
-        TIMESTAMP created_at
-        TIMESTAMP updated_at
+        VARCHAR display_name
+        TIMESTAMPTZ created_at
+        TIMESTAMPTZ updated_at
     }
-    game_players {
-        UUID id PK
-        UUID game_id FK
-        UUID player_id FK
-        INTEGER player_number
-        TIMESTAMP created_at
-        TIMESTAMP updated_at
+    GAME_PLAYER {
+        UUID game_id PK,Fk "References GAME.id"
+        UUID player_id PK,Fk "References PLAYER.id"
+        INTEGER turn_order
+        BOOLEAN is_current_turn
+        TIMESTAMPTZ created_at
+        TIMESTAMPTZ updated_at
     }
-    ships {
+    SHIP {
         UUID id PK
-        UUID game_id FK
-        UUID player_id FK
+        UUID game_id Fk "References GAME.id"
+        UUID player_id Fk "References PLAYER.id"
         VARCHAR type
         INTEGER size
-        TIMESTAMP placed_at
-        TIMESTAMP created_at
-        TIMESTAMP updated_at
+        VARCHAR orientation
+        INTEGER start_x
+        INTEGER start_y
+        TIMESTAMPTZ placed_at
+        TIMESTAMPTZ created_at
+        TIMESTAMPTZ updated_at
     }
-    ship_cells {
+    SHOT {
         UUID id PK
-        UUID ship_id FK
-        INTEGER x
-        INTEGER y
-        TIMESTAMP created_at
-        TIMESTAMP updated_at
-    }
-    shots {
-        UUID id PK
-        UUID game_id FK
-        UUID shooter_id FK
-        UUID target_player_id FK
+        UUID game_id Fk "References GAME.id"
+        UUID shooter_player_id Fk "References PLAYER.id"
+        UUID target_player_id Fk "References PLAYER.id"
         INTEGER x
         INTEGER y
         VARCHAR result
-        TIMESTAMP fired_at
-        TIMESTAMP created_at
-        TIMESTAMP updated_at
+        INTEGER turn_number
+        TIMESTAMPTZ created_at
     }
-    players ||--o{ game_players : "has"
-    games ||--o{ game_players : "contains"
-    games ||--o{ ships : "contains"
-    players ||--o{ ships : "owns"
-    ships ||--o{ ship_cells : "occupies"
-    games ||--o{ shots : "records"
-    players ||--o{ shots : "fires"
-    players ||--o{ shots : "receives"
+    GAME ||--o{ GAME_PLAYER : "has"
+    PLAYER ||--o{ GAME_PLAYER : "participates"
+    GAME_PLAYER ||--o{ SHIP : "places"
+    PLAYER ||--o{ SHIP : "owns"
+    GAME ||--o{ SHOT : "contains"
+    PLAYER ||--o{ SHOT : "fires"
+    PLAYER ||--o{ SHOT : "receives"
 
 ```
