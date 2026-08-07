@@ -11,10 +11,13 @@
     "test:backend": "pytest"
   },
   "dependencies": {
-    "vue": "^3.4.0"
+    "vue": "^3.4.0",
+    "vue-router": "^4.4.0",
+    "pinia": "^2.1.7"
   },
   "devDependencies": {
     "pinia": "^2.1.7",
+    "axios": "^1.7.2",
 
     "@vitejs/plugin-vue": "^5.0.0",
     "@vue/test-utils": "^2.4.0",

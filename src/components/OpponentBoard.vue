@@ -1,6 +1,6 @@
 <template>
   <div class="opponent-board">
-    <div class="grid" :style="{'--size': size}">
+    <div class="grid" :style="{'--size': size, '--cell-size': `${cellSize}px`}">
       <div
         v-for="cell in cells"
         :key="cell.id"
@@ -34,6 +34,11 @@ const props = defineProps({
     type: Number,
     default: 10,
     validator: (value: number) => Number.isInteger(value) && value > 0 && value <= 20,
+  },
+  cellSize: {
+    type: Number,
+    default: 30,
+    validator: (value: number) => Number.isInteger(value) && value > 0 && value <= 100,
   },
 });
 const emit = defineEmits<{
@@ -81,8 +86,8 @@ function onCellClick(cell: Cell) {
   gap: 2px;
 }
 .cell {
-  width: 30px;
-  height: 30px;
+  width: var(--cell-size);
+  height: var(--cell-size);
   background: #f0f0f0;
   display: flex;
   align-items: center;

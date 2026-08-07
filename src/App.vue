@@ -1,15 +1,12 @@
 <template>
   <div id="app">
-    <PlayerBoard :size="10" @place-ship="onPlaceShip" />
+    <!-- Router view for potential future routes -->
+    <router-view />
   </div>
 </template>
 
 <script setup lang="ts">
-import PlayerBoard from './components/PlayerBoard.vue';
-
-function onPlaceShip(payload: { coordinates: { x: number; y: number }[] }) {
-  console.log('Ship placed:', payload.coordinates);
-}
+// No direct store interaction here; Game view handles UI state.
 </script>
 
 <style>
