@@ -24,6 +24,22 @@ class Ship:
 
 @dataclass
 class Board:
+    def to_dict(self) -> dict:
+        """Return a dictionary representation of the board, including ships.
+        """
+        return {
+            "width": self.width,
+            "height": self.height,
+            "ships": [
+                {
+                    "type": ship.type,
+                    "size": ship.size,
+                    "coordinates": [list(coord) for coord in ship.coordinates],
+                }
+                for ship in self.ships
+            ],
+        }
+
     """Simple board representation.
 
     The board is a 2‑dimensional grid of size ``width`` x ``height``.
