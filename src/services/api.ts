@@ -24,7 +24,7 @@ export interface FirePayload {
   y: number;
 }
 
-export async function placeShip(payload: ShipPlacementPayload) {
+export async function placeShip(payload: { size: number; coordinates: Coordinate[] }) {
   try {
     const response = await api.post(`/place_ships`, payload);
     return response.data;
