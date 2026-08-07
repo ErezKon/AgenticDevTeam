@@ -12,6 +12,21 @@ from .state import get_state, GameState
 
 app = FastAPI(title="Game API Service")
 
+# Add CORS middleware to allow only the UI origin
+from fastapi.middleware.cors import CORSMiddleware
+
+# UI origin (adjust as needed for deployment)
+_ALLOWED_ORIGINS = ["http://localhost:8080"]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_ALLOWED_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
 def get_api_key(x_api_key: str = Header(None)):
     """Simple API key authentication.
     Bypasses auth when TEST_MODE env var is set (used for automated tests).
@@ -28,7 +43,8 @@ def get_api_key(x_api_key: str = Header(None)):
 router = APIRouter(dependencies=[Depends(get_api_key)])
 
 # Include router unconditionally (needed for test utilities)
-app.include_router(router)
+# Include router after defining routes
+# (FastAPI stub merges routes at call time, so we include after route definitions)
 
 # Placeholder route
 @app.get("/health")
@@ -141,3 +157,6 @@ async def fire_shot(
     if state.winner is None:
         state.current_turn = 2 if state.current_turn == 1 else 1
     return FireShotResponse(result=result, message=message)
+
+# Include router after all route definitions
+app.include_router(router)
