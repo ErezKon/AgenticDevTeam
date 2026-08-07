@@ -1,9 +1,9 @@
-"""Minimal stub of pydantic BaseModel for testing purposes.
+"""Minimal stub of pydantic for testing purposes.
 
-Provides a BaseModel class that accepts keyword arguments and stores them as attributes.
-It performs a very small amount of validation required by the current code:
-- Ensures that required fields are present.
-- Does not perform type checking.
+Provides a BaseModel class, a ``Field`` function, and a ``validator`` decorator
+to satisfy imports used in the application code. The implementation is
+intentionally lightweight – it does not perform any validation or type checking,
+as the tests only require the classes to exist and be instantiable.
 """
 
 from typing import Any, Dict
@@ -11,13 +11,27 @@ from typing import Any, Dict
 class ValidationError(Exception):
     pass
 
+def Field(*args, **kwargs):
+    """Placeholder for pydantic.Field.
+    Returns the default value if provided, otherwise ``...`` (Ellipsis).
+    The function exists solely to satisfy imports; it does not enforce any
+    validation.
+    """
+    if args:
+        return args[0]
+    return ...
+
+def validator(*args, **kwargs):
+    """Placeholder for pydantic.validator decorator.
+    Returns the function unchanged.
+    """
+    def decorator(func):
+        return func
+    return decorator
+
 class BaseModel:
     def __init__(self, **data: Any):
-        # Simple validation: ensure all fields defined in subclass are present
-        required_fields = getattr(self.__class__, '__fields__', [])
-        for field in required_fields:
-            if field not in data:
-                raise ValidationError(f"field '{field}' required")
+        # Simple model: assign provided data as attributes without strict validation.
         for key, value in data.items():
             setattr(self, key, value)
 

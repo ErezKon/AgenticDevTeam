@@ -14,6 +14,8 @@
     "vue": "^3.4.0"
   },
   "devDependencies": {
+    "pinia": "^2.1.7",
+
     "@vitejs/plugin-vue": "^5.0.0",
     "@vue/test-utils": "^2.4.0",
     "typescript": "^5.2.2",
