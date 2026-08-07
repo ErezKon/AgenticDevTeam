@@ -95,17 +95,32 @@ export function validateAgentOutput<T>(schema: z.ZodType<T>, parsed: unknown): V
 
 /**
  * Prompt text asking the agent to fix a specific set of schema violations.
+ *
+ * When `previousRaw` is supplied, the first 4,000 chars of the agent's
+ * last raw JSON attempt are included so the repair agent can correct rather
+ * than regenerate from scratch.
  */
-export function buildRepairMessage(issues: string, originalRequest: string): string {
-    return [
+export function buildRepairMessage(issues: string, originalRequest: string, previousRaw?: string): string {
+    const parts = [
         'Your previous response did not match the required JSON schema.',
         '',
         'Problems:',
         issues,
+    ];
+
+    if (previousRaw) {
+        const clipped = previousRaw.length > 4000
+            ? previousRaw.slice(0, 4000) + `\n... [${previousRaw.length - 4000} chars truncated]`
+            : previousRaw;
+        parts.push('', 'Your previous (invalid) JSON:', '```', clipped, '```');
+    }
+
+    parts.push(
         '',
         'Return the SAME information, corrected, as a single valid JSON object.',
         'Do not add commentary. Do not wrap it in markdown.',
-    ].join('\n');
+    );
+    return parts.join('\n');
 }
 
 // ─── Validation Stats (module-level singleton) ──────────────────────────────

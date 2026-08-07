@@ -7,11 +7,14 @@ import { createReactAgent } from '@langchain/langgraph/prebuilt';
 import { ChatOpenAI } from '@langchain/openai';
 import type { StructuredToolInterface } from '@langchain/core/tools';
 import { z } from 'zod';
-import { LLM_BASE_URL, LLM_MODEL, RESPONSE_SCHEMA_COMPACT } from '../../config';
+import type { BaseMessage } from '@langchain/core/messages';
+import { RunnableLambda } from '@langchain/core/runnables';
+import { LLM_BASE_URL, LLM_MODEL, RESPONSE_SCHEMA_COMPACT, RESPONSE_SCHEMA_STRIP_ALL_DESCRIPTIONS, HISTORY_COMPACTION_ENABLED } from '../../config';
 import { getAccessToken } from '../../utils/oauth-auth.util';
 import { throttledFetch } from '../../utils/llm-throttle';
 import { cassetteFetch, LLM_CASSETTE_MODE } from '../../utils/llm-cassette';
 import { withLoopGuard } from './tool-loop-guard';
+import { compactHistory, recordCompaction } from './history-compactor';
 import { TokenUsageCallbackHandler } from '../../utils/token-callback';
 import { getLogger } from '../../utils/logger';
 
@@ -83,7 +86,11 @@ export function buildAgent(apiKey: string, cfg: AgentConfig) {
     if (cfg.responseFormat) {
         const rawSchema = z.toJSONSchema(cfg.responseFormat);
         let jsonSchema: string;
-        if (RESPONSE_SCHEMA_COMPACT) {
+        if (RESPONSE_SCHEMA_STRIP_ALL_DESCRIPTIONS) {
+            // Strip ALL descriptions and noise for maximum token savings
+            const compacted = stripAllSchemaDescriptions(rawSchema);
+            jsonSchema = JSON.stringify(compacted);
+        } else if (RESPONSE_SCHEMA_COMPACT) {
             // Strip deep description fields and emit compact JSON to save tokens
             const compacted = stripDeepDescriptions(rawSchema, 0);
             jsonSchema = JSON.stringify(compacted);
@@ -93,14 +100,33 @@ export function buildAgent(apiKey: string, cfg: AgentConfig) {
         prompt += `\n\n<response_format>\nCRITICAL: Your final response MUST be a single valid JSON object matching this JSON schema:\n${jsonSchema}\n\nDo NOT wrap the JSON in markdown code blocks or backticks.\nDo NOT include any text, commentary, or markdown before or after the JSON object.\nYour ENTIRE response must be parseable by JSON.parse().\n</response_format>`;
     }
 
-    const guardedTools = withLoopGuard(cfg.tools, cfg.id, cfg.maxToolCalls);
+    const { tools: guardedTools, isCeilingReached } = withLoopGuard(cfg.tools, cfg.id, cfg.maxToolCalls);
 
-    return createReactAgent({
+    const preModelHook = HISTORY_COMPACTION_ENABLED
+        ? RunnableLambda.from((state: { messages: BaseMessage[] }) => {
+            const { messages, stats } = compactHistory(state.messages);
+            recordCompaction(stats);
+            if (stats.originalChars !== stats.compactedChars) {
+                factoryLog.debug(
+                    `${cfg.id}: history ${stats.originalChars} -> ${stats.compactedChars} chars ` +
+                    `(${stats.toolResultsStubbed} results, ${stats.writeArgsStubbed} write args stubbed)`,
+                );
+            }
+            return { llmInputMessages: messages };
+        })
+        : undefined;
+
+    const agent = createReactAgent({
         llm: model,
         checkpointer,
         prompt,
         tools: guardedTools,
+        preModelHook,
     });
+
+    // Expose isCeilingReached on the agent so callers (e.g. respawn logic)
+    // can check whether the loop guard poisoned all tools.
+    return Object.assign(agent, { isCeilingReached });
 }
 
 /**
@@ -116,6 +142,29 @@ function stripDeepDescriptions(obj: unknown, depth: number): unknown {
     for (const [key, value] of Object.entries(obj as Record<string, unknown>)) {
         if (key === 'description' && depth > 2) continue;
         result[key] = stripDeepDescriptions(value, depth + 1);
+    }
+    return result;
+}
+
+/** Keys stripped from every level when RESPONSE_SCHEMA_STRIP_ALL_DESCRIPTIONS is true. */
+const SCHEMA_NOISE_KEYS = new Set(['description', 'additionalProperties', '$schema']);
+
+/**
+ * Aggressively strip ALL description fields, `additionalProperties`,
+ * `$schema`, and empty `required: []` arrays from a JSON Schema object.
+ *
+ * Field names in DeveloperOutputSchema / ReviewOutputSchema are
+ * self-documenting (fileChanges, notes, mermaidDiagram, status, comments)
+ * so descriptions are unnecessary overhead re-billed on every LLM call.
+ */
+function stripAllSchemaDescriptions(obj: unknown): unknown {
+    if (obj === null || typeof obj !== 'object') return obj;
+    if (Array.isArray(obj)) return obj.map(item => stripAllSchemaDescriptions(item));
+    const result: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(obj as Record<string, unknown>)) {
+        if (SCHEMA_NOISE_KEYS.has(key)) continue;
+        if (key === 'required' && Array.isArray(value) && value.length === 0) continue;
+        result[key] = stripAllSchemaDescriptions(value);
     }
     return result;
 }

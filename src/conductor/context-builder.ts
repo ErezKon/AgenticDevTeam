@@ -14,6 +14,7 @@ import type {
     ArchitectureDoc, TechDecision, DbDesign, UserStory, Task,
     FileChange, CodebaseAnalysis,
 } from '../agents/_shared/base-schemas';
+import type { Epic } from '../agents/_shared/schemas/epic.schema';
 
 // ─── Context Stats (module-level singleton, same pattern as llm-throttle) ───
 
@@ -61,6 +62,17 @@ export function summariseArchitecture(arch: ArchitectureDoc | null, maxDescChars
         lines.push(`NFRs: ${arch.nonFunctional.join(', ')}`);
     }
     return lines.join('\n');
+}
+
+/**
+ * `- EPIC-001: title — one-sentence description` lines.
+ */
+export function summariseEpics(epics: Epic[]): string {
+    if (!epics?.length) return '(no epics)';
+    return epics.map(e => {
+        const desc = firstSentence(e.description ?? '');
+        return `- ${e.id}: ${e.title}${desc ? ` — ${desc}` : ''}`;
+    }).join('\n');
 }
 
 /**
@@ -155,15 +167,34 @@ export function summariseTasks(tasks: Task[]): string {
 }
 
 /**
- * `<action> <path>` lines, newest first, capped.
+ * Group file changes by directory: `src/components/ (8 files)`.
+ * Falls back to individual paths when under the limit.
  */
 export function summariseFileChanges(changes: FileChange[], limit: number): string {
     if (!changes?.length) return '(no file changes)';
-    const recent = changes.slice(-limit).reverse();
+    const recent = changes.slice(-limit);
     const header = changes.length > limit
         ? `(${changes.length} total, showing last ${limit})`
         : `(${changes.length} total)`;
-    const lines = recent.map(c => `- ${(c as any).action ?? 'modify'} ${(c as any).path ?? '?'}`);
+
+    // Group by parent directory
+    const byDir = new Map<string, number>();
+    for (const c of recent) {
+        const p = (c as any).path ?? '?';
+        const dir = p.includes('/') ? p.slice(0, p.lastIndexOf('/') + 1) : './';
+        byDir.set(dir, (byDir.get(dir) ?? 0) + 1);
+    }
+
+    // If grouped output is compact enough, use it; otherwise list individual paths
+    if (byDir.size <= limit && recent.length > byDir.size) {
+        const lines = [...byDir.entries()]
+            .sort((a, b) => b[1] - a[1])
+            .map(([dir, count]) => `- ${dir} (${count} file${count > 1 ? 's' : ''})`);
+        return `${header}\n${lines.join('\n')}`;
+    }
+
+    // Fallback: individual paths (newest first)
+    const lines = recent.reverse().map(c => `- ${(c as any).action ?? 'modify'} ${(c as any).path ?? '?'}`);
     return `${header}\n${lines.join('\n')}`;
 }
 

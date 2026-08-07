@@ -15,6 +15,7 @@
 - [Bug-Fix Loop](#bug-fix-loop)
 - [Git Branching & PR Workflow](#git-branching--pr-workflow)
 - [Multi-Repo Project Targeting](#multi-repo-project-targeting)
+- [Context Compaction & Token Optimization](#context-compaction--token-optimization)
 - [Project Structure](#project-structure)
 - [Prerequisites](#prerequisites)
 - [Installation & Setup](#installation--setup)
@@ -116,7 +117,7 @@ graph TB
 |-----------|------|---------|
 | **Conductor** | `src/conductor/` | LangGraph state machine — nodes, graph, run modes |
 | **ProjectState** | `src/conductor/state.ts` | Single source of truth with typed annotations and merge reducers |
-| **Agent Factory** | `src/agents/_shared/agent-factory.ts` | Builds LangGraph `createReactAgent` instances with OAuth, tools, and checkpointers |
+| **Agent Factory** | `src/agents/_shared/agent-factory.ts` | Builds LangGraph `createReactAgent` instances with OAuth, tools, checkpointers, and history compaction preModelHook |
 | **Agent Registry** | `src/agents/registry.ts` | 20-agent lookup table with IDs, display tags, and color codes |
 | **Tools** | `src/tools/` | Workspace filesystem, sandboxed shell, Mermaid diagrams, requirements parser, Playwright MCP |
 | **Docker Runner** | `src/executor/docker-runner.ts` | Dockerode-based image build, container run, and health checks |
@@ -437,6 +438,89 @@ In the New Run form, a **Project Hosting** dropdown appears when the run type is
 
 ---
 
+## Context Compaction & Token Optimization
+
+The system includes a suite of context compaction mechanisms that reduce LLM input tokens by **60-75%** (projected: ~31M to ~8-12M tokens on equivalent workloads). All optimizations are enabled by default and individually configurable via environment variables.
+
+### The Problem
+
+In a ReAct agent loop, every tool-call step re-sends the entire conversation history to the LLM. This means input cost per invocation grows **O(steps^2)** -- a single developer invocation can climb from ~4,000 to ~15,000 input tokens across 30+ tool calls. Additionally, the fixed preamble (persona, tool schemas, JSON schema) is billed on every one of the ~3,400 LLM calls in a typical run. Together, these account for the vast majority of input-token spend.
+
+### Mechanisms
+
+#### 1. Tool Result Capping
+
+Every tool result is truncated to `MAX_TOOL_RESULT_CHARS` (default: 6,000) using a head/tail split that preserves both the beginning and end of the output. Shell output uses a **tail-weighted split** (20% head, 80% tail) because build/test failures print at the end. Truncated results include a marker so agents know content was elided and can request specific regions via `read_file` with `offset`/`limit`.
+
+#### 2. ReAct History Compaction (`preModelHook`)
+
+Before each LLM call, a `preModelHook` compacts the message history:
+
+- The **first message** (the task) and the **last N tool results** (default: 3) are always kept verbatim
+- Older tool results are replaced with one-line receipts: `[read_file src/App.tsx -> 4,210 chars, elided]`
+- Large `write_file`/`edit_file` arguments in older messages are elided (the file is already on disk)
+- A hard ceiling (`HISTORY_MAX_CHARS`, default: 40,000) drops the oldest stubbed messages if still over budget
+
+The compaction operates on a **copy** of the message history -- the durable `messages` state used by checkpointing, token extraction, and output parsing is untouched.
+
+#### 3. Compact Personas
+
+Developer personas are reduced from ~7,000 chars to ~2,500 chars by:
+- Removing `<git_workflow>` (the PR workflow already handles git)
+- Conditionally appending `<maintain_mode>` only when relevant
+- Merging redundant TDD rules into the workflow block
+- Compressing critical rules to single-line bullets
+
+#### 4. Conventions Digest
+
+Instead of agents reading `.conventions/*.md` files through the tool loop (where each ~11K-char file is replayed for the rest of the loop), a compact digest of imperative rules (`MUST`, `NEVER`, `ALWAYS`) is injected directly into the prompt (~1,500 chars). Full convention files remain on disk as an escape hatch.
+
+#### 5. Git Tool Removal
+
+Developer agents no longer receive git tool schemas (8 tools removed from every request). The PR workflow already handles `git add`, `commit`, and `push` after each agent returns. Restoreable via `DEV_GIT_TOOLS_ENABLED=true`.
+
+#### 6. Fresh-Context Respawn
+
+When a developer agent hits its tool-call ceiling, instead of "poisoning" all tools (leaving the agent to flail with maximal context), the system:
+
+1. Extracts a **deterministic handoff summary** from the message history (files written, commands run, key findings) -- no extra LLM call
+2. Spawns a **fresh agent** with a clean `MemorySaver` and new `thread_id`
+3. Prepends the compact handoff (~1,200 chars) to the original task
+
+The successor starts at ~4K input tokens with better signal than the predecessor had at 15K. Up to `AGENT_RESPAWN_MAX_GENERATIONS` (default: 2) respawns are allowed per task.
+
+#### 7. Aggressive Schema Stripping
+
+The injected JSON response schema is stripped of all `description` fields, `additionalProperties`, `$schema`, and empty `required` arrays. Field names are self-documenting.
+
+#### 8. Isolated Repair Loop
+
+When agent output fails JSON schema validation, the repair attempt runs on a **fresh thread** carrying only the repair instructions and the first 4,000 chars of the invalid JSON -- not the full ReAct history.
+
+### Configuration
+
+All compaction features default to **on**. To disable any feature, set its environment variable in `.env`:
+
+| Variable | Default | Effect of disabling |
+|----------|---------|-------------------|
+| `HISTORY_COMPACTION_ENABLED` | `true` | Disables the preModelHook; full history replayed on every call |
+| `MAX_TOOL_RESULT_CHARS` | `6000` | Set higher to allow longer tool results |
+| `HISTORY_KEEP_RECENT_TOOL_RESULTS` | `3` | Increase to keep more recent results verbatim |
+| `HISTORY_MAX_CHARS` | `40000` | Raise the hard ceiling for compacted history |
+| `CONVENTIONS_INLINE_DIGEST` | `true` | Revert to agents reading convention files via `read_file` |
+| `DEV_GIT_TOOLS_ENABLED` | `false` | Set `true` to restore git tools for dev agents |
+| `PERSONA_COMPACT` | `true` | Revert to the verbose ~7,000-char persona |
+| `AGENT_RESPAWN_ENABLED` | `true` | Revert to tool poisoning at the ceiling |
+| `AGENT_RESPAWN_MAX_GENERATIONS` | `2` | Max additional agent lifetimes per task |
+| `AGENT_RESPAWN_TOKEN_THRESHOLD` | `14000` | Token threshold that triggers respawn |
+| `RESPONSE_SCHEMA_STRIP_ALL_DESCRIPTIONS` | `true` | Keep all JSON schema descriptions |
+
+### Measurement
+
+The finalize summary includes a `History Compaction` block reporting total chars stubbed, tool results stubbed, and write args stubbed. The HTML token report includes an **Invocation Efficiency** table showing per-agent growth factor (last-call input / first-call input), average calls per invocation, and respawn counts. The target growth factor after compaction is under 2.0x (baseline was ~4.5x).
+
+---
+
 ## Project Structure
 
 ```
@@ -451,13 +535,16 @@ AgenticDevTeam/
 │   │   ├── nodes.ts                        # 10 phase node functions
 │   │   ├── graph.ts                        # StateGraph wiring + HITL interrupts
 │   │   ├── pr-workflow.ts                  # PR lifecycle orchestrator (branch → review → merge)
+│   │   ├── agent-respawn.ts                # Deterministic handoff summary for fresh-context respawn
 │   │   └── run.ts                          # Autonomous & HITL run helpers
 │   │
 │   ├── agents/
 │   │   ├── _shared/
-│   │   │   ├── agent-factory.ts            # createReactAgent wrapper
+│   │   │   ├── agent-factory.ts            # createReactAgent wrapper (+ preModelHook)
 │   │   │   ├── base-schemas.ts             # 20+ Zod schemas for all domain entities
-│   │   │   ├── persona.ts                  # Developer persona prompt builder
+│   │   │   ├── persona.ts                  # Developer persona prompt builder (compact + verbose)
+│   │   │   ├── history-compactor.ts        # ReAct history compaction (preModelHook)
+│   │   │   ├── tool-loop-guard.ts          # Tool-call ceiling + isCeilingReached for respawn
 │   │   │   └── artifact.ts                 # Mission report writer
 │   │   ├── registry.ts                     # Master 20-agent registry
 │   │   ├── codebase-analyzer/              # Codebase Analyzer agent (maintain mode)
@@ -477,7 +564,8 @@ AgenticDevTeam/
 │   │   └── devops/                         # DevOps agent
 │   │
 │   ├── tools/
-│   │   ├── fs/workspace-tools.ts           # Sandboxed read/write/edit/list/search
+│   │   ├── _shared/truncate.ts             # Head/tail tool-result truncation
+│   │   ├── fs/workspace-tools.ts           # Sandboxed read/write/edit/list/search (+offset/limit)
 │   │   ├── git/git-tools.ts               # Git CLI tools (branch, commit, push, diff)
 │   │   ├── git/github-tools.ts            # GitHub API tools (PR, review, merge)
 │   │   ├── shell/shell-tools.ts            # Command execution in workspace
@@ -494,6 +582,9 @@ AgenticDevTeam/
 │   │   ├── log-capture.util.ts             # Stdout/stderr capture for log files
 │   │   ├── oauth-auth.util.ts              # OAuth2 client-credentials token cache
 │   │   ├── workspace.ts                    # Project workspace + output dir creation
+│   │   ├── conventions-digest.ts           # Compact in-prompt conventions digest
+│   │   ├── token-tracker.ts                # Per-invocation token tracking + efficiency metrics
+│   │   ├── token-report.ts                 # HTML token usage report (+ Invocation Efficiency table)
 │   │   └── codebase-analysis-writer.ts     # Write analysis markdown to project + outputs
 │   │
 │   ├── templates/
@@ -671,6 +762,7 @@ Connect to `ws://localhost:3000/ws` for real-time updates:
 | `run:phase-complete` | `{ threadId, phase }` | A phase finishes |
 | `run:complete` | `{ systemName, state }` | Run finishes successfully |
 | `run:error` | `{ systemName, error }` | Run fails |
+| `agent:respawn` | `{ agentId, generation, files }` | A dev agent is respawned with a fresh context |
 
 ---
 
@@ -744,8 +836,33 @@ npm run build
 | `GITHUB_PROJECT_TOKEN` | — | Separate PAT for project-specific repos (falls back to `GITHUB_TOKEN`) |
 | `GITHUB_PROJECT_OWNER` | — | Owner for project-specific repos (falls back to `GITHUB_OWNER`) |
 | `DASHBOARD_PORT` | `3000` | HTTP/WS server port |
+| `MAX_TOOL_RESULT_CHARS` | `6000` | Max characters any single tool result may contribute to agent history |
+| `HISTORY_COMPACTION_ENABLED` | `true` | Enable preModelHook ReAct history compaction |
+| `HISTORY_MAX_CHARS` | `40000` | Hard character ceiling for compacted ReAct history |
+| `CONVENTIONS_INLINE_DIGEST` | `true` | Inject conventions digest instead of read_file instructions |
+| `DEV_GIT_TOOLS_ENABLED` | `false` | Give dev agents git tools (PR workflow handles git) |
+| `PERSONA_COMPACT` | `true` | Use compact ~2,500-char developer persona |
+| `AGENT_RESPAWN_ENABLED` | `true` | Fresh-context respawn instead of tool poisoning |
+| `AGENT_RESPAWN_MAX_GENERATIONS` | `2` | Max respawn generations per dev task |
+| `RESPONSE_SCHEMA_STRIP_ALL_DESCRIPTIONS` | `true` | Strip all JSON schema descriptions |
 
 See [`.env.example`](.env.example) for the full template.
+
+### Context Compaction (Plan 17)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MAX_TOOL_RESULT_CHARS` | `6000` | Max characters any single tool result may contribute to agent history |
+| `HISTORY_KEEP_RECENT_TOOL_RESULTS` | `3` | Number of most-recent tool results kept verbatim in ReAct history |
+| `HISTORY_COMPACTION_ENABLED` | `true` | Enable the preModelHook that compacts ReAct history before each LLM call |
+| `HISTORY_MAX_CHARS` | `40000` | Hard character ceiling for the assembled ReAct history passed to the LLM |
+| `CONVENTIONS_INLINE_DIGEST` | `true` | Inject a distilled conventions digest instead of agents reading convention files |
+| `DEV_GIT_TOOLS_ENABLED` | `false` | Give developer agents git tools (the PR workflow already commits/pushes) |
+| `PERSONA_COMPACT` | `true` | Use the short persona variant (~2,500 chars vs ~7,000) for developer agents |
+| `AGENT_RESPAWN_ENABLED` | `true` | Respawn a dev agent with summarised handoff instead of poisoning tools at the ceiling |
+| `AGENT_RESPAWN_MAX_GENERATIONS` | `2` | Max respawn generations per logical dev task |
+| `AGENT_RESPAWN_TOKEN_THRESHOLD` | `14000` | Input-token threshold that triggers a respawn |
+| `RESPONSE_SCHEMA_STRIP_ALL_DESCRIPTIONS` | `true` | Strip ALL descriptions from injected JSON Schema for maximum token savings |
 
 ### New variables (Plan 16)
 

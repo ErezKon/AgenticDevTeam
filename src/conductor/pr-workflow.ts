@@ -24,9 +24,10 @@ import {
     GIT_USER_NAME, GIT_USER_EMAIL,
     PRINCIPAL_DEV_MODEL, SENIOR_DEV_MODEL, JUNIOR_DEV_MODEL,
     PR_TEST_INSTALL_TIMEOUT_MS, PR_TEST_TIMEOUT_MS,
-    CONTEXT_COMPACT,
     SECURITY_GATE_IN_PR,
+    AGENT_RESPAWN_ENABLED, AGENT_RESPAWN_MAX_GENERATIONS,
 } from '../config';
+import { buildHandoff, renderHandoff } from './agent-respawn';
 import { getEffectiveLimits } from '../utils/run-budget';
 import { emitRunEvent } from '../utils/event-bus';
 import { GITHUB_MODE, createLocalGitHub } from '../utils/github-local';
@@ -68,6 +69,8 @@ export interface PRWorkflowInput {
     /** User stories from the PM — when present, only the stories for this branch's
      *  assignments are injected into the dev prompt (fixes A8: every dev got all stories). */
     userStories?: UserStory[];
+    /** Whether we are operating on an existing codebase (maintain mode). */
+    isMaintainMode?: boolean;
 }
 
 export interface PRWorkflowResult {
@@ -223,41 +226,115 @@ function getModelForRank(rank: DevRank): string {
     }
 }
 
+/**
+ * Parse a single agent invocation result into a DeveloperOutput.
+ * Extracted from invokeDevAgent so the respawn loop can call it per-generation.
+ */
+function parseDevResult(
+    result: any, agentId: string, model: string,
+): { output: DeveloperOutput; tokenUsage: TokenCallRecord | null } {
+    const tokenUsage = extractTokenUsageFromMessages(result, agentId, model, 'development');
+
+    // Guard against empty or missing messages array
+    if (!result?.messages || result.messages.length === 0) {
+        log.warn(`Dev agent ${agentId} returned no messages — returning empty output`);
+        return { output: { fileChanges: [], notes: 'Agent returned no messages (possible tool loop or recursion limit).' }, tokenUsage };
+    }
+
+    const last = result.messages[result.messages.length - 1];
+    if (!last || last.content == null) {
+        log.warn(`Dev agent ${agentId} returned message with no content — returning empty output`);
+        return { output: { fileChanges: [], notes: 'Agent returned empty content.' }, tokenUsage };
+    }
+
+    const raw = typeof last.content === 'string' ? last.content : JSON.stringify(last.content);
+    const parseResult = parseAgentJson(raw);
+    if (!parseResult.ok) {
+        throw new Error(`Invalid JSON output from dev agent: ${parseResult.error}`);
+    }
+
+    // Validate against DeveloperOutputSchema — log issues but return the object
+    const validation = validateAgentOutput(DeveloperOutputSchema, parseResult.value);
+    if (!validation.ok) {
+        log.warn(`Dev agent ${agentId} output schema issues:\n${validation.issues}`);
+    }
+    return { output: (validation.ok ? validation.value : parseResult.value) as DeveloperOutput, tokenUsage };
+}
+
+/**
+ * Invoke a dev agent with optional respawn support.
+ *
+ * When `buildAgentFn` is provided and `AGENT_RESPAWN_ENABLED` is true, hitting
+ * the tool-call ceiling triggers a fresh-context respawn: the current agent's
+ * work is summarised into a compact handoff, a new agent is built with a clean
+ * MemorySaver, and the handoff is prepended to the original task message.
+ *
+ * This replaces "poison and flail" with "summarise and respawn", bounding
+ * each invocation's context to O(threshold) instead of O(max steps).
+ */
 async function invokeDevAgent(
     agent: any, userMessage: string, threadSuffix: string,
     agentId: string, model: string,
-): Promise<{ output: DeveloperOutput; tokenUsage: TokenCallRecord | null }> {
+    buildAgentFn?: () => any,
+): Promise<{ output: DeveloperOutput; tokenUsage: TokenCallRecord | null; allTokenUsage?: TokenCallRecord[] }> {
     return retryWithBackoff(async () => {
+        // ── Respawn loop ─────────────────────────────────────────────────
+        if (AGENT_RESPAWN_ENABLED && buildAgentFn) {
+            const allTokenUsage: TokenCallRecord[] = [];
+            let currentAgent = agent;
+            let handoff: ReturnType<typeof buildHandoff> | null = null;
+
+            for (let gen = 0; gen <= AGENT_RESPAWN_MAX_GENERATIONS; gen++) {
+                // Build a fresh agent for generations > 0
+                if (gen > 0) {
+                    currentAgent = buildAgentFn();
+                }
+
+                // Compose the message: base message + handoff for gen > 0
+                const message = (gen === 0 || !handoff)
+                    ? userMessage
+                    : [userMessage, '\n', renderHandoff(handoff)].join('\n');
+
+                const result = await currentAgent.invoke(
+                    { messages: [{ role: 'user', content: message }] },
+                    { configurable: { thread_id: `dev-pr-${threadSuffix}-gen${gen}-${Date.now()}` }, recursionLimit: DEV_RECURSION_LIMIT },
+                );
+
+                const parsed = parseDevResult(result, agentId, model);
+                if (parsed.tokenUsage) allTokenUsage.push(parsed.tokenUsage);
+
+                // Check if ceiling was reached and more generations are available
+                const ceilingHit = currentAgent.isCeilingReached?.() ?? false;
+
+                if (!ceilingHit || gen === AGENT_RESPAWN_MAX_GENERATIONS) {
+                    // Done — return the final result with all accumulated token usage
+                    return {
+                        output: parsed.output,
+                        tokenUsage: allTokenUsage[0] ?? null,
+                        allTokenUsage: allTokenUsage.length > 1 ? allTokenUsage : undefined,
+                    };
+                }
+
+                // Build handoff for the next generation
+                handoff = buildHandoff(result.messages ?? [], gen + 1);
+                log.info(
+                    `Respawning ${agentId} (generation ${gen + 1}): ` +
+                    `${handoff.filesWritten.length} files carried forward`,
+                );
+                emitRunEvent('agent:respawn', {
+                    agentId,
+                    generation: gen + 1,
+                    files: handoff.filesWritten.length,
+                });
+            }
+        }
+
+        // ── Non-respawn path (fallback or no builder provided) ───────────
         const result = await agent.invoke(
             { messages: [{ role: 'user', content: userMessage }] },
             { configurable: { thread_id: `dev-pr-${threadSuffix}-${Date.now()}` }, recursionLimit: DEV_RECURSION_LIMIT },
         );
-        const tokenUsage = extractTokenUsageFromMessages(result, agentId, model, 'development');
-
-        // Guard against empty or missing messages array
-        if (!result?.messages || result.messages.length === 0) {
-            log.warn(`Dev agent ${agentId} returned no messages — returning empty output`);
-            return { output: { fileChanges: [], notes: 'Agent returned no messages (possible tool loop or recursion limit).' }, tokenUsage };
-        }
-
-        const last = result.messages[result.messages.length - 1];
-        if (!last || last.content == null) {
-            log.warn(`Dev agent ${agentId} returned message with no content — returning empty output`);
-            return { output: { fileChanges: [], notes: 'Agent returned empty content.' }, tokenUsage };
-        }
-
-        const raw = typeof last.content === 'string' ? last.content : JSON.stringify(last.content);
-        const parseResult = parseAgentJson(raw);
-        if (!parseResult.ok) {
-            throw new Error(`Invalid JSON output from dev agent: ${parseResult.error}`);
-        }
-
-        // Validate against DeveloperOutputSchema — log issues but return the object
-        const validation = validateAgentOutput(DeveloperOutputSchema, parseResult.value);
-        if (!validation.ok) {
-            log.warn(`Dev agent ${agentId} output schema issues:\n${validation.issues}`);
-        }
-        return { output: (validation.ok ? validation.value : parseResult.value) as DeveloperOutput, tokenUsage };
+        return parseDevResult(result, agentId, model);
     }, `dev-${threadSuffix}`);
 }
 
@@ -361,7 +438,7 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
     const {
         branchName, baseBranch, assignments, reviewerAgentIds, taskType,
         workspacePath, apiKey, contextPrompt, currentState, projectSlug, gitContext,
-        techStack, userStories,
+        techStack, userStories, isMaintainMode,
     } = input;
 
     // Resolve owner/repo from gitContext (falls back to config constants)
@@ -453,7 +530,8 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
             devLog.info(`Working on branch ${branchName}: ${devAssignments.length} assignment(s)`);
 
             const conventionFiles = resolveConventionFiles(entry.languages, techStack);
-            const agent = buildDevAgent(apiKey, entry, worktreeWorkspace, gitContext, baseBranch, conventionFiles);
+            const buildAgentFn = () => buildDevAgent(apiKey, entry, worktreeWorkspace, gitContext, baseBranch, conventionFiles, isMaintainMode);
+            const agent = buildAgentFn();
 
             const assignmentText = devAssignments.map(a =>
                 `Assignment ${a.id} [${a.priority}/${a.complexity}]: ${a.description}`
@@ -461,7 +539,7 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
 
             // Build the per-branch story section (fixes A8: every dev got all stories)
             const branchStoryIds = [...new Set(devAssignments.map(a => a.storyId).filter(Boolean))] as string[];
-            const storySection = (CONTEXT_COMPACT && userStories?.length && branchStoryIds.length)
+            const storySection = (userStories?.length && branchStoryIds.length)
                 ? `\n## User Stories for This Branch\n\n${storiesForIds(userStories, branchStoryIds)}`
                 : '';
 
@@ -479,8 +557,9 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
 
             try {
                 const devModel = getModelForRank(entry.rank as DevRank);
-                const { output, tokenUsage: devTokenUsage } = await invokeDevAgent(agent, message, `${entry.id}-${branchName}`, entry.id, devModel);
+                const { output, tokenUsage: devTokenUsage, allTokenUsage: devAllTokenUsage } = await invokeDevAgent(agent, message, `${entry.id}-${branchName}`, entry.id, devModel, buildAgentFn);
                 if (devTokenUsage) allTokenUsage.push(devTokenUsage);
+                if (devAllTokenUsage) allTokenUsage.push(...devAllTokenUsage.slice(1)); // first already pushed above
                 if (output.fileChanges) allFileChanges.push(...output.fileChanges);
 
                 const artifact = writeArtifact({
@@ -546,7 +625,8 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                                 if (!primaryEntry) break;
 
                                 const repairConventions = resolveConventionFiles(primaryEntry.languages, techStack);
-                                const repairAgent = buildDevAgent(apiKey, primaryEntry, worktreeWorkspace, gitContext, baseBranch, repairConventions);
+                                const buildRepairAgentFn = () => buildDevAgent(apiKey, primaryEntry, worktreeWorkspace, gitContext, baseBranch, repairConventions, isMaintainMode);
+                                const repairAgent = buildRepairAgentFn();
 
                                 // Feed only the failing steps to the repair agent
                                 const failDetails = gateReport.results
@@ -571,6 +651,7 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                                 const repairModel = getModelForRank(primaryEntry.rank as DevRank);
                                 const { output: repairOutput, tokenUsage: repairTokenUsage } = await invokeDevAgent(
                                     repairAgent, repairMsg, `repair-${primaryEntry.id}-${branchName}`, primaryEntry.id, repairModel,
+                                    buildRepairAgentFn,
                                 );
                                 if (repairTokenUsage) allTokenUsage.push(repairTokenUsage);
                                 if (repairOutput.fileChanges) allFileChanges.push(...repairOutput.fileChanges);
@@ -954,7 +1035,8 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                                     devLog.info(`Fixing ${thisReviewerComments.length} review comments from ${reviewerId}...`);
 
                                     const fixConventions = resolveConventionFiles(primaryEntry.languages, techStack);
-                                    const fixAgent = buildDevAgent(apiKey, primaryEntry, worktreeWorkspace, gitContext, baseBranch, fixConventions);
+                                    const buildFixAgentFn = () => buildDevAgent(apiKey, primaryEntry, worktreeWorkspace, gitContext, baseBranch, fixConventions, isMaintainMode);
+                                    const fixAgent = buildFixAgentFn();
                                     const fixMsg = [
                                         contextPrompt,
                                         `\n## Project Slug: ${projectSlug}`,
@@ -977,6 +1059,7 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                                         const { output: fixOutput, tokenUsage: fixTokenUsage } = await invokeDevAgent(
                                             fixAgent, fixMsg, `fix-${primaryEntry.id}-${reviewerId}-iter${iteration}`,
                                             primaryEntry.id, fixModel,
+                                            buildFixAgentFn,
                                         );
                                         if (fixTokenUsage) allTokenUsage.push(fixTokenUsage);
                                         if (fixOutput.fileChanges) allFileChanges.push(...fixOutput.fileChanges);
@@ -1060,7 +1143,8 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                             devLog.info(`Fixing ${requestedComments.length} review comments (no-progress retry)...`);
 
                             const fixConventions = resolveConventionFiles(primaryEntry.languages, techStack);
-                            const fixAgent = buildDevAgent(apiKey, primaryEntry, worktreeWorkspace, gitContext, baseBranch, fixConventions);
+                            const buildNoProgressFixFn = () => buildDevAgent(apiKey, primaryEntry, worktreeWorkspace, gitContext, baseBranch, fixConventions, isMaintainMode);
+                            const fixAgent = buildNoProgressFixFn();
                             const fixMsg = [
                                 contextPrompt,
                                 `\n## Project Slug: ${projectSlug}`,
@@ -1080,7 +1164,7 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
 
                             try {
                                 const fixModel = getModelForRank(primaryEntry.rank as DevRank);
-                                const { output: fixOutput, tokenUsage: fixTokenUsage } = await invokeDevAgent(fixAgent, fixMsg, `fix-${primaryEntry.id}-iter${iteration}`, primaryEntry.id, fixModel);
+                                const { output: fixOutput, tokenUsage: fixTokenUsage } = await invokeDevAgent(fixAgent, fixMsg, `fix-${primaryEntry.id}-iter${iteration}`, primaryEntry.id, fixModel, buildNoProgressFixFn);
                                 if (fixTokenUsage) allTokenUsage.push(fixTokenUsage);
                                 if (fixOutput.fileChanges) allFileChanges.push(...fixOutput.fileChanges);
                                 devLog.info(`Fix complete: ${fixOutput.fileChanges?.length ?? 0} changes`);
@@ -1151,7 +1235,8 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
 
                     // Escalated dev fixes CRITICALs + reviews overall quality
                     const escalatedConventions = resolveConventionFiles(escalatedDevEntry.languages, techStack);
-                    const escalatedDev = buildDevAgent(apiKey, escalatedDevEntry, worktreeWorkspace, gitContext, baseBranch, escalatedConventions);
+                    const buildEscalatedFn = () => buildDevAgent(apiKey, escalatedDevEntry, worktreeWorkspace, gitContext, baseBranch, escalatedConventions, isMaintainMode);
+                    const escalatedDev = buildEscalatedFn();
                     const criticalComments = lastReviews.flatMap(r =>
                         r.comments.filter((c: any) => c.severity === 'critical' || c.body?.includes('[CRITICAL]'))
                     );
@@ -1173,7 +1258,7 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
 
                     try {
                         const escModel = getModelForRank(escalatedDevEntry.rank as DevRank);
-                        const { output: fixOutput, tokenUsage: escTokenUsage } = await invokeDevAgent(escalatedDev, escalationMsg, `escalation-${escalatedDevId}`, escalatedDevId, escModel);
+                        const { output: fixOutput, tokenUsage: escTokenUsage } = await invokeDevAgent(escalatedDev, escalationMsg, `escalation-${escalatedDevId}`, escalatedDevId, escModel, buildEscalatedFn);
                         if (escTokenUsage) allTokenUsage.push(escTokenUsage);
                         if (fixOutput.fileChanges) allFileChanges.push(...fixOutput.fileChanges);
                         gitExec(worktreeWorkspace, 'add .');

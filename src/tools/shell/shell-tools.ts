@@ -22,7 +22,9 @@ import { logToolAction } from '../../utils/logger';
 import {
     GIT_USER_NAME, GIT_USER_EMAIL,
     SHELL_ALLOW_HOST, SHELL_DEFAULT_TIMEOUT_S, SHELL_MAX_TIMEOUT_S,
+    MAX_TOOL_RESULT_CHARS,
 } from '../../config';
+import { truncateToolResult } from '../_shared/truncate';
 
 const TAG = `${color256(166)}[shell]${LogColors.RESET}`;
 
@@ -128,13 +130,14 @@ export function createShellTool(workspaceRoot: string) {
 
             logToolAction(`${TAG} Executing: ${command} (timeout=${effectiveTimeout}s)`);
             const result = await runShell(command, workspaceRoot, timeoutMs);
-            const output = [
+            const raw = [
                 `Exit code: ${result.exitCode}`,
-                result.stdout ? `stdout:\n${result.stdout.slice(0, 5000)}` : '',
-                result.stderr ? `stderr:\n${result.stderr.slice(0, 2000)}` : '',
+                result.stdout ? `stdout:\n${result.stdout}` : '',
+                result.stderr ? `stderr:\n${result.stderr}` : '',
             ].filter(Boolean).join('\n\n');
             logToolAction(`${TAG} Completed with exit code ${result.exitCode}`);
-            return output;
+            // Tail-weighted split (headRatio=0.2): build/test failures print at the end
+            return truncateToolResult(raw, 'run_command', MAX_TOOL_RESULT_CHARS, 0.2);
         },
         {
             name: 'run_command',

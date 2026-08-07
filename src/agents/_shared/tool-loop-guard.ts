@@ -53,6 +53,16 @@ const CACHEABLE_TOOL_NAMES = new Set([
 // ─── Guard implementation ───────────────────────────────────────────────────
 
 /**
+ * Result of wrapping tools with a loop-detection guard.
+ */
+export interface LoopGuardResult {
+    /** Guarded tools with loop-detection wrappers. */
+    tools: StructuredToolInterface[];
+    /** Returns true once the guard has poisoned all tools (total ceiling or repeated-call poison). */
+    isCeilingReached: () => boolean;
+}
+
+/**
  * Wrap tools with a loop-detection guard.
  *
  * Tracks each (tool, args) pair's total invocation count. If the same tool is
@@ -74,8 +84,8 @@ export function withLoopGuard(
     tools: StructuredToolInterface[],
     agentId: string,
     maxTotalCalls?: number,
-): StructuredToolInterface[] {
-    if (tools.length === 0) return tools;
+): LoopGuardResult {
+    if (tools.length === 0) return { tools, isCeilingReached: () => false };
 
     // Total identical (tool, args) invocation counts: key = `toolName::argSig`
     const callCounts = new Map<string, number>();
@@ -95,7 +105,7 @@ export function withLoopGuard(
             'If you have no information, return a minimal valid JSON object matching the response schema.',
     });
 
-    return tools.map((originalTool) => {
+    const wrappedTools = tools.map((originalTool) => {
         const wrappedFn = async (args: Record<string, any>) => {
             const toolName = originalTool.name;
 
@@ -196,4 +206,9 @@ export function withLoopGuard(
             schema: (originalTool as any).schema,
         });
     });
+
+    return {
+        tools: wrappedTools,
+        isCeilingReached: () => poisoned,
+    };
 }

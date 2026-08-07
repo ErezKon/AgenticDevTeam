@@ -17,7 +17,7 @@ const log = getLogger('[EventBus]', 214);
 
 export type RunEventType =
     | 'phase:start' | 'phase:end'
-    | 'agent:start' | 'agent:end'
+    | 'agent:start' | 'agent:end' | 'agent:respawn'
     | 'tool:call'
     | 'pr:opened' | 'pr:reviewed' | 'pr:merged'
     | 'gate:result'

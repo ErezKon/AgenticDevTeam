@@ -11,7 +11,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { getLogger } from './logger';
 import { MODEL_PRICING } from '../config';
-import type { TokenCallRecord, RunUsageSummary, RunStatus } from './token-tracker';
+import type { TokenCallRecord, RunUsageSummary, RunStatus, InvocationEfficiencyRow } from './token-tracker';
 import { tokenTracker } from './token-tracker';
 
 const log = getLogger('[TokenReport]', 220);
@@ -175,6 +175,21 @@ function generateHtml(
             <td>${escapeHtml(model)}</td>
             <td class="num">${formatCost(pricing.inputPer1k)}</td>
             <td class="num">${formatCost(pricing.outputPer1k)}</td>
+        </tr>`,
+    ).join('\n');
+
+    // Invocation efficiency table
+    const invocationRows = tokenTracker.getInvocationSummaries();
+    const invocationTableRows = invocationRows.map(r =>
+        `<tr>
+            <td>${escapeHtml(r.agentId)}</td>
+            <td class="num">${r.invocations}</td>
+            <td class="num">${r.avgCallsPerInvocation}</td>
+            <td class="num">${formatNumber(r.avgInputPerCall)}</td>
+            <td class="num">${formatNumber(r.firstCallInput)}</td>
+            <td class="num">${formatNumber(r.lastCallInput)}</td>
+            <td class="num">${r.growthFactor}x</td>
+            <td class="num">${r.respawns}</td>
         </tr>`,
     ).join('\n');
 
@@ -452,6 +467,19 @@ ${runStatus === 'in-progress'
     </thead>
     <tbody>${modelTableRows}</tbody>
 </table>
+
+<!-- Invocation Efficiency -->
+${invocationRows.length > 0 ? `<h2>Invocation Efficiency</h2>
+<table>
+    <thead>
+        <tr>
+            <th>Agent</th><th>Invocations</th><th>Avg Calls/Inv</th>
+            <th>Avg Input/Call</th><th>1st Call Input</th><th>Last Call Input</th>
+            <th>Growth</th><th>Respawns</th>
+        </tr>
+    </thead>
+    <tbody>${invocationTableRows}</tbody>
+</table>` : '<!-- No invocation data -->'}
 
 <!-- Pricing Rates -->
 <h2>Configured Pricing Rates</h2>
