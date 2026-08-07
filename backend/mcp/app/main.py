@@ -1,5 +1,9 @@
 """FastAPI entry point for MCP Tool Server
 
+# Placeholder import for Model Context Protocol (MCP) SDK
+# from mcp_sdk import ToolRegistry, ToolRequest, ToolResponse  # noqa: F401
+
+
 Exposes MCP tool endpoints `place_ship` and `fire_shot` using the
 Model Context Protocol (MCP) SDK schema definitions.
 """
@@ -16,6 +20,20 @@ from .schemas import (
 from backend.domain.game import Board, Ship
 
 app = FastAPI(title="MCP Tool Server")
+
+# Add CORS middleware to allow only the UI origin
+from fastapi.middleware.cors import CORSMiddleware
+
+_ALLOWED_ORIGINS = ["http://localhost:8080"]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_ALLOWED_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 
 # In‑memory game board shared across requests (simplified)
 _game_board = Board()
