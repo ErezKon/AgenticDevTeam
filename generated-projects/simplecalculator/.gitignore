@@ -1,0 +1,42 @@
+# ─── AgenticDevTeam (do not edit this block) ───
+# Dependencies
+node_modules/
+__pycache__/
+.venv/
+venv/
+vendor/
+.bundle/
+target/
+
+# Build output
+dist/
+build/
+.next/
+out/
+*.js.map
+
+# Environment & secrets
+.env
+.env.local
+.env.*.local
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+
+# Test & coverage
+coverage/
+.nyc_output/
+.conventions/
+.worktrees/
+# ─── /AgenticDevTeam ───
