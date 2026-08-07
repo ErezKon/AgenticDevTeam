@@ -5,7 +5,7 @@
         v-for="cell in cells"
         :key="cell.id"
         class="cell"
-        :class="{ ship: cell.hasShip }"
+        :class="{ ship: shipCells.has(cell.id) }"
         :data-cell="cell.id"
         @click="onCellClick(cell)"
       >
@@ -26,11 +26,19 @@ interface Cell {
   label: string;
 }
 
-const props = defineProps<{ size: number }>(); // board size (e.g., 10)
+const props = defineProps({
+  size: {
+    type: Number,
+    required: true,
+    validator: (v: number) => Number.isInteger(v) && v > 0 && v <= 20,
+  },
+}); // board size (e.g., 10)
 const emit = defineEmits<{
   (e: 'place-ship', payload: { coordinates: { x: number; y: number }[] }): void;
   (e: 'invalid-placement', payload: { message: string }): void;
 }>();
+
+const shipCells = ref<Set<string>>(new Set());
 
 const cells = computed(() => {
   const arr: Cell[] = [];
@@ -55,6 +63,8 @@ function onCellClick(cell: Cell) {
   // Prevent duplicate selection of the same cell
   if (selected.value.some((c) => c.id === cell.id)) {
     emit('invalid-placement', { message: 'Duplicate cell selection is not allowed' });
+    // Reset selection to avoid stale state
+    selected.value = [];
     return;
   }
   if (selected.value.length < 2) {
@@ -64,12 +74,10 @@ function onCellClick(cell: Cell) {
       const coordinates = generateCoordinates(start, end);
       if (coordinates.length > 0) {
         emit('place-ship', { coordinates });
-        // Update hasShip flag on involved cells for UI feedback
+        // Update shipCells set for UI feedback
         coordinates.forEach((coord) => {
-          const target = cells.value.find((c) => c.x === coord.x && c.y === coord.y);
-          if (target) {
-            target.hasShip = true;
-          }
+          const cellId = `${coord.x}-${coord.y}`;
+          shipCells.value.add(cellId);
         });
       }
       // reset selection regardless of validity
