@@ -1,61 +1,71 @@
 # Product Manager Mission Report
 
 **Agent**: product-manager  
-**Generated**: 2026-08-07T12:59:46.246Z
+**Generated**: 2026-08-07T22:05:16.489Z
 
 ---
 
 ## User Stories (7)
 
-### US-001: As a Player 1, I want to place my ships on the board
-- So that: I can set up my fleet before the game starts
-- AC: The UI allows selecting a ship size (2, 3, 4) and dragging it onto board cells; placement is rejected if the ship would exceed board bounds or overlap another ship.; The backend endpoint POST /place_ship returns a success response for valid placements and an error with a clear message for invalid placements.; After a successful placement, the player's board view visually displays the ship positions.
-### US-002: As a Player 1, I want to fire at opponent coordinates in turn
-- So that: I can attempt to sink opponent ships
-- AC: Clicking a cell on the opponent grid sends a shot request to POST /fire.; The backend enforces turn order and returns an error if it is not the player's turn.; The response indicates hit, miss, or sunk, and the UI updates the opponent view accordingly.
-### US-003: As a Player 1, I want to view my own board and the opponent view (hits/misses only)
-- So that: I can track game progress
-- AC: GET /board/{player_id} returns the full board with ship locations for the requesting player.; GET /opponent_view/{player_id} returns a masked board showing only hit/miss markers, never ship positions.; The frontend fetches these endpoints after each action and updates both grids correctly.
-### US-004: As a AI agent, I want to invoke ship placement and firing via the MCP SDK
+### US-001: As a player, I want to place my ships on the board
+- So that: the game can start with a valid configuration
+- AC: When I submit a valid placement, the API returns HTTP 200 and the board reflects the ships.; When I submit an invalid placement (overlap, out of bounds, wrong size), the API returns HTTP 400 with an explanatory error message.; The UI shows the ships on my grid after a successful placement.
+### US-002: As a player, I want to view my current board state
+- So that: I can see where my ships are and which opponent shots have hit or missed
+- AC: A GET request to the board endpoint returns JSON containing ship coordinates and hit/miss markers.; The UI renders my board with ships and colored markers for hits and misses.; No opponent ship positions are included in the response.
+### US-003: As a player, I want to fire a shot at a coordinate on the opponent's board
+- So that: I can try to sink their ships
+- AC: Posting a shot returns a result of 'hit', 'miss', or 'sunk' and updates turn order.; If it is not my turn, the API returns HTTP 403 with a clear message.; The UI updates the opponent view with a hit or miss marker after the shot.
+### US-004: As a player, I want to see only hits and misses on the opponent view
+- So that: I know my progress without learning ship locations
+- AC: The opponent‑view endpoint returns only hit/miss coordinates, never ship positions.; The UI opponent grid displays red markers for hits and gray for misses.; Attempting to access ship data via this endpoint results in a 404 or empty payload.
+### US-005: As a AI agent, I want to call game actions through MCP tools over Streamable HTTP
 - So that: I can play the game programmatically
-- AC: The MCP Tool Server exposes `place_ship` and `fire_shot` methods over Streamable HTTP.; A client using the Model Context Protocol SDK can call these methods and receives the same response schema as the REST API.; Invalid actions (e.g., out‑of‑bounds placement, firing out of turn) are returned as SDK errors with descriptive messages.
-### US-005: As a Player 1, I want a responsive Vue SPA that shows my board, opponent view, and controls
-- So that: I can interact with the game smoothly
-- AC: The SPA loads with two 6×6 grids side‑by‑side.; Drag‑and‑drop ship placement works before the game starts and updates the board view.; After placement, clicking opponent cells fires shots, updates the view, and respects turn order until a win condition is reached.; When all opponent ships are sunk, a victory modal is displayed.
-### US-006: As a Developer, I want to launch the whole system with a single Docker Compose command
-- So that: I can run the prototype locally with minimal effort
-- AC: docker-compose.yml defines three services: frontend, api, mcp, each with its own build context.; Running `docker compose up --build` builds all images and starts containers without errors.; Containers communicate via the internal Docker network; the frontend can reach the API and MCP endpoints.
-### US-999: As a User, I want all game components (frontend SPA, Game API Service, MCP Tool Server, Domain Library) to be wired together so the game is playable end‑to‑end
-- So that: I can experience a complete Battleship game without manual wiring
-- AC: After `docker compose up`, opening the frontend URL loads the SPA and allows full gameplay: ship placement, turn‑based firing, and victory detection.; The SPA successfully calls the Game API Service for all actions; the MCP server runs and is reachable (though not required for manual play).; Docker logs show successful inter‑service communication and no unhandled exceptions.; An automated Cypress e2e test can complete a full game (place ships, fire shots, win) without page reloads.
+- AC: The MCP Tool Service registers 'place_ship', 'fire_shot', and 'get_board' tools using the MCP SDK.; Calling each tool via the Streamable HTTP endpoint yields the same responses as the REST API.; The SDK client can successfully execute a full turn sequence (place ships, fire shot, query board) without errors.
+### US-006: As a developer, I want to launch the full stack with a single Docker Compose command
+- So that: I can run the application locally with minimal effort
+- AC: docker-compose.yml defines services for the Vue UI, Game API, and MCP Tool Service.; Running `docker compose up --build` starts all containers without failures.; Each service exposes a health endpoint that returns HTTP 200 within 10 seconds of startup.
+### US-007: As a QA engineer, I want automated tests for the core API endpoints
+- So that: regressions are caught early in the CI pipeline
+- AC: A pytest suite covers ship placement validation, shot handling, and turn enforcement.; The CI workflow runs the test suite on every push and fails the build on any test failure.; All tests pass in a fresh Docker‑based environment.
 
-## Tasks (28)
+## Tasks (38)
 
-- **TASK-001** [infra/Git, standard filesystem] Initialize monorepo structure
-- **TASK-002** [infra/Docker Compose] Create root Docker Compose file with service placeholders
-- **TASK-003** [infra/GitHub Actions] Set up GitHub Actions CI pipeline
-- **TASK-004** [frontend/Vue 3, Vite, TypeScript, Vue Draggable] Implement player board component with drag‑and‑drop ship placement
-- **TASK-005** [frontend/Vue 3, Vite, TypeScript] Implement opponent board component with click‑to‑fire
-- **TASK-006** [frontend/Axios, TypeScript] Create frontend API client module
-- **TASK-007** [frontend/Pinia, Vue 3] Add Pinia store for game state
-- **TASK-008** [frontend/Vue 3, CSS] Implement victory modal UI
-- **TASK-009** [testing/Vitest, Vue Test Utils] Write Vitest unit tests for board components
-- **TASK-010** [backend/FastAPI, Python 3.11] Scaffold FastAPI project for Game API Service
-- **TASK-011** [backend/FastAPI, Pydantic] Implement POST /place_ship endpoint
-- **TASK-012** [backend/FastAPI, Pydantic] Implement POST /fire endpoint
-- **TASK-013** [backend/FastAPI] Implement GET /board/{player_id} endpoint
-- **TASK-014** [backend/FastAPI] Implement GET /opponent_view/{player_id} endpoint
-- **TASK-015** [backend/Python logging] Add request logging middleware
-- **TASK-016** [testing/pytest] Write pytest unit tests for Game Logic Library
-- **TASK-017** [testing/pytest, FastAPI TestClient] Write pytest integration tests for API endpoints
-- **TASK-018** [backend/FastAPI, Python 3.11] Scaffold FastAPI MCP Tool Server project
-- **TASK-019** [backend/modelcontextprotocol Python SDK] Define MCP tool specifications for place_ship and fire_shot
-- **TASK-020** [backend/FastAPI, modelcontextprotocol SDK] Connect MCP tool handlers to shared in‑memory game state
-- **TASK-021** [testing/pytest, modelcontextprotocol SDK] Write pytest tests for MCP tool handlers
-- **TASK-022** [backend/Python] Create Battleship domain library package
-- **TASK-023** [backend/Python] Implement core game rules in the domain library
-- **TASK-024** [infra/Docker] Write Dockerfile for Vue frontend
-- **TASK-025** [infra/Docker] Write Dockerfile for Game API Service
-- **TASK-026** [infra/Docker] Write Dockerfile for MCP Tool Server
-- **TASK-027** [testing/Manual testing] Perform manual end‑to‑end verification
-- **TASK-028** [testing/Cypress] Add Cypress e2e test suite
+- **TASK-001** [infra/git] Initialize repository and project folder structure
+- **TASK-002** [frontend/Vue 3, Vite, npm] Set up Vue 3 project with Vite
+- **TASK-003** [backend/FastAPI, Python 3.11] Create FastAPI skeleton for Game API Service
+- **TASK-004** [backend/FastAPI, Python 3.11, MCP SDK] Create FastAPI skeleton for MCP Tool Service
+- **TASK-005** [infra/Docker] Write Dockerfile for Vue frontend
+- **TASK-006** [infra/Docker] Write Dockerfile for Game API Service
+- **TASK-007** [infra/Docker] Write Dockerfile for MCP Tool Service
+- **TASK-008** [infra/Docker Compose] Create docker-compose.yml to orchestrate all services
+- **TASK-009** [backend/FastAPI] Configure CORS middleware for FastAPI services
+- **TASK-010** [backend/FastAPI] Add health check endpoint to both FastAPI services
+- **TASK-011** [testing/pytest] Add pytest to backend_api requirements and create test scaffold
+- **TASK-012** [testing/pytest] Add pytest to backend_mcp requirements and create test scaffold
+- **TASK-013** [testing/Cypress] Set up Cypress for UI end‑to‑end testing
+- **TASK-014** [infra/GitHub Actions] Create GitHub Actions CI workflow
+- **TASK-101** [backend/FastAPI] Implement ship placement endpoint
+- **TASK-102** [backend/Python] Add placement validation logic to Game Engine Library
+- **TASK-103** [frontend/Vue 3] Build ShipPlacementGrid Vue component
+- **TASK-104** [testing/pytest] Write unit tests for placement validation
+- **TASK-201** [backend/FastAPI] Implement own board retrieval endpoint
+- **TASK-202** [backend/Python] Expose board state from Game Engine to API service
+- **TASK-203** [frontend/Vue 3] Create OwnBoardView Vue component
+- **TASK-204** [testing/pytest] Write integration test for board endpoint
+- **TASK-301** [backend/FastAPI] Implement shot submission endpoint
+- **TASK-302** [backend/Python] Add turn management logic to Game Engine
+- **TASK-303** [frontend/Vue 3] Update OpponentGrid Vue component for shot interaction
+- **TASK-304** [testing/pytest] Write unit test for turn enforcement
+- **TASK-401** [backend/FastAPI] Implement opponent‑view endpoint
+- **TASK-402** [frontend/Vue 3] Create OpponentBoardView Vue component
+- **TASK-403** [testing/pytest] Write integration test ensuring no ship data leaks
+- **TASK-501** [backend/MCP SDK, Python] Register place_ship tool in MCP service
+- **TASK-502** [backend/MCP SDK, Python] Register fire_shot tool in MCP service
+- **TASK-503** [backend/MCP SDK, Python] Register get_board tool in MCP service
+- **TASK-504** [backend/FastAPI, MCP SDK] Implement Streamable HTTP handling for MCP tools
+- **TASK-505** [testing/pytest, MCP SDK] Write end‑to‑end test using MCP SDK client
+- **TASK-601** [infra/Docker Compose, curl] Validate Docker Compose startup and health checks
+- **TASK-701** [testing/pytest] Create comprehensive pytest suite for core engine
+- **TASK-702** [infra/GitHub Actions] Integrate test execution into CI workflow
+- **TASK-703** [testing/Cypress] Add Cypress e2e scenario for a full turn
