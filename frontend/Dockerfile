@@ -2,9 +2,11 @@
 # Build stage
 FROM node:18-alpine AS build
 WORKDIR /app
+# Copy package files from frontend directory
 # Install dependencies first for layer caching
 COPY package.json .
-RUN npm install
+COPY package-lock.json .
+RUN npm config set strict-ssl false && npm ci
 # Copy the rest of the source code
 COPY . .
 RUN npm run build
