@@ -73,7 +73,7 @@ onMounted(async () => {
       data.ships.forEach((ship: any) => {
         if (Array.isArray(ship.coordinates)) {
           ship.coordinates.forEach((coord: Coordinate) => {
-            shipCellSet.value.add(`${coord[0]}-${coord[1]}`);
+            shipCellSet.value = new Set([...shipCellSet.value, `${coord[0]}-${coord[1]}`]);
           });
         }
       });
