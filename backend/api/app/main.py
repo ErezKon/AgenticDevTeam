@@ -31,6 +31,13 @@ router = APIRouter(dependencies=[Depends(get_api_key)])
 app.include_router(router)
 
 # Placeholder route
+
+@router.get("/games/{game_id}/players/{player_id}/board")
+async def get_board(game_id: int, player_id: int, state: GameState = Depends(get_state)):
+    """Return the board view for the given player.
+    For this prototype, the board is shared and does not differentiate between players.
+    """
+    return state.get_board_view()
 @app.get("/health")
 async def health_check():
     return {"status": "ok"}

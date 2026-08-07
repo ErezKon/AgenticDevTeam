@@ -8,6 +8,22 @@ from backend.domain.game import Board, Ship
 from typing import List
 
 class GameState:
+    def get_board_view(self) -> dict:
+        """Return a dictionary representing the player's board state.
+        Includes ship placements and markers for hits and misses.
+        """
+        # Hits are coordinates where a shot hit a ship (already stored in self.hits)
+        hits = [list(coord) for coord in self.hits]
+        # Misses are shots where result was 'miss'
+        misses = [
+            [shot["x"], shot["y"]]
+            for shot in self.shots
+            if shot.get("result") == "miss"
+        ]
+        board_dict = self.board.to_dict()
+        board_dict.update({"hits": hits, "misses": misses})
+        return board_dict
+
     """Singleton holder for the current game state.
 
     In a production system this would be backed by a database or a distributed

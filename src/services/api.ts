@@ -46,7 +46,7 @@ export async function fireShot(gameId: string, payload: FirePayload, playerId: n
 
 export async function getBoard(gameId: string, playerId: string) {
   try {
-    const response = await api.get(`/games/${gameId}/boards/${playerId}`);
+    const response = await api.get(`/games/${gameId}/players/${playerId}/board`);
     return response.data;
   } catch (error) {
     throw new Error(`Failed to get board: ${(error as Error).message}`);
