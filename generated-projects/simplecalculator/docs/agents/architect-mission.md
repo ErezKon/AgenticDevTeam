@@ -1,44 +1,39 @@
 # Architect Mission Report
 
 **Agent**: architect  
-**Generated**: 2026-08-07T22:00:54.647Z
+**Generated**: 2026-08-07T22:57:20.532Z
 
 ---
 
 ## Architecture Style
 
-Modular Monolith (Single-Page Web Application)
+Single-Page Application (Monolith)
 
 ## Components
 
-- **Calculator UI** (Frontend Web UI): Renders the keypad, display area, and handles user interactions (button clicks, keyboard input). Sends the raw expression string to the Expression Engine and shows results or error messages.
-- **Expression Engine** (Client‑side Service): Parses arithmetic expressions, respects operator precedence, parentheses, decimal and negative numbers, and evaluates them safely. Returns a numeric result or a structured error object.
-- **Error Handler** (Utility Module): Detects invalid syntax, division‑by‑zero, and other runtime errors. Formats user‑friendly error messages for the UI.
+- **Frontend UI** (Web Client): React-based user interface that captures user input, displays the expression and result, and shows validation errors.
+- **Calculator Engine** (Domain Library): Pure TypeScript library that parses arithmetic expressions (including parentheses, decimals, negatives) and evaluates them using a recursive‑descent parser.
 
 ## Tech Stack
 
-- **Frontend Framework**: React with TypeScript — React offers a component model that cleanly separates the keypad, display, and logic, and has a mature ecosystem for testing (Jest, React Testing Library). TypeScript adds static typing, catching parsing‑engine bugs at compile time. Vue is comparable but the team’s existing expertise is stronger in React. Plain JS would forgo type safety and component reusability, increasing maintenance cost.
-- **Build & Bundling**: Vite — Vite provides instant dev server start‑up and fast HMR, ideal for a small SPA. CRA abstracts configuration but adds unnecessary bloat and slower builds. Webpack is powerful but requires more configuration for a simple project.
-- **Testing Framework**: Jest with React Testing Library — Jest runs fast unit tests in CI and integrates directly with React Testing Library for component rendering tests. Cypress is great for full browser E2E but adds overhead for a calculator where unit tests suffice. Mocha lacks built‑in mocking and snapshot capabilities that Jest provides out‑of‑the‑box.
-- **CI/CD**: GitHub Actions — The repository lives on GitHub; Actions offers native integration, free minutes for open source, and simple YAML pipelines for lint, test, and build. GitLab CI would require moving the repo, and CircleCI adds external service complexity for a small project.
-- **Hosting**: Netlify (static site hosting) — Netlify automatically builds from the Vite output, provides instant rollbacks, and includes built‑in HTTPS. Vercel is similar but its free tier limits concurrent builds; GitHub Pages lacks built‑in CI integration for preview deployments.
-- **Package Management**: npm (using lockfile) — npm is universally available, requires no additional setup, and works seamlessly with Vite and GitHub Actions. Yarn offers workspaces but adds no benefit for a single‑package app. pnpm provides disk savings but introduces a different node_modules layout that can confuse newcomers.
+- **Frontend Framework**: React 18 (with hooks and functional components) — React offers a mature ecosystem, excellent TypeScript support, and a component model that matches the simple UI needs. Vue and Svelte are lighter but the team already has React expertise; Angular adds unnecessary boilerplate for a small app.
+- **Language**: TypeScript 5 — TypeScript provides static typing that catches parsing‑engine bugs at compile time while still compiling to plain JavaScript for the browser. Pure JavaScript lacks compile‑time safety; Elm is functional but introduces a new language learning curve for a straightforward calculator.
+- **Build Tool**: Vite — Vite offers lightning‑fast dev server start‑up and native ES module support, ideal for a small SPA. CRA adds unnecessary abstraction and slower cold starts; Webpack is powerful but overkill for this scope.
+- **Testing Framework**: Jest with React Testing Library — Jest integrates seamlessly with Vite and provides built‑in mocking and coverage tools. React Testing Library encourages testing UI from the user’s perspective. Vitest is newer with similar speed but has a smaller plugin ecosystem; Mocha requires more configuration.
+- **CI/CD**: GitHub Actions (static site deployment to GitHub Pages) — GitHub Actions is free for public repos, easy to configure, and can build the Vite bundle and push to GitHub Pages in one workflow. GitLab CI is comparable but would require moving the repo; CircleCI adds external service overhead.
+- **Deployment**: GitHub Pages (static hosting) — GitHub Pages provides zero‑cost static hosting directly from the repository, sufficient for a client‑only app. Netlify and Vercel offer edge functions and previews but add unnecessary complexity for a simple calculator.
 
 ## Epics
 
-- **EPIC-1** Build the Calculator User Interface: Create a responsive keypad, display area, and error banner using React components. Ensure keyboard accessibility and ARIA compliance.
-- **EPIC-2** Implement the Expression Engine: Develop a recursive‑descent parser/evaluator that supports +, -, *, /, parentheses, decimal and negative numbers, and returns precise results.
-- **EPIC-3** Input Validation and Graceful Error Handling: Detect malformed expressions, division by zero, and other runtime errors; surface clear messages via the Error Handler component.
-- **EPIC-4** Responsive Design & Accessibility: Make the UI adapt to mobile and desktop viewports, add keyboard shortcuts, focus management, and screen‑reader friendly labels.
-- **EPIC-5** Automated Testing and CI Pipeline: Write unit tests for the parser, component snapshot tests, and configure GitHub Actions to run lint, test, and build on every push.
+- **E1** Create Responsive User Interface: Build a clean, accessible React UI with an input field, a display area for the result, and clear error messaging. Ensure the layout works on desktop and mobile.
+- **E2** Implement Calculator Engine: Develop a pure TypeScript library that parses arithmetic expressions (including parentheses, decimals, and negative numbers) and evaluates them, returning either a numeric result or a structured validation error.
+- **E3** Integrate Engine with UI and Handle Errors: Wire the UI to the Calculator Engine, display results instantly, and show user‑friendly error messages for malformed expressions or division‑by‑zero.
+- **E4** Automated Testing and CI Pipeline: Write unit tests for the parsing/evaluation logic covering all operators, parentheses, decimals, and edge cases. Add UI component tests for input handling. Set up GitHub Actions to run tests and deploy on merge.
 
 ## Architecture Diagram
 
 ```mermaid
-flowchart TD
-    User[User] --> UI[Calculator UI]
-    UI --> Engine[Expression Engine]
+graph LR
+    UI["Frontend UI (React)"] --> Engine["Calculator Engine (TS)"]
     Engine --> UI
-    UI --> Display[Result Display]
-    UI --> Error[Error Message]
 ```
