@@ -1,0 +1,30 @@
+version: "3.9"
+
+services:
+  frontend:
+    build: ./frontend
+    ports:
+      - "8080:80"
+    depends_on:
+      - api
+      - mcp
+    networks:
+      - battleship-net
+
+  api:
+    build: ./backend/api
+    ports:
+      - "8000:8000"
+    networks:
+      - battleship-net
+
+  mcp:
+    build: ./backend/mcp
+    ports:
+      - "8001:8001"
+    networks:
+      - battleship-net
+
+networks:
+  battleship-net:
+    driver: bridge
