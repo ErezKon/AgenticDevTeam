@@ -1,59 +1,51 @@
 # Architect Mission Report
 
 **Agent**: architect  
-**Generated**: 2026-08-07T12:59:17.440Z
+**Generated**: 2026-08-07T21:58:32.846Z
 
 ---
 
 ## Architecture Style
 
-Modular monolith with separate service containers (service‑oriented architecture)
+Modular monolith with two FastAPI services (Game API and MCP Tool) deployed as separate containers, orchestrated by Docker Compose
 
 ## Components
 
-- **Vue Frontend** (SPA): Vue 3 single‑page application that provides Player 1 UI for ship placement, board view and firing shots.
-- **Game API Service** (REST API): FastAPI service exposing HTTP endpoints for ship placement, firing, and board queries. Enforces turn rules and hides opponent ship positions.
-- **MCP Tool Server** (Tool Server): FastAPI service that wraps the same game actions behind the Model Context Protocol (MCP) SDK, allowing an AI agent to play via Streamable HTTP.
-- **Game Logic Library** (Domain Library): Pure Python package containing core Battleship rules: board representation, ship placement validation, hit/miss/sunk detection, and turn management. Holds the in‑memory game state.
+- **Vue Frontend** (SPA): Vue 3 single‑page application that renders the player's own board and the attack view, handles ship placement UI and shot submission.
+- **Game API Service** (Backend Service): FastAPI service that owns the game session state, validates ship placement, enforces turn order, computes hit/miss/sunk results, and returns sanitized board views.
+- **MCP Tool Service** (Tool Service): FastAPI service exposing the same game actions via the Model Context Protocol SDK over streamable HTTP, enabling an AI agent to play the game.
+- **In‑Memory Store** (Data Store): A process‑level singleton (Python dict + Pydantic models) that holds active game sessions, board grids, and ship metadata. No persistence required for the assignment.
+- **Docker Compose Orchestrator** (Infrastructure): Docker Compose file defines three containers (frontend, api, mcp) and a shared network, ensuring reproducible local development and single‑command startup.
 
 ## Tech Stack
 
-- **Frontend Framework**: Vue 3 + Vite — Vue 3 offers a gentle learning curve, single‑file components, and built‑in reactivity that matches the simple UI needs. Vite provides fast dev server start‑up. React would add extra boilerplate (JSX, state management) for a small prototype, and Svelte, while lightweight, has a smaller ecosystem and fewer ready‑made UI components.
-- **Backend Framework**: FastAPI (Python 3.11) — FastAPI gives automatic OpenAPI docs, async support, and type‑hint‑driven validation with minimal code—ideal for a quick REST service. Flask would require manual validation and documentation, while Django REST adds heavyweight ORM and project structure unnecessary for an in‑memory game.
-- **MCP Tool Server**: FastAPI + modelcontextprotocol Python SDK — Using the same FastAPI stack keeps the codebase consistent and lets us reuse the Game Logic Library directly. Node.js would introduce a second language runtime for no benefit, and Flask would lack the built‑in request validation and async capabilities that FastAPI already provides.
-- **Domain Logic**: Pure Python package — Python is already the language of the backend services, so a pure Python package avoids cross‑language integration overhead. TypeScript would require a build step and duplication of logic for the backend, while Rust adds compilation complexity unnecessary for a prototype.
-- **Containerization / Orchestration**: Docker Compose — Docker Compose is sufficient for a three‑service prototype, provides simple YAML configuration, and matches the assignment requirement of a single `docker compose up --build`. Swarm and Kubernetes add operational complexity that is not justified by the limited traffic and lack of persistence.
-- **CI/CD**: GitHub Actions — GitHub Actions integrates directly with the repository, requires no external server, and can run Docker builds and lint checks with minimal configuration. GitLab CI would need a separate GitLab instance, and Jenkins adds maintenance overhead.
-- **Testing Framework**: pytest (backend) + vitest (frontend) — pytest is the de‑facto standard for Python testing, offering simple fixtures and powerful assertions. Vitest aligns with Vite and provides fast, native ES module testing. unittest is more verbose, and Jest would require additional configuration for Vite. BDD tools are unnecessary for a short assignment.
-- **Observability**: Standard logging to stdout (Python logging, console.log) — For a prototype, container stdout logs are sufficient and are captured automatically by Docker Compose. ELK and Prometheus add external services and configuration that are overkill for a short‑lived in‑memory game.
+- **Frontend**: Vue 3 + Vite — Vue 3 offers a gentle learning curve, built‑in reactivity, and single‑file components that keep UI code compact. Vite provides fast dev server start‑up, which is ideal for a short assignment. React would add JSX boilerplate and a larger ecosystem to learn, while Svelte, though lightweight, has less community support for UI component libraries.
+- **Backend API**: Python 3.11 + FastAPI — FastAPI gives automatic OpenAPI docs, async support, and type‑checked request models, matching the Python skill set needed for the MCP SDK. Node.js would require extra type safety (TypeScript) to reach comparable clarity, and Go, while performant, would increase development time for rapid prototyping.
+- **MCP Tool Service**: Python 3.11 + FastAPI + modelcontextprotocol SDK — The assignment explicitly requires the MCP Python SDK; using FastAPI keeps the same stack as the main API, reducing cognitive load. Implementing a custom protocol would duplicate effort and risk incompatibility with MCP expectations.
+- **Containerization / Orchestration**: Docker Compose v2 — Docker Compose is the simplest way to spin up three containers with a shared network and works out‑of‑the‑box for local development. Swarm adds unnecessary complexity for a two‑service demo, and Kubernetes would be overkill given the project's limited scaling needs.
+- **CI/CD**: GitHub Actions (basic build & push to Docker Hub) — GitHub Actions integrates directly with the repository, requires no external setup, and can run `docker compose build` and push images. GitLab CI would need a separate GitLab instance, and CircleCI adds extra configuration for a simple pipeline.
+- **Testing**: None (out of scope for assignment) — The brief explicitly states tests are not required. Mentioning alternatives shows awareness without adding unnecessary workload.
 
 ## Epics
 
-- **E1** Player Ship Placement: Allow Player 1 to place three ships (sizes 2, 3, 4) on a 6×6 board with validation that ships do not overlap or exceed board bounds.
-- **E2** Turn‑Based Shooting Mechanics: Implement the turn logic where players alternately fire at coordinates, receive hit/miss/sunk feedback, and the system enforces correct turn order.
-- **E3** Game State Management: Maintain in‑memory representation of both boards, ship locations, and shot history. Provide endpoints to query the player's own board and the opponent view (hits/misses only).
-- **E4** MCP Tool Server Exposure: Expose the same ship‑placement and firing actions via the Model Context Protocol SDK over Streamable HTTP so an AI agent can play the game.
-- **E5** Frontend UI for Player 1: Build the Vue 3 interface showing the player's board, the attack view of the opponent, drag‑and‑drop ship placement, and click‑to‑fire actions.
-- **E6** Docker Compose Orchestration: Containerize all services (frontend, API, MCP server) and provide a single `docker compose up --build` command to launch the complete system.
+- **E1** Player Ship Placement: Allow a player to position three ships of sizes 2, 3, and 4 on a 6×6 board, with server‑side validation that ships do not overlap or exceed board bounds.
+- **E2** Turn‑Based Shooting: Implement the core turn logic: a player fires at a coordinate, receives hit/miss/sunk feedback, and the turn switches to the opponent.
+- **E3** Game State Management: Maintain per‑session board state, ship locations, hit tracking, and win detection entirely in memory, exposing sanitized views via API endpoints.
+- **E4** MCP Tool Integration: Expose the same game actions (place ships, fire shots, query board) through a streamable HTTP endpoint using the Model Context Protocol SDK so an AI agent can play the game.
+- **E5** Docker Compose Setup: Containerize the frontend, backend API, and MCP tool services; provide a single `docker compose up --build` command that launches the full stack locally.
 
 ## Architecture Diagram
 
 ```mermaid
-flowchart LR
+graph TD
     subgraph Frontend
-        UI[Vue 3 SPA]
+        FE[Vue 3 Frontend]
     end
     subgraph Backend
         API["Game API Service (FastAPI)"]
-        MCP["MCP Tool Server (FastAPI + MCP SDK)"]
-        Lib["Game Logic Library (Python)"]
+        MCP["MCP Tool Service (FastAPI + SDK)"]
     end
-    UI -->|REST HTTP| API
-    UI -->|REST HTTP| MCP
-    API --> Lib
-    MCP --> Lib
-    style UI fill:#f9f,stroke:#333,stroke-width:2px
-    style API fill:#bbf,stroke:#333,stroke-width:2px
-    style MCP fill:#bfb,stroke:#333,stroke-width:2px
-    style Lib fill:#ffb,stroke:#333,stroke-width:2px
+    FE -->|REST API calls| API
+    MCP -->|Tool calls| API
+    API -->|Responses| FE
 ```
