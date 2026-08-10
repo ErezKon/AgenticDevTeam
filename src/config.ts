@@ -23,19 +23,19 @@ export const ARCHITECT_MODEL =
 
 /** Product Manager agent model. */
 export const PRODUCT_MANAGER_MODEL =
-    process.env.PRODUCT_MANAGER_MODEL ?? 'llama-3-3-70b-instruct';
+    process.env.PRODUCT_MANAGER_MODEL ?? 'gpt-oss-120b';
 
 /** DBA agent model. */
 export const DBA_MODEL =
-    process.env.DBA_MODEL ?? 'llama-3-3-70b-instruct';
+    process.env.DBA_MODEL ?? 'gpt-oss-120b';
 
 /** Team Leader agent model. */
 export const TEAM_LEADER_MODEL =
-    process.env.TEAM_LEADER_MODEL ?? 'gemma-3-27b-it';
+    process.env.TEAM_LEADER_MODEL ?? 'gpt-oss-120b';
 
 /** DevOps agent model. */
 export const DEVOPS_MODEL =
-    process.env.DEVOPS_MODEL ?? 'mistral-small-3-1-24b-instruct-2503';
+    process.env.DEVOPS_MODEL ?? 'gpt-oss-120b';
 
 /** Codebase Analyzer agent model. */
 export const CODEBASE_ANALYZER_MODEL =
@@ -43,11 +43,11 @@ export const CODEBASE_ANALYZER_MODEL =
 
 /** Principal Developer agent model (frontend & backend). */
 export const PRINCIPAL_DEV_MODEL =
-    process.env.PRINCIPAL_DEV_MODEL ?? 'llama-3-3-70b-instruct';
+    process.env.PRINCIPAL_DEV_MODEL ?? 'gpt-oss-120b';
 
 /** Senior Developer agent model (frontend & backend). */
 export const SENIOR_DEV_MODEL =
-    process.env.SENIOR_DEV_MODEL ?? 'mistral-small-3-1-24b-instruct-2503';
+    process.env.SENIOR_DEV_MODEL ?? 'gpt-oss-120b';
 
 /** Junior Developer agent model (all specialties).
  *  Minimum recommended: 20B+ parameters for reliable code generation.
@@ -261,6 +261,13 @@ export const RESPONSE_SCHEMA_COMPACT =
 export const RESPONSE_SCHEMA_STRIP_ALL_DESCRIPTIONS =
     (process.env.RESPONSE_SCHEMA_STRIP_ALL_DESCRIPTIONS ?? 'true') === 'true';
 
+/** Request JSON mode from the LLM API when a responseFormat schema is set (default: true).
+ *  Sets `response_format: { type: "json_object" }` on the model, which constrains
+ *  the model to always output valid JSON. Requires an OpenAI-compatible API that
+ *  supports JSON mode. Disable with LLM_JSON_MODE=false if the API doesn't support it. */
+export const LLM_JSON_MODE =
+    (process.env.LLM_JSON_MODE ?? 'true') === 'true';
+
 // ─── Context Compaction ─────────────────────────────────────────────────────
 
 /** Max characters any single tool result may contribute to agent history. */
@@ -269,7 +276,7 @@ export const MAX_TOOL_RESULT_CHARS =
 
 /** Number of most-recent tool results kept verbatim in ReAct history. Older ones are stubbed. */
 export const HISTORY_KEEP_RECENT_TOOL_RESULTS =
-    parseInt(process.env.HISTORY_KEEP_RECENT_TOOL_RESULTS ?? '3', 10);
+    parseInt(process.env.HISTORY_KEEP_RECENT_TOOL_RESULTS ?? '2', 10);
 
 /** Enable the preModelHook that compacts ReAct history before each LLM call. */
 export const HISTORY_COMPACTION_ENABLED =
@@ -277,7 +284,7 @@ export const HISTORY_COMPACTION_ENABLED =
 
 /** Hard character ceiling for the assembled ReAct history passed to the LLM. */
 export const HISTORY_MAX_CHARS =
-    parseInt(process.env.HISTORY_MAX_CHARS ?? '40000', 10);
+    parseInt(process.env.HISTORY_MAX_CHARS ?? '30000', 10);
 
 /** Inject a distilled conventions digest in the prompt instead of making agents read_file them. */
 export const CONVENTIONS_INLINE_DIGEST =

@@ -8,6 +8,7 @@
  * `undefined` / `?? []` defaults (PART A7).
  */
 import { z } from 'zod';
+import { jsonrepair } from 'jsonrepair';
 import { getLogger } from './logger';
 
 const log = getLogger('[structured-output]', 183);
@@ -46,6 +47,36 @@ export function parseAgentJson(raw: string): ParseResult {
         try {
             return { ok: true, value: JSON.parse(braces[1]) };
         } catch { /* fall through */ }
+    }
+
+    // Strategy 4: repair malformed / truncated JSON with jsonrepair.
+    // Only attempt if the input looks like it may contain JSON (has { or [).
+    const looksLikeJson = /[{\[]/.test(trimmed);
+    if (looksLikeJson) {
+        try {
+            const repaired = jsonrepair(trimmed);
+            const value = JSON.parse(repaired);
+            if (typeof value === 'object' && value !== null) {
+                log.warn('parseAgentJson: recovered via jsonrepair (input was malformed/truncated)');
+                return { ok: true, value };
+            }
+        } catch { /* fall through */ }
+
+        // Strategy 4b: jsonrepair on the slice starting from the first '{'.
+        // This handles truncated JSON embedded in prose where the closing '}' is
+        // missing (so the balanced-braces regex in strategy 3 can't match).
+        const firstBrace = trimmed.indexOf('{');
+        if (firstBrace >= 0) {
+            try {
+                const slice = trimmed.slice(firstBrace);
+                const repaired = jsonrepair(slice);
+                const value = JSON.parse(repaired);
+                if (typeof value === 'object' && value !== null) {
+                    log.warn('parseAgentJson: recovered via jsonrepair on brace-extracted slice');
+                    return { ok: true, value };
+                }
+            } catch { /* fall through */ }
+        }
     }
 
     return { ok: false, error: `Could not extract JSON. Response starts with: ${trimmed.substring(0, 200)}` };

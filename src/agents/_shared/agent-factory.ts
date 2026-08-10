@@ -9,7 +9,7 @@ import type { StructuredToolInterface } from '@langchain/core/tools';
 import { z } from 'zod';
 import type { BaseMessage } from '@langchain/core/messages';
 import { RunnableLambda } from '@langchain/core/runnables';
-import { LLM_BASE_URL, LLM_MODEL, RESPONSE_SCHEMA_COMPACT, RESPONSE_SCHEMA_STRIP_ALL_DESCRIPTIONS, HISTORY_COMPACTION_ENABLED } from '../../config';
+import { LLM_BASE_URL, LLM_MODEL, RESPONSE_SCHEMA_COMPACT, RESPONSE_SCHEMA_STRIP_ALL_DESCRIPTIONS, HISTORY_COMPACTION_ENABLED, LLM_JSON_MODE } from '../../config';
 import { getAccessToken } from '../../utils/oauth-auth.util';
 import { throttledFetch } from '../../utils/llm-throttle';
 import { cassetteFetch, LLM_CASSETTE_MODE } from '../../utils/llm-cassette';
@@ -64,6 +64,10 @@ export function buildAgent(apiKey: string, cfg: AgentConfig) {
     const modelName = cfg.model ?? LLM_MODEL;
     const tokenCallback = new TokenUsageCallbackHandler(cfg.id, modelName, cfg.phase ?? cfg.id);
 
+    // Enable JSON mode when a response schema is set AND the agent has no tools
+    // (tool-using agents produce intermediate non-JSON responses during the ReAct loop).
+    const useJsonMode = LLM_JSON_MODE && !!cfg.responseFormat && cfg.tools.length === 0;
+
     const model = new ChatOpenAI({
         model: modelName,
         temperature: cfg.temperature ?? 0.3,
@@ -80,7 +84,14 @@ export function buildAgent(apiKey: string, cfg: AgentConfig) {
             fetch: throttled,
         },
         callbacks: [tokenCallback],
+        ...(useJsonMode && {
+            modelKwargs: { response_format: { type: 'json_object' } },
+        }),
     });
+
+    if (useJsonMode) {
+        factoryLog.debug(`${cfg.id}: JSON mode enabled via response_format`);
+    }
 
     let prompt = cfg.systemPrompt;
     if (cfg.responseFormat) {
@@ -124,9 +135,13 @@ export function buildAgent(apiKey: string, cfg: AgentConfig) {
         preModelHook,
     });
 
-    // Expose isCeilingReached on the agent so callers (e.g. respawn logic)
-    // can check whether the loop guard poisoned all tools.
-    return Object.assign(agent, { isCeilingReached });
+    // Expose isCeilingReached and setInvocationId on the agent so callers
+    // (e.g. respawn logic, invocation tracking) can interact with the agent.
+    return Object.assign(agent, {
+        isCeilingReached,
+        /** Tag all subsequent LLM calls with an invocation ID for per-invocation attribution. */
+        setInvocationId: (id: string | undefined) => tokenCallback.setInvocationId(id),
+    });
 }
 
 /**

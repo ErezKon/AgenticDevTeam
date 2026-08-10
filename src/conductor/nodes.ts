@@ -53,6 +53,7 @@ import {
     buildContext, recordContextChars, getContextStats,
 } from './context-builder';
 import { getCumulativeCompactionStats } from '../agents/_shared/history-compactor';
+import { getTruncationStats } from '../tools/_shared/truncate';
 import type { ContextSection } from './context-builder';
 import {
     parseAgentJson, validateAgentOutput, buildRepairMessage,
@@ -327,10 +328,17 @@ async function invokeAgent(
         const startMs = Date.now();
         emitRunEvent('agent:start', { agentId, phase, model });
 
+        // Track this invocation for the Invocation Efficiency report
+        const invocationId = tokenTracker.startInvocation(agentId, phase);
+        agent.setInvocationId?.(invocationId);
+
         const result = await agent.invoke(
             { messages: [{ role: 'user', content: userMessage }] },
             { configurable: { thread_id: threadId }, recursionLimit },
         );
+
+        tokenTracker.endInvocation(invocationId);
+        agent.setInvocationId?.(undefined);
 
         // Extract per-invocation token usage from messages (complementary to callback tracking)
         const tokenUsage = extractTokenUsageFromMessages(result, agentId, model, phase);
@@ -354,68 +362,91 @@ async function invokeAgent(
         // Extract JSON from the response using the shared parser
         const raw = last.content.trim();
         const parseResult = parseAgentJson(raw);
-        if (!parseResult.ok) {
+
+        const schema = opts?.schema;
+
+        // If JSON parsing failed and no schema is provided, throw immediately
+        if (!parseResult.ok && !schema) {
             emitEnd({ error: parseResult.error });
             throw new SyntaxError(
                 `Agent "${threadSuffix}" did not return valid JSON. ${parseResult.error}`
             );
         }
 
-        let parsed = parseResult.value;
+        // Determine initial parse + validation state
+        let parsed = parseResult.ok ? parseResult.value : undefined;
+        let issuesForRepair: string;
 
-        // ── Schema validation with repair loop (fixes A7) ────────────────
-        if (opts?.schema) {
+        if (!parseResult.ok) {
+            // JSON parsing failed but we have a schema — route into repair loop
+            invokeLog.warn(`Agent "${threadSuffix}" returned unparseable JSON — entering repair loop. ${parseResult.error}`);
+            issuesForRepair = `Response was not valid JSON. ${parseResult.error}`;
+        } else if (schema) {
             _recordValidated();
-            const validation = validateAgentOutput(opts.schema, parsed);
+            const validation = validateAgentOutput(schema, parsed);
             if (validation.ok) {
                 emitEnd();
                 return { output: validation.value, tokenUsage };
             }
-
-            // Attempt repair on a FRESH thread: avoid replaying the entire ReAct
-            // history just to fix a schema violation. The repair message carries
-            // the previous raw JSON so the model corrects rather than regenerates.
             invokeLog.warn(`Agent "${threadSuffix}" output failed schema validation:\n${validation.issues}`);
-            for (let attempt = 0; attempt < AGENT_OUTPUT_REPAIR_ATTEMPTS; attempt++) {
-                invokeLog.info(`Repair attempt ${attempt + 1}/${AGENT_OUTPUT_REPAIR_ATTEMPTS} for "${threadSuffix}"...`);
-                const repairThreadId = `${threadId}-repair-${attempt}`;
-                const repairMsg = buildRepairMessage(validation.issues, userMessage, raw);
-                const repairResult = await agent.invoke(
+            issuesForRepair = validation.issues;
+        } else {
+            // No schema, JSON parsed fine — return as-is
+            emitEnd();
+            return { output: parsed, tokenUsage };
+        }
+
+        // ── Repair loop: fix JSON parse failures OR schema violations ─────
+        // Attempt repair on a FRESH thread: avoid replaying the entire ReAct
+        // history just to fix a schema violation. The repair message carries
+        // the previous raw JSON so the model corrects rather than regenerates.
+        for (let attempt = 0; attempt < AGENT_OUTPUT_REPAIR_ATTEMPTS; attempt++) {
+            invokeLog.info(`Repair attempt ${attempt + 1}/${AGENT_OUTPUT_REPAIR_ATTEMPTS} for "${threadSuffix}"...`);
+            const repairThreadId = `${threadId}-repair-${attempt}`;
+            const repairMsg = buildRepairMessage(issuesForRepair, userMessage, raw);
+            let repairResult: any;
+            try {
+                repairResult = await agent.invoke(
                     { messages: [{ role: 'user', content: repairMsg }] },
-                    { configurable: { thread_id: repairThreadId }, recursionLimit: 2 },
+                    // Use 6 to accommodate input processing + pre_model_hook + agent
+                    // node steps. The previous value of 2 was too low and caused
+                    // GraphRecursionError that crashed the entire pipeline.
+                    { configurable: { thread_id: repairThreadId }, recursionLimit: 6 },
                 );
-                const repairLast = repairResult.messages[repairResult.messages.length - 1];
-                if (typeof repairLast.content !== 'string') {
-                    // Non-string content — try validating it directly
-                    const rv = validateAgentOutput(opts.schema, repairLast.content);
-                    if (rv.ok) {
-                        _recordRepaired();
-                        invokeLog.info(`Agent "${threadSuffix}" repaired on attempt ${attempt + 1}`);
-                        emitEnd({ repaired: true, repairAttempt: attempt + 1 });
-                        return { output: rv.value, tokenUsage };
-                    }
-                    continue;
-                }
-                const repairParse = parseAgentJson(repairLast.content.trim());
-                if (!repairParse.ok) continue;
-                const rv = validateAgentOutput(opts.schema, repairParse.value);
+            } catch (repairErr: any) {
+                invokeLog.warn(`Repair attempt ${attempt + 1} for "${threadSuffix}" threw: ${repairErr?.message ?? repairErr}`);
+                continue;
+            }
+            const repairLast = repairResult.messages[repairResult.messages.length - 1];
+            if (typeof repairLast.content !== 'string') {
+                // Non-string content — try validating it directly
+                const rv = validateAgentOutput(schema!, repairLast.content);
                 if (rv.ok) {
                     _recordRepaired();
                     invokeLog.info(`Agent "${threadSuffix}" repaired on attempt ${attempt + 1}`);
                     emitEnd({ repaired: true, repairAttempt: attempt + 1 });
                     return { output: rv.value, tokenUsage };
                 }
+                continue;
             }
-
-            // All repair attempts failed — log ERROR and return the unvalidated object
-            _recordFailed();
-            invokeLog.error(`Agent "${threadSuffix}" output still invalid after ${AGENT_OUTPUT_REPAIR_ATTEMPTS} repair attempt(s):\n${validation.issues}`);
-            emitEnd({ validationFailed: true });
-            return { output: parsed, tokenUsage };
+            const repairParse = parseAgentJson(repairLast.content.trim());
+            if (!repairParse.ok) continue;
+            const rv = validateAgentOutput(schema!, repairParse.value);
+            if (rv.ok) {
+                _recordRepaired();
+                invokeLog.info(`Agent "${threadSuffix}" repaired on attempt ${attempt + 1}`);
+                emitEnd({ repaired: true, repairAttempt: attempt + 1 });
+                return { output: rv.value, tokenUsage };
+            }
         }
 
-        emitEnd();
-        return { output: parsed, tokenUsage };
+        // All repair attempts failed — strict enforcement: throw instead of
+        // returning unvalidated data that silently corrupts downstream state.
+        _recordFailed();
+        const errMsg = `Agent "${threadSuffix}" output invalid after ${AGENT_OUTPUT_REPAIR_ATTEMPTS} repair attempt(s). Issues: ${issuesForRepair}`;
+        invokeLog.error(errMsg);
+        emitEnd({ validationFailed: true });
+        throw new Error(errMsg);
     }, threadSuffix);
 }
 
@@ -1697,6 +1728,24 @@ export async function finalizeNode(state: ProjectStateType): Promise<Partial<Pro
         summary.push(`Tool results stubbed: ${compaction.totalToolResultsStubbed}, write args stubbed: ${compaction.totalWriteArgsStubbed}`);
     } else {
         summary.push('No compaction events recorded');
+    }
+    const truncation = getTruncationStats();
+    if (truncation.truncated > 0) {
+        summary.push(`Tool results truncated: ${truncation.truncated}, chars removed: ${truncation.charsRemoved.toLocaleString()}`);
+    }
+    summary.push('');
+    summary.push(`── Invocation Efficiency ──`);
+    const invocationRows = tokenTracker.getInvocationSummaries();
+    if (invocationRows.length > 0) {
+        for (const r of invocationRows) {
+            summary.push(
+                `  ${r.agentId}: ${r.invocations} inv, ${r.avgCallsPerInvocation} calls/inv, ` +
+                `avg ${r.avgInputPerCall} in/call, growth ${r.growthFactor}x` +
+                (r.respawns > 0 ? `, ${r.respawns} respawns` : ''),
+            );
+        }
+    } else {
+        summary.push('No invocation data recorded');
     }
     summary.push('');
     summary.push(`── Budget ──`);

@@ -20,7 +20,13 @@ jest.mock('../src/agents/qa/qa.agents', () => ({
     createQaLeadAgent: jest.fn(() => ({
         invoke: jest.fn().mockResolvedValue({
             messages: [{ role: 'assistant', content: JSON.stringify({
-                testPlan: { unit: ['test-1'], integration: [], e2e: [] },
+                testPlan: {
+                    scope: 'Full test coverage for calculator',
+                    unit: [{ target: 'Calculator', description: 'test-1', framework: 'jest' }],
+                    integration: [],
+                    e2e: [],
+                    coverageTargets: { unit: 80, integration: 60, e2e: 40 },
+                },
             }) }],
         }),
     })),
@@ -97,6 +103,9 @@ jest.mock('../src/utils/token-tracker', () => ({
             totalCalls: 0, totalInputTokens: 0, totalOutputTokens: 0, totalTokens: 0,
             byAgent: [], byPhase: [], byModel: [],
         }),
+        startInvocation: jest.fn().mockReturnValue('inv-mock-0'),
+        endInvocation: jest.fn(),
+        getInvocationSummaries: jest.fn().mockReturnValue([]),
     },
 }));
 
@@ -219,7 +228,7 @@ describe('QA Node Resilience', () => {
 
         // Test plan from QA Lead should still be set
         expect(result.testPlan).toBeDefined();
-        expect(result.testPlan!.unit).toEqual(['test-1']);
+        expect(result.testPlan!.unit).toEqual([{ target: 'Calculator', description: 'test-1', framework: 'jest' }]);
 
         // Bugs array should exist (empty since QA Unit failed before producing any)
         expect(result.bugs).toBeDefined();

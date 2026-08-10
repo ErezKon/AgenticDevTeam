@@ -1,0 +1,13 @@
+For the existing to-do list web application, I want to add reminder and notification features.
+
+Requirements:
+- A user can optionally set a due date and time on any task.
+- If a due date/time is set, the app should highlight tasks that are overdue or due soon (for example, within the next 24 hours).
+- The app should allow the user to enable or disable browser notifications.
+- When notifications are enabled, the app should show a browser notification when a task becomes due.
+- If notifications are not possible (for example, on unsupported browsers), the app should fail gracefully and still show visual cues in the UI.
+- There should be a simple settings section where the user can:
+  - Turn notifications on or off.
+  - Choose a default reminder offset (e.g., 5, 10, or 30 minutes before the due time).
+
+You do not need to integrate with email or external calendar systems for now.

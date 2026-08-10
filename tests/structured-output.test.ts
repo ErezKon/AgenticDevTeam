@@ -98,6 +98,46 @@ describe('parseAgentJson', () => {
             expect((result.value as any).nested.deep).toBe(true);
         }
     });
+
+    // ── Strategy 4: jsonrepair ──────────────────────────────────────────
+
+    test('repairs truncated JSON (missing closing braces)', () => {
+        // Simulates a response truncated by max_tokens
+        const raw = '{"dbDesign":{"engine":"PostgreSQL","rationale":"Good choice","entities":[{"name":"users","columns":[{"name":"id","type":"int"}]}';
+        const result = parseAgentJson(raw);
+        expect(result.ok).toBe(true);
+        if (result.ok) {
+            expect((result.value as any).dbDesign.engine).toBe('PostgreSQL');
+        }
+    });
+
+    test('repairs JSON with trailing commas', () => {
+        const raw = '{"name": "test", "items": [1, 2, 3,],}';
+        const result = parseAgentJson(raw);
+        expect(result.ok).toBe(true);
+        if (result.ok) {
+            expect((result.value as any).name).toBe('test');
+            expect((result.value as any).items).toEqual([1, 2, 3]);
+        }
+    });
+
+    test('repairs JSON with single quotes', () => {
+        const raw = "{'key': 'value', 'num': 42}";
+        const result = parseAgentJson(raw);
+        expect(result.ok).toBe(true);
+        if (result.ok) {
+            expect((result.value as any).key).toBe('value');
+        }
+    });
+
+    test('repairs truncated JSON embedded in prose', () => {
+        const raw = 'Here is the result: {"data": {"items": [1, 2, 3';
+        const result = parseAgentJson(raw);
+        expect(result.ok).toBe(true);
+        if (result.ok) {
+            expect((result.value as any).data.items).toEqual([1, 2, 3]);
+        }
+    });
 });
 
 // ─── summariseZodIssues ─────────────────────────────────────────────────────

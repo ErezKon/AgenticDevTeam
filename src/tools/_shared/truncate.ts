@@ -1,5 +1,27 @@
 import { MAX_TOOL_RESULT_CHARS } from '../../config';
 
+// ─── Truncation counters ────────────────────────────────────────────────────
+
+/** Cumulative truncation stats across an entire run. */
+export interface TruncationStats {
+    /** Number of tool results that were truncated. */
+    truncated: number;
+    /** Total characters removed by truncation. */
+    charsRemoved: number;
+}
+
+let _stats = { truncated: 0, charsRemoved: 0 };
+
+/** Get the cumulative truncation stats for the current run. */
+export function getTruncationStats(): TruncationStats {
+    return { ...(_stats) };
+}
+
+/** Reset truncation stats (for testing / run start). */
+export function _resetTruncationStats(): void {
+    _stats = { truncated: 0, charsRemoved: 0 };
+}
+
 /**
  * Clip a tool result to a character budget, keeping head and tail.
  * The middle is replaced by a marker so the model knows content is missing
@@ -22,6 +44,8 @@ export function truncateToolResult(
     const headSize = Math.floor(maxChars * headRatio);
     const tailSize = maxChars - headSize;
     const omitted = result.length - headSize - tailSize;
+    _stats.truncated++;
+    _stats.charsRemoved += omitted;
     return [
         result.slice(0, headSize),
         `\n... [${label}: ${omitted} chars omitted of ${result.length} total.`,

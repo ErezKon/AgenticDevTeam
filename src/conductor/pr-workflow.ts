@@ -46,7 +46,7 @@ import type {
 import type { DeveloperOutput } from '../agents/developers/schemas/dev-output.schema';
 import type { ReviewOutput } from '../agents/developers/schemas/review-output.schema';
 import { extractTokenUsageFromMessages } from '../utils/token-usage-extractor';
-import type { TokenCallRecord } from '../utils/token-tracker';
+import { tokenTracker, type TokenCallRecord } from '../utils/token-tracker';
 import type { DevRank } from '../agents/_shared/persona';
 
 const log = getLogger('[PR-Workflow]', 135);
@@ -253,12 +253,12 @@ function parseDevResult(
         throw new Error(`Invalid JSON output from dev agent: ${parseResult.error}`);
     }
 
-    // Validate against DeveloperOutputSchema — log issues but return the object
+    // Validate against DeveloperOutputSchema — throw on failure to enforce schema
     const validation = validateAgentOutput(DeveloperOutputSchema, parseResult.value);
     if (!validation.ok) {
-        log.warn(`Dev agent ${agentId} output schema issues:\n${validation.issues}`);
+        throw new Error(`Dev agent ${agentId} output failed schema validation:\n${validation.issues}`);
     }
-    return { output: (validation.ok ? validation.value : parseResult.value) as DeveloperOutput, tokenUsage };
+    return { output: validation.value as DeveloperOutput, tokenUsage };
 }
 
 /**
@@ -278,17 +278,25 @@ async function invokeDevAgent(
     buildAgentFn?: () => any,
 ): Promise<{ output: DeveloperOutput; tokenUsage: TokenCallRecord | null; allTokenUsage?: TokenCallRecord[] }> {
     return retryWithBackoff(async () => {
+        // Track the overall dev invocation (spans all respawn generations)
+        const invocationId = tokenTracker.startInvocation(agentId, 'development');
+
         // ── Respawn loop ─────────────────────────────────────────────────
         if (AGENT_RESPAWN_ENABLED && buildAgentFn) {
             const allTokenUsage: TokenCallRecord[] = [];
             let currentAgent = agent;
             let handoff: ReturnType<typeof buildHandoff> | null = null;
+            let respawnCount = 0;
 
             for (let gen = 0; gen <= AGENT_RESPAWN_MAX_GENERATIONS; gen++) {
                 // Build a fresh agent for generations > 0
                 if (gen > 0) {
                     currentAgent = buildAgentFn();
+                    respawnCount++;
                 }
+
+                // Tag LLM calls with the invocation ID
+                currentAgent.setInvocationId?.(invocationId);
 
                 // Compose the message: base message + handoff for gen > 0
                 const message = (gen === 0 || !handoff)
@@ -308,6 +316,7 @@ async function invokeDevAgent(
 
                 if (!ceilingHit || gen === AGENT_RESPAWN_MAX_GENERATIONS) {
                     // Done — return the final result with all accumulated token usage
+                    tokenTracker.endInvocation(invocationId, respawnCount > 0 ? respawnCount : undefined);
                     return {
                         output: parsed.output,
                         tokenUsage: allTokenUsage[0] ?? null,
@@ -330,10 +339,12 @@ async function invokeDevAgent(
         }
 
         // ── Non-respawn path (fallback or no builder provided) ───────────
+        agent.setInvocationId?.(invocationId);
         const result = await agent.invoke(
             { messages: [{ role: 'user', content: userMessage }] },
             { configurable: { thread_id: `dev-pr-${threadSuffix}-${Date.now()}` }, recursionLimit: DEV_RECURSION_LIMIT },
         );
+        tokenTracker.endInvocation(invocationId);
         return parseDevResult(result, agentId, model);
     }, `dev-${threadSuffix}`);
 }
@@ -343,6 +354,10 @@ async function invokeReviewerAgent(
     agentId: string, model: string,
 ): Promise<{ output: ReviewOutput; tokenUsage: TokenCallRecord | null }> {
     return retryWithBackoff(async () => {
+        // Track this reviewer invocation
+        const invocationId = tokenTracker.startInvocation(agentId, 'review');
+        agent.setInvocationId?.(invocationId);
+
         let result: any;
         try {
             result = await agent.invoke(
@@ -353,13 +368,16 @@ async function invokeReviewerAgent(
             const m = String(err?.message ?? err);
             if (m.includes('Recursion limit') || m.includes('recursion limit')) {
                 log.warn(`Reviewer ${agentId} hit the recursion limit — abstaining (treated as approved).`);
+                tokenTracker.endInvocation(invocationId);
                 return {
                     output: { status: 'approved', summary: 'Reviewer abstained: tool-call budget exhausted.', comments: [] },
                     tokenUsage: null,
                 };
             }
+            tokenTracker.endInvocation(invocationId);
             throw err;   // rate limits stay retriable via retryWithBackoff
         }
+        tokenTracker.endInvocation(invocationId);
         const tokenUsage = extractTokenUsageFromMessages(result, agentId, model, 'review');
 
         // Guard against empty or missing messages
