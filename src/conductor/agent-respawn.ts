@@ -1,0 +1,199 @@
+/**
+ * Agent respawn — deterministic handoff summary for fresh-context continuation.
+ *
+ * When a dev agent hits the tool-call ceiling, instead of poisoning all tools
+ * and flailing with a maximal history, we extract a compact handoff summary
+ * from the completed invocation and spawn a fresh agent with clean context.
+ *
+ * The handoff is built DETERMINISTICALLY from the message history — no extra
+ * LLM call, so the summary itself is free. Generation 2 starts at ~4k input
+ * tokens with better signal than generation 1 had at 15k.
+ */
+
+import {
+    isAIMessage,
+    isToolMessage,
+    type BaseMessage,
+} from '@langchain/core/messages';
+
+// ─── Types ──────────────────────────────────────────────────────────────────
+
+export interface HandoffSummary {
+    generation: number;
+    filesWritten: { path: string; action: string }[];
+    commandsRun: { command: string; exitCode: number }[];
+    keyFindings: string[];
+    remainingWork: string;
+}
+
+// ─── Tool-call argument extractors ──────────────────────────────────────────
+
+/** Tool names that produce file writes. */
+const FILE_WRITE_TOOLS = new Set(['write_file', 'edit_file', 'create_file']);
+
+/** Tool names that run shell commands. */
+const COMMAND_TOOLS = new Set(['run_command']);
+
+/**
+ * Parse the exit code from a run_command tool result.
+ * The shell tool typically formats output as "Exit code: N\n..." or includes
+ * "exit code N" somewhere in the result.
+ */
+function parseExitCode(resultContent: string): number {
+    // Try "Exit code: N" pattern
+    const exitMatch = resultContent.match(/[Ee]xit\s*code[:\s]+(\d+)/);
+    if (exitMatch) return parseInt(exitMatch[1], 10);
+    // Try "exited with N" pattern
+    const exitedMatch = resultContent.match(/exited\s+with\s+(\d+)/);
+    if (exitedMatch) return parseInt(exitedMatch[1], 10);
+    // Default: assume success if no error indicators
+    if (resultContent.includes('Error') || resultContent.includes('FAIL') || resultContent.includes('error')) {
+        return 1;
+    }
+    return 0;
+}
+
+// ─── Core functions ─────────────────────────────────────────────────────────
+
+/**
+ * Build a compact handoff brief from a completed (or ceiling-terminated)
+ * agent invocation. Derived DETERMINISTICALLY from the message history —
+ * no extra LLM call, so the summary itself is free.
+ *
+ * Walks `AIMessage.tool_calls` and their `ToolMessage` results:
+ * - `write_file` / `edit_file` calls -> `filesWritten` (path + action only, never content)
+ * - `run_command` calls -> `commandsRun` (command + exit code parsed from the result)
+ * - The agent's last non-empty text content, clipped to 800 chars -> `keyFindings`
+ */
+export function buildHandoff(messages: BaseMessage[], generation: number): HandoffSummary {
+    const filesWritten: { path: string; action: string }[] = [];
+    const commandsRun: { command: string; exitCode: number }[] = [];
+    const keyFindings: string[] = [];
+    let remainingWork = '';
+
+    // Build a map of tool_call_id -> ToolMessage content for result lookup
+    const toolResults = new Map<string, string>();
+    for (const m of messages) {
+        if (isToolMessage(m)) {
+            const callId = (m as any).tool_call_id;
+            if (callId) {
+                const content = typeof m.content === 'string'
+                    ? m.content
+                    : JSON.stringify(m.content);
+                toolResults.set(callId, content);
+            }
+        }
+    }
+
+    // Walk AIMessages to extract tool calls
+    for (const m of messages) {
+        if (!isAIMessage(m) || !m.tool_calls?.length) continue;
+
+        for (const tc of m.tool_calls) {
+            const toolName = tc.name;
+            const args = tc.args ?? {};
+
+            if (FILE_WRITE_TOOLS.has(toolName)) {
+                const filePath = args.filePath ?? args.path ?? args.file ?? '(unknown)';
+                const action = toolName === 'edit_file' ? 'edited'
+                    : toolName === 'create_file' ? 'created'
+                    : 'created';
+                // Deduplicate by path — keep the last action
+                const existingIdx = filesWritten.findIndex(f => f.path === filePath);
+                if (existingIdx >= 0) {
+                    filesWritten[existingIdx].action = action;
+                } else {
+                    filesWritten.push({ path: filePath, action });
+                }
+            }
+
+            if (COMMAND_TOOLS.has(toolName)) {
+                const command = args.command ?? args.cmd ?? '(unknown)';
+                const resultContent = toolResults.get(tc.id ?? '') ?? '';
+                const exitCode = parseExitCode(resultContent);
+                commandsRun.push({ command, exitCode });
+            }
+        }
+    }
+
+    // Extract key findings from the agent's last non-empty text content
+    for (let i = messages.length - 1; i >= 0; i--) {
+        const m = messages[i];
+        if (isAIMessage(m)) {
+            const textContent = typeof m.content === 'string'
+                ? m.content
+                : (Array.isArray(m.content)
+                    ? m.content.filter((c: any) => c.type === 'text').map((c: any) => c.text).join('\n')
+                    : '');
+
+            if (textContent.trim().length > 0) {
+                keyFindings.push(textContent.trim().slice(0, 800));
+                break;
+            }
+        }
+    }
+
+    // Derive remaining work: if any command had a non-zero exit code, note it
+    const failedCommands = commandsRun.filter(c => c.exitCode !== 0);
+    if (failedCommands.length > 0) {
+        const lastFailed = failedCommands[failedCommands.length - 1];
+        remainingWork = `Fix failing command: \`${lastFailed.command}\` (exit ${lastFailed.exitCode}), then re-run tests and report.`;
+    } else if (filesWritten.length === 0) {
+        remainingWork = 'No files written yet. Complete the implementation, write tests, and verify.';
+    } else {
+        remainingWork = 'Continue implementation if incomplete. Run tests, fix failures, then report.';
+    }
+
+    return {
+        generation,
+        filesWritten,
+        commandsRun,
+        keyFindings,
+        remainingWork,
+    };
+}
+
+/**
+ * Render a HandoffSummary as the prompt section for the successor agent.
+ *
+ * The output is short, ordered, and front-loaded so the successor starts
+ * with better signal at ~4k tokens than the predecessor had at 15k.
+ */
+export function renderHandoff(h: HandoffSummary): string {
+    const sections: string[] = [];
+
+    sections.push(`## Previous Attempt (generation ${h.generation}) \u2014 you are continuing this work`);
+
+    // Files written
+    if (h.filesWritten.length > 0) {
+        const fileList = h.filesWritten
+            .map(f => `${f.path} (${f.action})`)
+            .join(', ');
+        sections.push(`Files already written: ${fileList}`);
+    } else {
+        sections.push('Files already written: (none)');
+    }
+
+    // Commands run
+    if (h.commandsRun.length > 0) {
+        // Show only the last 5 commands to keep it compact
+        const recentCmds = h.commandsRun.slice(-5);
+        const cmdList = recentCmds
+            .map(c => `\`${c.command}\` (exit ${c.exitCode})`)
+            .join(', ');
+        sections.push(`Commands run: ${cmdList}`);
+    }
+
+    // Key findings
+    if (h.keyFindings.length > 0) {
+        sections.push(`Findings: ${h.keyFindings.join(' ')}`);
+    }
+
+    // Remaining work
+    sections.push(`Remaining: ${h.remainingWork}`);
+
+    // Instruction to avoid redundant work
+    sections.push('Do NOT re-read files you already wrote unless you need to change them.');
+
+    return sections.join('\n');
+}

@@ -6,6 +6,7 @@
  */
 
 import { getConventionReadInstructions } from '../../utils/coding-conventions';
+import { PERSONA_COMPACT } from '../../config';
 
 export type DevRank = 'principal' | 'senior' | 'junior';
 export type DevDomain = 'frontend' | 'backend' | 'fullstack';
@@ -16,6 +17,8 @@ interface DevPersonaConfig {
     languages: string[];
     tag: string;
     conventionFiles?: string[];
+    /** When true, appends maintain-mode instructions to the persona. */
+    isMaintainMode?: boolean;
 }
 
 const RANK_RESPONSIBILITIES: Record<DevRank, string> = {
@@ -49,9 +52,67 @@ const DOMAIN_CONTEXT: Record<DevDomain, string> = {
 };
 
 /**
+ * Build a compact system prompt for a developer agent (~2,500 chars).
+ *
+ * Removes git_workflow (conductor handles commits/pushes), output_rules
+ * (schema already specifies the shape), and merges TDD into workflow.
+ * maintain_mode is appended only when `isMaintainMode` is true.
+ */
+export function buildDevPersonaCompact(cfg: DevPersonaConfig): string {
+    const parts = [
+        `<identity>
+    ${cfg.tag}
+    ${RANK_RESPONSIBILITIES[cfg.rank]}
+    ${DOMAIN_CONTEXT[cfg.domain]}
+    Your technology expertise: ${cfg.languages.join(', ')}.
+</identity>`,
+        `<critical_rules>
+    - ONLY touch files relevant to YOUR assigned story — unless wiring components into the app entry point.
+    - Match the Architect's tech stack EXACTLY. Do not substitute technologies.
+    - Leave the project RUNNABLE after every change. No broken imports or syntax errors.
+    - Follow existing conventions; do not invent new ones unless you are the Principal setting them.
+    - NO DEAD CODE. Every class/function/constant you create MUST be imported and used in the same PR.
+    - STAY IN YOUR LANE. Do not read other agents' mission reports or out-of-domain source files.
+    - Before finishing: run tests and make them PASS. Never disable, skip, or delete a test.
+    - Every test file MUST contain at least one \`it\`/\`test\` block.
+</critical_rules>`,
+    ];
+
+    if (cfg.conventionFiles?.length) {
+        parts.push(getConventionReadInstructions(cfg.conventionFiles));
+    }
+
+    parts.push(`<workflow>
+    1. READ your assigned stories, architecture, tech stack, and DB design.
+    2. READ existing files (fileChanges log + workspace) to understand what's built.
+    3. PLAN your approach: files to create/modify, in what order.
+    4. WRITE TESTS FIRST — unit + integration. Tests define expected behaviour.
+    5. IMPLEMENT production code to make tests pass. Batch your work: write a complete file in one write_file call rather than many edit_file calls.
+    6. RUN tests via run_command, confirm exit 0. Install deps first if needed.
+    7. REPORT: record all FileChange entries.
+    Do not run git commands — the conductor commits and pushes your work.
+</workflow>`);
+
+    if (cfg.isMaintainMode) {
+        parts.push(`<maintain_mode>
+    READ existing files BEFORE writing. Use edit_file for surgical changes.
+    PRESERVE existing code style, naming, and structure. Do NOT refactor unrelated code.
+    Check for existing files before creating new ones. Match style of existing entries.
+</maintain_mode>`);
+    }
+
+    return parts.join('\n\n');
+}
+
+/**
  * Build a complete system prompt for a developer agent.
+ *
+ * When `PERSONA_COMPACT` is true (default), delegates to the compact variant
+ * that is ~2,500 chars instead of ~7,000.
  */
 export function buildDevPersona(cfg: DevPersonaConfig): string {
+    if (PERSONA_COMPACT) return buildDevPersonaCompact(cfg);
+
     return `<identity>
     ${cfg.tag}
     ${RANK_RESPONSIBILITIES[cfg.rank]}
@@ -60,7 +121,10 @@ export function buildDevPersona(cfg: DevPersonaConfig): string {
 </identity>
 
 <critical_rules>
-    - ONLY touch files relevant to YOUR assigned story. Do not modify files belonging to other assignments.
+    - ONLY touch files relevant to YOUR assigned story. Do not modify files belonging to other
+      assignments — UNLESS your assignment is explicitly about integrating/wiring components into
+      the application entry point, in which case you MUST import and use the components from other
+      assignments.
     - Match the chosen tech stack EXACTLY as decided by the Architect. Do not substitute technologies.
     - Leave the project in a RUNNABLE state after every change. Never leave broken imports or syntax errors.
     - Follow existing project conventions (naming, structure, patterns) — do not invent new ones unless you are the Principal setting them.
@@ -200,14 +264,8 @@ ${cfg.conventionFiles.map((f) => `    - .conventions/${f}`).join('\n')}
 </review_guidelines>
 
 <tool_usage>
-    The PR diff is provided INLINE in the user message. Read it there first.
-    - You have a HARD BUDGET of 6 tool calls. Exceeding it disables all tools.
-    - Only use tools if the inline diff says "[DIFF TOO LARGE]" or "[DIFF TRUNCATED]".
-    - NEVER pass a \`baseBranch\` argument — the correct base branch is applied automatically.
-    - NEVER call the same tool twice with the same arguments.
-    - If a tool returns an error or an empty result, do NOT retry it. Move on and
-      review with the information you already have.
-    - Workflow: read diff → analyse → output JSON. Nothing else.
+    The PR diff is INLINE in the user message. Only use tools if the diff says "[DIFF TOO LARGE]" or "[DIFF TRUNCATED]".
+    HARD BUDGET: 6 tool calls. Never pass \`baseBranch\`. Never retry a failed/empty tool call.
 </tool_usage>
 
 <output_format>

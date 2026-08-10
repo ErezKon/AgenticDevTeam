@@ -47,7 +47,7 @@ describe('Tool Loop Guard', () => {
         const readFile = makeMockTool('read_file', 'file-contents-here');
         const listDir = makeMockTool('list_dir', 'dir-listing');
 
-        const guarded = withLoopGuard([readFile.tool, listDir.tool], 'test-agent');
+        const { tools: guarded } = withLoopGuard([readFile.tool, listDir.tool], 'test-agent');
         const guardedRead = guarded.find(t => t.name === 'read_file')!;
         const guardedList = guarded.find(t => t.name === 'list_dir')!;
 
@@ -73,7 +73,7 @@ describe('Tool Loop Guard', () => {
         const readFile = makeMockTool('read_file', 'file-contents');
         const listDir = makeMockTool('list_dir', 'listing');
 
-        const guarded = withLoopGuard([readFile.tool, listDir.tool], 'test-agent');
+        const { tools: guarded } = withLoopGuard([readFile.tool, listDir.tool], 'test-agent');
         const guardedRead = guarded.find(t => t.name === 'read_file')!;
         const guardedList = guarded.find(t => t.name === 'list_dir')!;
 
@@ -104,7 +104,7 @@ describe('Tool Loop Guard', () => {
         const readFile = makeMockTool('read_file', 'original-content');
         const writeFile = makeMockTool('write_file', 'written');
 
-        const guarded = withLoopGuard([readFile.tool, writeFile.tool], 'test-agent');
+        const { tools: guarded } = withLoopGuard([readFile.tool, writeFile.tool], 'test-agent');
         const guardedRead = guarded.find(t => t.name === 'read_file')!;
         const guardedWrite = guarded.find(t => t.name === 'write_file')!;
 
@@ -128,7 +128,7 @@ describe('Tool Loop Guard', () => {
         const writeFile = makeMockTool('write_file', 'written');
         const readFile = makeMockTool('read_file', 'content');
 
-        const guarded = withLoopGuard([writeFile.tool, readFile.tool], 'test-agent');
+        const { tools: guarded } = withLoopGuard([writeFile.tool, readFile.tool], 'test-agent');
         const guardedWrite = guarded.find(t => t.name === 'write_file')!;
 
         const args = { path: 'src/index.ts' };
@@ -149,7 +149,7 @@ describe('Tool Loop Guard', () => {
         const toolB = makeMockTool('list_dir', 'b-result');
 
         // Very low ceiling: 3 total calls
-        const guarded = withLoopGuard([toolA.tool, toolB.tool], 'test-agent', 3);
+        const { tools: guarded } = withLoopGuard([toolA.tool, toolB.tool], 'test-agent', 3);
         const guardedA = guarded.find(t => t.name === 'read_file')!;
         const guardedB = guarded.find(t => t.name === 'list_dir')!;
 
@@ -171,7 +171,7 @@ describe('Tool Loop Guard', () => {
         const readFile = makeMockTool('read_file', 'content');
         const runCmd = makeMockTool('run_command', 'cmd-output');
 
-        const guarded = withLoopGuard([readFile.tool, runCmd.tool], 'test-agent');
+        const { tools: guarded } = withLoopGuard([readFile.tool, runCmd.tool], 'test-agent');
         const guardedRead = guarded.find(t => t.name === 'read_file')!;
         const guardedCmd = guarded.find(t => t.name === 'run_command')!;
 
@@ -193,5 +193,66 @@ describe('Tool Loop Guard', () => {
         expect(parsed.error).toContain('same arguments');
         // Underlying tool should NOT have re-executed
         expect(readFile.getExecCount()).toBe(1);
+    });
+
+    it('isCeilingReached returns false before any poisoning', async () => {
+        const readFile = makeMockTool('read_file', 'content');
+
+        const { tools: guarded, isCeilingReached } = withLoopGuard([readFile.tool], 'test-agent');
+        const guardedRead = guarded.find(t => t.name === 'read_file')!;
+
+        // No calls yet
+        expect(isCeilingReached()).toBe(false);
+
+        // One call — still fine
+        await guardedRead.invoke({ path: 'a' });
+        expect(isCeilingReached()).toBe(false);
+    });
+
+    it('isCeilingReached returns true after total ceiling exceeded', async () => {
+        const readFile = makeMockTool('read_file', 'content');
+
+        const { tools: guarded, isCeilingReached } = withLoopGuard([readFile.tool], 'test-agent', 2);
+        const guardedRead = guarded.find(t => t.name === 'read_file')!;
+
+        await guardedRead.invoke({ path: 'a' });
+        await guardedRead.invoke({ path: 'b' });
+        expect(isCeilingReached()).toBe(false);
+
+        // 3rd call exceeds ceiling of 2
+        await guardedRead.invoke({ path: 'c' });
+        expect(isCeilingReached()).toBe(true);
+    });
+
+    it('isCeilingReached returns true after repeated-call poisoning', async () => {
+        const readFile = makeMockTool('read_file', 'content');
+        const listDir = makeMockTool('list_dir', 'listing');
+
+        const { tools: guarded, isCeilingReached } = withLoopGuard([readFile.tool, listDir.tool], 'test-agent');
+        const guardedRead = guarded.find(t => t.name === 'read_file')!;
+        const guardedList = guarded.find(t => t.name === 'list_dir')!;
+
+        const args = { path: 'src/index.ts' };
+
+        // 1st call: runs
+        await guardedRead.invoke(args);
+        expect(isCeilingReached()).toBe(false);
+
+        // Interleave different tool
+        await guardedList.invoke({ path: 'tests' });
+
+        // 2nd identical call: warns
+        await guardedRead.invoke(args);
+        expect(isCeilingReached()).toBe(false);
+
+        // 3rd identical call: poisons
+        await guardedRead.invoke(args);
+        expect(isCeilingReached()).toBe(true);
+    });
+
+    it('returns isCeilingReached as false for empty tools', () => {
+        const { tools, isCeilingReached } = withLoopGuard([], 'test-agent');
+        expect(tools).toEqual([]);
+        expect(isCeilingReached()).toBe(false);
     });
 });

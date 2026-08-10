@@ -12,6 +12,8 @@ import * as path from 'path';
 import type { TechDecision } from '../agents/_shared/base-schemas';
 import { logToolAction } from './logger';
 import { LogColors } from './log-colors.util';
+import { CONVENTIONS_INLINE_DIGEST } from '../config';
+import { buildConventionsDigest } from './conventions-digest';
 
 const TAG = `${LogColors.BRIGHT_BLUE}[conventions]${LogColors.RESET}`;
 
@@ -151,11 +153,13 @@ export function deployAllConventionsToWorkspace(workspacePath: string): void {
 export function getConventionReadInstructions(fileNames: string[]): string {
     if (fileNames.length === 0) return '';
 
-    const fileList = fileNames
-        .map((f) => `    - .conventions/${f}`)
-        .join('\n');
+    if (!CONVENTIONS_INLINE_DIGEST) {
+        // Fallback: tell agents to read_file each convention file at runtime.
+        const fileList = fileNames
+            .map((f) => `    - .conventions/${f}`)
+            .join('\n');
 
-    return `<coding_conventions>
+        return `<coding_conventions>
     BEFORE writing any code, you MUST read the following coding convention files
     using the read_file tool. These contain mandatory coding standards you must follow:
 ${fileList}
@@ -164,4 +168,10 @@ ${fileList}
     If you are making changes across multiple assignments, re-read the relevant
     convention file before starting each new assignment.
 </coding_conventions>`;
+    }
+
+    // Inline digest: inject extracted imperative rules directly into the prompt.
+    return `<coding_conventions>\n${buildConventionsDigest(fileNames)}\n` +
+        `Full references exist at .conventions/*.md - read one ONLY if you need ` +
+        `detail beyond the rules above.\n</coding_conventions>`;
 }

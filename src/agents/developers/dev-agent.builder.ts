@@ -10,7 +10,7 @@ import { DeveloperOutputSchema } from './schemas/dev-output.schema';
 import { createWorkspaceTools } from '../../tools/fs/workspace-tools';
 import { createGitTools } from '../../tools/git/git-tools';
 import { createShellTool } from '../../tools/shell/shell-tools';
-import { PRINCIPAL_DEV_MODEL, SENIOR_DEV_MODEL, JUNIOR_DEV_MODEL } from '../../config';
+import { PRINCIPAL_DEV_MODEL, SENIOR_DEV_MODEL, JUNIOR_DEV_MODEL, DEV_GIT_TOOLS_ENABLED } from '../../config';
 import type { GitContext } from '../_shared/base-schemas';
 import type { DevAgentEntry } from './registry';
 
@@ -30,11 +30,13 @@ function getModelForRank(rank: DevRank): string {
  * @param entry   Developer registry entry (rank, domain, languages, etc.)
  * @param workspaceRoot  The generated-project workspace directory
  * @param conventionFiles  Optional list of convention file names to inject into the prompt
+ * @param isMaintainMode  When true, appends maintain-mode instructions to the persona
  */
 export function buildDevAgent(
     apiKey: string, entry: DevAgentEntry, workspaceRoot: string,
     gitContext?: GitContext | null, baseBranch?: string,
     conventionFiles?: string[],
+    isMaintainMode?: boolean,
 ) {
     const systemPrompt = buildDevPersona({
         rank: entry.rank,
@@ -42,23 +44,27 @@ export function buildDevAgent(
         languages: entry.languages,
         tag: entry.tag,
         conventionFiles,
+        isMaintainMode,
     });
 
-    // Dev agents get workspace (fs), git, and shell tools.
-    // No emitMermaidTool — the DeveloperOutputSchema has a `mermaidDiagram`
-    // field for diagrams; giving devs the tool caused infinite loops.
+    // Dev agents get workspace (fs) and shell tools. Git tools are only
+    // included when DEV_GIT_TOOLS_ENABLED=true — the PR workflow already
+    // commits and pushes for dev agents, so git tools are unnecessary
+    // overhead (each schema is re-billed on every LLM call, and agents
+    // waste 5-10 tool calls on git ceremony).
     const tools = [
         ...createWorkspaceTools(workspaceRoot),
-        ...createGitTools(workspaceRoot, gitContext, baseBranch),
+        ...(DEV_GIT_TOOLS_ENABLED ? createGitTools(workspaceRoot, gitContext, baseBranch) : []),
         createShellTool(workspaceRoot),
     ];
 
-    // Dev agents need more tool calls than pipeline agents:
-    // read files, create/edit files, run tests, git add/commit/push per file.
-    // Principal/Senior devs doing multi-file work need the most headroom.
-    const maxToolCalls = entry.rank === 'principal' ? 40
-        : entry.rank === 'senior' ? 35
-        : 30; // junior
+    // Lowered ceilings since git ceremony calls are gone and history is
+    // now compacted. The respawn mechanism (Step 8) handles the case
+    // where an agent legitimately needs more calls — hitting the ceiling
+    // now triggers a clean respawn instead of poisoning.
+    const maxToolCalls = entry.rank === 'principal' ? 26
+        : entry.rank === 'senior' ? 22
+        : 18; // junior
 
     return buildAgent(apiKey, {
         id: entry.id,

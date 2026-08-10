@@ -11,8 +11,10 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { getLogger } from './logger';
 import { MODEL_PRICING } from '../config';
-import type { TokenCallRecord, RunUsageSummary, RunStatus } from './token-tracker';
+import type { TokenCallRecord, RunUsageSummary, RunStatus, InvocationEfficiencyRow } from './token-tracker';
 import { tokenTracker } from './token-tracker';
+import { getCumulativeCompactionStats } from '../agents/_shared/history-compactor';
+import { getTruncationStats } from '../tools/_shared/truncate';
 
 const log = getLogger('[TokenReport]', 220);
 
@@ -177,6 +179,25 @@ function generateHtml(
             <td class="num">${formatCost(pricing.outputPer1k)}</td>
         </tr>`,
     ).join('\n');
+
+    // Invocation efficiency table
+    const invocationRows = tokenTracker.getInvocationSummaries();
+    const invocationTableRows = invocationRows.map(r =>
+        `<tr>
+            <td>${escapeHtml(r.agentId)}</td>
+            <td class="num">${r.invocations}</td>
+            <td class="num">${r.avgCallsPerInvocation}</td>
+            <td class="num">${formatNumber(r.avgInputPerCall)}</td>
+            <td class="num">${formatNumber(r.firstCallInput)}</td>
+            <td class="num">${formatNumber(r.lastCallInput)}</td>
+            <td class="num">${r.growthFactor}x</td>
+            <td class="num">${r.respawns}</td>
+        </tr>`,
+    ).join('\n');
+
+    // Compaction & truncation stats
+    const compaction = getCumulativeCompactionStats();
+    const truncation = getTruncationStats();
 
     return `<!DOCTYPE html>
 <html lang="en">
@@ -452,6 +473,37 @@ ${runStatus === 'in-progress'
     </thead>
     <tbody>${modelTableRows}</tbody>
 </table>
+
+<!-- Invocation Efficiency -->
+${invocationRows.length > 0 ? `<h2>Invocation Efficiency</h2>
+<table>
+    <thead>
+        <tr>
+            <th>Agent</th><th>Invocations</th><th>Avg Calls/Inv</th>
+            <th>Avg Input/Call</th><th>1st Call Input</th><th>Last Call Input</th>
+            <th>Growth</th><th>Respawns</th>
+        </tr>
+    </thead>
+    <tbody>${invocationTableRows}</tbody>
+</table>` : '<!-- No invocation data -->'}
+
+<!-- History Compaction & Truncation -->
+${(compaction.invocations > 0 || truncation.truncated > 0) ? `<h2>History Compaction &amp; Truncation</h2>
+<table>
+    <thead>
+        <tr><th>Metric</th><th>Value</th></tr>
+    </thead>
+    <tbody>
+        ${compaction.invocations > 0 ? `<tr><td>Compaction invocations</td><td class="num">${formatNumber(compaction.invocations)}</td></tr>
+        <tr><td>Original chars</td><td class="num">${formatNumber(compaction.totalOriginalChars)}</td></tr>
+        <tr><td>Compacted chars</td><td class="num">${formatNumber(compaction.totalCompactedChars)}</td></tr>
+        <tr><td>Chars saved by compaction</td><td class="num">${formatNumber(compaction.savedChars)} (${compaction.savedPct}%)</td></tr>
+        <tr><td>Tool results stubbed</td><td class="num">${formatNumber(compaction.totalToolResultsStubbed)}</td></tr>
+        <tr><td>Write args stubbed</td><td class="num">${formatNumber(compaction.totalWriteArgsStubbed)}</td></tr>` : ''}
+        ${truncation.truncated > 0 ? `<tr><td>Tool results truncated</td><td class="num">${formatNumber(truncation.truncated)}</td></tr>
+        <tr><td>Chars removed by truncation</td><td class="num">${formatNumber(truncation.charsRemoved)}</td></tr>` : ''}
+    </tbody>
+</table>` : '<!-- No compaction/truncation data -->'}
 
 <!-- Pricing Rates -->
 <h2>Configured Pricing Rates</h2>

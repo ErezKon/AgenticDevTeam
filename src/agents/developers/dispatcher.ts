@@ -168,6 +168,7 @@ export async function dispatchDevelopers(
     techStack?: TechDecision[],
     completedAssignmentIds?: string[],
     userStories?: UserStory[],
+    isMaintainMode?: boolean,
 ): Promise<DispatchResult> {
     const fileChanges: FileChange[] = [];
     const artifacts: ArtifactRef[] = [];
@@ -252,6 +253,7 @@ export async function dispatchDevelopers(
                     gitContext,
                     techStack,
                     userStories,
+                    isMaintainMode,
                 });
             });
 

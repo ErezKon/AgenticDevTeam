@@ -8,6 +8,7 @@
  * `undefined` / `?? []` defaults (PART A7).
  */
 import { z } from 'zod';
+import { jsonrepair } from 'jsonrepair';
 import { getLogger } from './logger';
 
 const log = getLogger('[structured-output]', 183);
@@ -46,6 +47,36 @@ export function parseAgentJson(raw: string): ParseResult {
         try {
             return { ok: true, value: JSON.parse(braces[1]) };
         } catch { /* fall through */ }
+    }
+
+    // Strategy 4: repair malformed / truncated JSON with jsonrepair.
+    // Only attempt if the input looks like it may contain JSON (has { or [).
+    const looksLikeJson = /[{\[]/.test(trimmed);
+    if (looksLikeJson) {
+        try {
+            const repaired = jsonrepair(trimmed);
+            const value = JSON.parse(repaired);
+            if (typeof value === 'object' && value !== null) {
+                log.warn('parseAgentJson: recovered via jsonrepair (input was malformed/truncated)');
+                return { ok: true, value };
+            }
+        } catch { /* fall through */ }
+
+        // Strategy 4b: jsonrepair on the slice starting from the first '{'.
+        // This handles truncated JSON embedded in prose where the closing '}' is
+        // missing (so the balanced-braces regex in strategy 3 can't match).
+        const firstBrace = trimmed.indexOf('{');
+        if (firstBrace >= 0) {
+            try {
+                const slice = trimmed.slice(firstBrace);
+                const repaired = jsonrepair(slice);
+                const value = JSON.parse(repaired);
+                if (typeof value === 'object' && value !== null) {
+                    log.warn('parseAgentJson: recovered via jsonrepair on brace-extracted slice');
+                    return { ok: true, value };
+                }
+            } catch { /* fall through */ }
+        }
     }
 
     return { ok: false, error: `Could not extract JSON. Response starts with: ${trimmed.substring(0, 200)}` };
@@ -95,17 +126,32 @@ export function validateAgentOutput<T>(schema: z.ZodType<T>, parsed: unknown): V
 
 /**
  * Prompt text asking the agent to fix a specific set of schema violations.
+ *
+ * When `previousRaw` is supplied, the first 4,000 chars of the agent's
+ * last raw JSON attempt are included so the repair agent can correct rather
+ * than regenerate from scratch.
  */
-export function buildRepairMessage(issues: string, originalRequest: string): string {
-    return [
+export function buildRepairMessage(issues: string, originalRequest: string, previousRaw?: string): string {
+    const parts = [
         'Your previous response did not match the required JSON schema.',
         '',
         'Problems:',
         issues,
+    ];
+
+    if (previousRaw) {
+        const clipped = previousRaw.length > 4000
+            ? previousRaw.slice(0, 4000) + `\n... [${previousRaw.length - 4000} chars truncated]`
+            : previousRaw;
+        parts.push('', 'Your previous (invalid) JSON:', '```', clipped, '```');
+    }
+
+    parts.push(
         '',
         'Return the SAME information, corrected, as a single valid JSON object.',
         'Do not add commentary. Do not wrap it in markdown.',
-    ].join('\n');
+    );
+    return parts.join('\n');
 }
 
 // ─── Validation Stats (module-level singleton) ──────────────────────────────

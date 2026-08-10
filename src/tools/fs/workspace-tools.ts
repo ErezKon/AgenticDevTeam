@@ -11,6 +11,7 @@ import * as path from 'path';
 import { resolveWorkspacePath } from '../../utils/workspace';
 import { LogColors, color256 } from '../../utils/log-colors.util';
 import { logToolAction } from '../../utils/logger';
+import { truncateToolResult } from '../_shared/truncate';
 
 const TAG_COLOR = 75;
 const TAG = `${color256(TAG_COLOR)}[fs-tools]${LogColors.RESET}`;
@@ -38,20 +39,30 @@ export function createWorkspaceTools(workspaceRoot: string) {
     );
 
     const readFileTool = tool(
-        async ({ filePath }) => {
+        async ({ filePath, offset, limit }) => {
             const resolved = resolveWorkspacePath(workspaceRoot, filePath);
-            logToolAction(`${TAG} read_file: ${filePath}`);
+            logToolAction(`${TAG} read_file: ${filePath}${offset ? ` offset=${offset}` : ''}${limit ? ` limit=${limit}` : ''}`);
             if (!fs.existsSync(resolved)) {
                 return `Error: File not found: ${filePath}`;
             }
-            const content = fs.readFileSync(resolved, 'utf-8');
-            return content;
+            const raw = fs.readFileSync(resolved, 'utf-8');
+            const allLines = raw.split('\n');
+            const totalLines = allLines.length;
+            if (offset || limit) {
+                const start = Math.max((offset ?? 1) - 1, 0);
+                const end = limit ? start + limit : totalLines;
+                const slice = allLines.slice(start, end).join('\n');
+                return `[lines ${start + 1}-${Math.min(end, totalLines)} of ${totalLines}]\n${slice}`;
+            }
+            return truncateToolResult(raw, `read_file ${filePath}`);
         },
         {
             name: 'read_file',
-            description: 'Read the contents of a file in the project workspace.',
+            description: 'Read the contents of a file in the project workspace. Use offset/limit for large files to read a specific line range.',
             schema: z.object({
                 filePath: z.string().describe('Relative path within the workspace'),
+                offset: z.number().optional().describe('1-based start line number (default: 1)'),
+                limit: z.number().optional().describe('Number of lines to return (default: all)'),
             }),
         }
     );
@@ -90,7 +101,8 @@ export function createWorkspaceTools(workspaceRoot: string) {
                 return `Error: Directory not found: ${dirPath}`;
             }
             const entries = listDirectory(resolved, workspaceRoot, recursive ?? false);
-            return entries.join('\n') || '(empty directory)';
+            const raw = entries.join('\n') || '(empty directory)';
+            return truncateToolResult(raw, 'list_dir');
         },
         {
             name: 'list_dir',
@@ -108,7 +120,8 @@ export function createWorkspaceTools(workspaceRoot: string) {
             logToolAction(`${TAG} search_code: "${query}" pattern=${filePattern || '*'}`);
             const results = searchInFiles(resolved, workspaceRoot, query, filePattern);
             if (results.length === 0) return 'No matches found.';
-            return results.slice(0, 50).join('\n');
+            const raw = results.slice(0, 50).join('\n');
+            return truncateToolResult(raw, 'search_code');
         },
         {
             name: 'search_code',

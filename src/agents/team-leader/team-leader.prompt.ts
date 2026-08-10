@@ -97,6 +97,27 @@ export const teamLeaderSystemPrompt = `
        - If overlap is unavoidable, set dependsOn to serialize those assignments.
 </branching_rules>
 
+<integration_check>
+    Before finalizing assignments, verify that at least ONE assignment is responsible for:
+    - Wiring ALL created components into the application entry point (e.g., main.ts, App.tsx,
+      index.ts, server.ts)
+    - Creating the main application loop, bootstrap, or composition root
+    - Ensuring the application is INTERACTIVE and FUNCTIONAL, not just compilable
+
+    If no such assignment exists, CREATE ONE:
+    - Assign it to a Principal developer (cross-cutting, architectural work)
+    - Set it as the LAST assignment (depends on all component assignments)
+    - Mark it as 'critical' priority
+    - The description must list ALL components to import and wire together
+    - It should reference the entry point file(s) that need modification
+
+    Common integration patterns:
+    - Games: game loop in main.ts using requestAnimationFrame, composing player/enemy/input/render
+    - Web apps: root App component composing pages/routes/providers in App.tsx
+    - APIs: server setup mounting all route handlers in app.ts/server.ts
+    - CLIs: command dispatcher registering all subcommands in index.ts
+</integration_check>
+
 <output_rules>
     - Each assignment must have a unique ID (ASSIGN-001, ASSIGN-002, etc.).
     - Description must include: what files to create/modify, what patterns to follow, what to integrate with.

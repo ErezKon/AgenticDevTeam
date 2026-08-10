@@ -12,6 +12,7 @@ import {
     summariseTasks,
     summariseFileChanges,
     summariseCodebaseAnalysis,
+    summariseEpics,
     buildContext,
     recordContextChars,
     getContextStats,
@@ -22,6 +23,7 @@ import type {
     ArchitectureDoc, TechDecision, DbDesign, UserStory, Task,
     FileChange, CodebaseAnalysis,
 } from '../src/agents/_shared/base-schemas';
+import type { Epic } from '../src/agents/_shared/schemas/epic.schema';
 
 // ─── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -98,6 +100,12 @@ const fixtureCodebaseAnalysis: CodebaseAnalysis = {
     lastAnalyzedAt: '2026-01-01T00:00:00Z',
     fileTree: 'src/\n  auth/\n  orders/',
 };
+
+const fixtureEpics: Epic[] = [
+    { id: 'EPIC-001', title: 'User Authentication', description: 'Implement user registration, login, and session management. Includes OAuth2 support.', components: ['API Gateway', 'User Service'] },
+    { id: 'EPIC-002', title: 'Order Management', description: 'Full CRUD operations for orders. Admin dashboard for monitoring.', components: ['Order Service', 'PostgreSQL'] },
+    { id: 'EPIC-003', title: 'Payment Integration', description: 'Stripe payment processing with webhooks.', components: ['API Gateway'] },
+];
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
@@ -237,13 +245,52 @@ describe('summariseTasks', () => {
     });
 });
 
+describe('summariseEpics', () => {
+    it('produces EPIC-id: title — first-sentence lines', () => {
+        const result = summariseEpics(fixtureEpics);
+        expect(result).toContain('EPIC-001: User Authentication');
+        expect(result).toContain('EPIC-002: Order Management');
+        expect(result).toContain('EPIC-003: Payment Integration');
+    });
+
+    it('clips description to first sentence', () => {
+        const result = summariseEpics(fixtureEpics);
+        // First sentence ends at first period
+        expect(result).toContain('Implement user registration, login, and session management.');
+        // Second sentence should NOT appear
+        expect(result).not.toContain('Includes OAuth2 support.');
+    });
+
+    it('returns fallback for empty epics', () => {
+        expect(summariseEpics([])).toBe('(no epics)');
+    });
+
+    it('is significantly smaller than JSON.stringify', () => {
+        const compact = summariseEpics(fixtureEpics);
+        const verbose = JSON.stringify(fixtureEpics, null, 2);
+        expect(compact.length).toBeLessThan(verbose.length);
+    });
+
+    it('handles epics with no description', () => {
+        const noDesc: Epic[] = [{ id: 'EPIC-X', title: 'No Desc', description: '', components: [] }];
+        const result = summariseEpics(noDesc);
+        expect(result).toContain('EPIC-X: No Desc');
+        // No trailing ' — '
+        expect(result).not.toContain(' — ');
+    });
+});
+
 describe('summariseFileChanges', () => {
-    it('caps at the specified limit and keeps newest entries', () => {
+    it('groups by directory when entries share directories', () => {
+        const result = summariseFileChanges(fixtureFileChanges, 25);
+        expect(result).toContain('(80 total, showing last 25)');
+        // All 80 files are in src/ so should group to a single directory entry
+        expect(result).toContain('src/');
+    });
+
+    it('shows total count header when over the limit', () => {
         const result = summariseFileChanges(fixtureFileChanges, 10);
         expect(result).toContain('(80 total, showing last 10)');
-        // Should contain the last file (index 79) but not the first (index 0)
-        expect(result).toContain('src/file-079.ts');
-        expect(result).not.toContain('src/file-000.ts');
     });
 
     it('shows all entries when under the limit', () => {
@@ -254,6 +301,19 @@ describe('summariseFileChanges', () => {
 
     it('returns fallback for empty changes', () => {
         expect(summariseFileChanges([], 10)).toBe('(no file changes)');
+    });
+
+    it('groups files from different directories separately', () => {
+        const mixed: FileChange[] = [
+            { path: 'src/components/Button.tsx', action: 'created' as const, summary: '', storyId: 'US-1', agentId: 'a' },
+            { path: 'src/components/Card.tsx', action: 'created' as const, summary: '', storyId: 'US-1', agentId: 'a' },
+            { path: 'src/utils/helpers.ts', action: 'modified' as const, summary: '', storyId: 'US-1', agentId: 'a' },
+            { path: 'tests/Button.test.tsx', action: 'created' as const, summary: '', storyId: 'US-1', agentId: 'a' },
+        ];
+        const result = summariseFileChanges(mixed, 25);
+        expect(result).toContain('src/components/ (2 files)');
+        expect(result).toContain('src/utils/ (1 file)');
+        expect(result).toContain('tests/ (1 file)');
     });
 });
 

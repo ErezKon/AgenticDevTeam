@@ -445,33 +445,130 @@ describe('getConventionReadInstructions', () => {
         expect(result).toMatch(/<\/coding_conventions>$/);
     });
 
-    it('includes the MUST read instruction', () => {
+    // With CONVENTIONS_INLINE_DIGEST=true (default), the digest path is used.
+    it('includes escape-hatch reference to .conventions/ in digest mode', () => {
         const result = getConventionReadInstructions(['Universal.md']);
+        expect(result).toContain('.conventions/*.md');
+        expect(result).toContain('read one ONLY if you need');
+    });
+
+    it('contains extracted content from convention files in digest mode', () => {
+        const result = getConventionReadInstructions(['Universal.md', 'React.md']);
+        // The digest should have content from the source files
+        expect(result.length).toBeGreaterThan(50);
+    });
+});
+
+// ─── Test 4b: getConventionReadInstructions() — fallback mode ────────────────
+
+describe('getConventionReadInstructions (CONVENTIONS_INLINE_DIGEST=false)', () => {
+    let getInstructionsFallback: typeof getConventionReadInstructions;
+
+    beforeAll(async () => {
+        // Re-import with the flag disabled to test the fallback path
+        jest.resetModules();
+        process.env.CONVENTIONS_INLINE_DIGEST = 'false';
+        const mod = await import('../src/utils/coding-conventions');
+        getInstructionsFallback = mod.getConventionReadInstructions;
+    });
+
+    afterAll(() => {
+        delete process.env.CONVENTIONS_INLINE_DIGEST;
+        jest.resetModules();
+    });
+
+    it('returns empty string for empty file list', () => {
+        expect(getInstructionsFallback([])).toBe('');
+    });
+
+    it('includes the MUST read instruction', () => {
+        const result = getInstructionsFallback(['Universal.md']);
         expect(result).toContain('BEFORE writing any code, you MUST read');
         expect(result).toContain('read_file tool');
     });
 
     it('lists files with .conventions/ prefix', () => {
-        const result = getConventionReadInstructions(['Universal.md', 'React.md']);
+        const result = getInstructionsFallback(['Universal.md', 'React.md']);
         expect(result).toContain('.conventions/Universal.md');
         expect(result).toContain('.conventions/React.md');
     });
 
     it('includes follow-all-rules instruction', () => {
-        const result = getConventionReadInstructions(['Universal.md']);
+        const result = getInstructionsFallback(['Universal.md']);
         expect(result).toContain('Follow ALL rules');
     });
 
     it('includes re-read instruction for multiple assignments', () => {
-        const result = getConventionReadInstructions(['Universal.md']);
+        const result = getInstructionsFallback(['Universal.md']);
         expect(result).toContain('re-read the relevant');
     });
 
     it('lists each file as a bullet point', () => {
-        const result = getConventionReadInstructions(['Go.md', 'Python.md', 'Universal.md']);
+        const result = getInstructionsFallback(['Go.md', 'Python.md', 'Universal.md']);
         const lines = result.split('\n');
         const bulletLines = lines.filter((l) => l.trim().startsWith('- .conventions/'));
         expect(bulletLines).toHaveLength(3);
+    });
+});
+
+// ─── Test 4c: buildConventionsDigest() ───────────────────────────────────────
+
+describe('buildConventionsDigest', () => {
+    let buildConventionsDigest: typeof import('../src/utils/conventions-digest')['buildConventionsDigest'];
+
+    beforeAll(async () => {
+        const mod = await import('../src/utils/conventions-digest');
+        buildConventionsDigest = mod.buildConventionsDigest;
+    });
+
+    it('returns non-empty digest for Universal.md and React.md', () => {
+        const digest = buildConventionsDigest(['Universal.md', 'React.md']);
+        expect(digest.length).toBeGreaterThan(0);
+    });
+
+    it('is under 1600 chars', () => {
+        const digest = buildConventionsDigest(['Universal.md', 'React.md']);
+        expect(digest.length).toBeLessThanOrEqual(1600);
+    });
+
+    it('returns empty string for empty file list', () => {
+        expect(buildConventionsDigest([])).toBe('');
+    });
+
+    it('returns empty string for non-existent files', () => {
+        expect(buildConventionsDigest(['NonExistent.md'])).toBe('');
+    });
+
+    it('contains section headers referencing file names', () => {
+        const digest = buildConventionsDigest(['Universal.md', 'React.md']);
+        expect(digest).toContain('[Universal.md]');
+        expect(digest).toContain('[React.md]');
+    });
+
+    it('contains headings extracted from source files', () => {
+        const digest = buildConventionsDigest(['Universal.md']);
+        // Universal.md has headings like "Version Control", "Security", etc.
+        expect(digest).toMatch(/##\s/);
+    });
+
+    it('caches results — calling twice returns the same string', () => {
+        const d1 = buildConventionsDigest(['Universal.md', 'React.md']);
+        const d2 = buildConventionsDigest(['Universal.md', 'React.md']);
+        expect(d1).toBe(d2);
+    });
+
+    it('caches regardless of input order', () => {
+        const d1 = buildConventionsDigest(['React.md', 'Universal.md']);
+        const d2 = buildConventionsDigest(['Universal.md', 'React.md']);
+        expect(d1).toBe(d2);
+    });
+
+    it('includes content from each requested file', () => {
+        const digestUniversal = buildConventionsDigest(['Universal.md']);
+        const digestReact = buildConventionsDigest(['React.md']);
+        // Both should be non-empty (each file contributes headings)
+        expect(digestUniversal.length).toBeGreaterThan(0);
+        expect(digestReact.length).toBeGreaterThan(0);
     });
 });
 
@@ -499,9 +596,12 @@ describe('Integration: prompt builders', () => {
             });
             expect(prompt).toContain('<coding_conventions>');
             expect(prompt).toContain('</coding_conventions>');
-            expect(prompt).toContain('.conventions/React.md');
-            expect(prompt).toContain('.conventions/TypeScript.md');
-            expect(prompt).toContain('.conventions/Universal.md');
+            // In digest mode, individual file paths are not listed; the digest
+            // contains extracted headings/rules and a .conventions/*.md escape hatch.
+            // In fallback mode, individual .conventions/ paths are listed.
+            const hasDigestEscapeHatch = prompt.includes('.conventions/*.md');
+            const hasIndividualPaths = prompt.includes('.conventions/React.md');
+            expect(hasDigestEscapeHatch || hasIndividualPaths).toBe(true);
         });
 
         it('does NOT include conventions instruction block when conventionFiles omitted', () => {
@@ -529,7 +629,7 @@ describe('Integration: prompt builders', () => {
             expect(prompt).not.toContain('.conventions/');
         });
 
-        it('includes workflow step 2.5 for reading convention files', () => {
+        it('includes convention-reading instruction in workflow or conventions block', () => {
             const prompt = buildDevPersona({
                 rank: 'principal',
                 domain: 'fullstack',
@@ -537,8 +637,11 @@ describe('Integration: prompt builders', () => {
                 tag: 'dev-principal-fullstack',
                 conventionFiles: testConventionFiles,
             });
-            expect(prompt).toContain('2.5.');
-            expect(prompt).toContain('READ the coding convention files');
+            // In compact mode the step 2.5 is removed but conventions are still referenced
+            // via the <coding_conventions> block. In non-compact mode, step 2.5 exists.
+            const hasStep25 = prompt.includes('2.5.');
+            const hasConventionsBlock = prompt.includes('<coding_conventions>');
+            expect(hasStep25 || hasConventionsBlock).toBe(true);
         });
 
         it('positions conventions block between </critical_rules> and <workflow>', () => {
@@ -618,7 +721,10 @@ describe('Integration: prompt builders', () => {
         it('includes <coding_conventions> when conventionFiles provided', () => {
             const prompt = buildQaUnitPrompt(testConventionFiles);
             expect(prompt).toContain('<coding_conventions>');
-            expect(prompt).toContain('.conventions/React.md');
+            // In digest mode: escape-hatch glob; in fallback mode: individual paths
+            const hasDigest = prompt.includes('.conventions/*.md');
+            const hasPath = prompt.includes('.conventions/React.md');
+            expect(hasDigest || hasPath).toBe(true);
         });
 
         it('does NOT include <coding_conventions> when called without args', () => {
@@ -647,7 +753,10 @@ describe('Integration: prompt builders', () => {
         it('includes <coding_conventions> when conventionFiles provided', () => {
             const prompt = buildQaE2ePrompt(testConventionFiles);
             expect(prompt).toContain('<coding_conventions>');
-            expect(prompt).toContain('.conventions/Universal.md');
+            // In digest mode: escape-hatch glob; in fallback mode: individual paths
+            const hasDigest = prompt.includes('.conventions/*.md');
+            const hasPath = prompt.includes('.conventions/Universal.md');
+            expect(hasDigest || hasPath).toBe(true);
         });
 
         it('does NOT include <coding_conventions> when called without args', () => {
@@ -676,7 +785,10 @@ describe('Integration: prompt builders', () => {
         it('includes <coding_conventions> when conventionFiles provided', () => {
             const prompt = buildDevOpsPrompt(testConventionFiles);
             expect(prompt).toContain('<coding_conventions>');
-            expect(prompt).toContain('.conventions/TypeScript.md');
+            // In digest mode: escape-hatch glob; in fallback mode: individual paths
+            const hasDigest = prompt.includes('.conventions/*.md');
+            const hasPath = prompt.includes('.conventions/TypeScript.md');
+            expect(hasDigest || hasPath).toBe(true);
         });
 
         it('does NOT include <coding_conventions> when called without args', () => {
@@ -743,11 +855,13 @@ describe('Integration: prompt builders', () => {
                 expect(fs.existsSync(path.join(tempDir, relativePath))).toBe(true);
             }
 
-            // Verify the prompt references the same paths
+            // Verify the prompt references conventions in some form
             const instructions = getConventionReadInstructions(files);
-            for (const fileName of files) {
-                expect(instructions).toContain(`.conventions/${fileName}`);
-            }
+            // In digest mode, the escape-hatch glob is present;
+            // in fallback mode, individual file paths are listed.
+            const hasDigestRef = instructions.includes('.conventions/*.md');
+            const hasAllPaths = files.every((f) => instructions.includes(`.conventions/${f}`));
+            expect(hasDigestRef || hasAllPaths).toBe(true);
         });
 
         it('convention files resolved from tech stack exist in workspace after full deployment', () => {

@@ -23,19 +23,19 @@ export const ARCHITECT_MODEL =
 
 /** Product Manager agent model. */
 export const PRODUCT_MANAGER_MODEL =
-    process.env.PRODUCT_MANAGER_MODEL ?? 'llama-3-3-70b-instruct';
+    process.env.PRODUCT_MANAGER_MODEL ?? 'gpt-oss-120b';
 
 /** DBA agent model. */
 export const DBA_MODEL =
-    process.env.DBA_MODEL ?? 'llama-3-3-70b-instruct';
+    process.env.DBA_MODEL ?? 'gpt-oss-120b';
 
 /** Team Leader agent model. */
 export const TEAM_LEADER_MODEL =
-    process.env.TEAM_LEADER_MODEL ?? 'gemma-3-27b-it';
+    process.env.TEAM_LEADER_MODEL ?? 'gpt-oss-120b';
 
 /** DevOps agent model. */
 export const DEVOPS_MODEL =
-    process.env.DEVOPS_MODEL ?? 'mistral-small-3-1-24b-instruct-2503';
+    process.env.DEVOPS_MODEL ?? 'gpt-oss-120b';
 
 /** Codebase Analyzer agent model. */
 export const CODEBASE_ANALYZER_MODEL =
@@ -43,11 +43,11 @@ export const CODEBASE_ANALYZER_MODEL =
 
 /** Principal Developer agent model (frontend & backend). */
 export const PRINCIPAL_DEV_MODEL =
-    process.env.PRINCIPAL_DEV_MODEL ?? 'llama-3-3-70b-instruct';
+    process.env.PRINCIPAL_DEV_MODEL ?? 'gpt-oss-120b';
 
 /** Senior Developer agent model (frontend & backend). */
 export const SENIOR_DEV_MODEL =
-    process.env.SENIOR_DEV_MODEL ?? 'mistral-small-3-1-24b-instruct-2503';
+    process.env.SENIOR_DEV_MODEL ?? 'gpt-oss-120b';
 
 /** Junior Developer agent model (all specialties).
  *  Minimum recommended: 20B+ parameters for reliable code generation.
@@ -108,10 +108,15 @@ export const WORKSPACE_SYNC_ALLOW_RESET =
  * LangGraph recursion limits per agent type.
  *
  * Pipeline agents (architect, PM, DBA, TL, QA) need very few tool calls (1-5).
- * Developer agents may need 15-25 tool calls (read, edit, git add, commit,
- * push — per file), so their limit must accommodate multi-file changes.
+ * Developer agents need 12-20 tool calls (read, create/edit, run tests).
  * LangGraph counts 2 steps per tool call (LLM + tool), so limit ÷ 2 ≈ max calls.
  * Reviewer agents need 2-5 (diff, log, produce JSON).
+ *
+ * The dev limit must be >= (maxToolCalls × 2) + headroom. The loop guard's
+ * maxToolCalls per rank are: principal 26, senior 22, junior 18. At 58
+ * (26 × 2 + 6 headroom), the recursion limit no longer fires before the
+ * loop guard for any rank. Git tools are removed by default (PR workflow
+ * handles commits/pushes), so fewer calls are needed.
  *
  * Lower limits prevent poisoned/looping agents from burning tokens until
  * the global ceiling (150). Per-type env vars override the global fallback.
@@ -120,7 +125,7 @@ export const PIPELINE_RECURSION_LIMIT =
     parseInt(process.env.PIPELINE_RECURSION_LIMIT ?? process.env.AGENT_RECURSION_LIMIT ?? '15', 10);
 
 export const DEV_RECURSION_LIMIT =
-    parseInt(process.env.DEV_RECURSION_LIMIT ?? process.env.AGENT_RECURSION_LIMIT ?? '50', 10);
+    parseInt(process.env.DEV_RECURSION_LIMIT ?? process.env.AGENT_RECURSION_LIMIT ?? '58', 10);
 
 export const REVIEWER_RECURSION_LIMIT =
     parseInt(process.env.REVIEWER_RECURSION_LIMIT ?? process.env.AGENT_RECURSION_LIMIT ?? '26', 10);
@@ -146,9 +151,11 @@ export const REVIEWER_MAX_TOOL_CALLS =
 export const AGENT_RECURSION_LIMIT =
     parseInt(process.env.AGENT_RECURSION_LIMIT ?? '30', 10);
 
-/** Max file-change entries injected into the dev context prompt. */
+/** Max file-change entries injected into the dev context prompt.
+ *  Lowered from 60 to 25 — summariseFileChanges now groups by directory
+ *  so fewer entries convey the same information. */
 export const DEV_CONTEXT_FILE_CHANGES_LIMIT =
-    parseInt(process.env.DEV_CONTEXT_FILE_CHANGES_LIMIT ?? '60', 10);
+    parseInt(process.env.DEV_CONTEXT_FILE_CHANGES_LIMIT ?? '25', 10);
 
 /** Max parallel developer agents during fan-out. */
 export const MAX_CONCURRENT_DEVS =
@@ -236,11 +243,6 @@ export const AGENT_OUTPUT_REPAIR_ATTEMPTS =
 
 // ─── Context Budget ─────────────────────────────────────────────────────────
 
-/** Use compact summarisers instead of raw JSON.stringify dumps (default: true).
- *  Set to false to restore the old verbatim behaviour for A/B testing. */
-export const CONTEXT_COMPACT =
-    (process.env.CONTEXT_COMPACT ?? 'true') === 'true';
-
 /** Hard character budget for assembled context per agent prompt. */
 export const CONTEXT_MAX_CHARS =
     parseInt(process.env.CONTEXT_MAX_CHARS ?? '24000', 10);
@@ -252,6 +254,61 @@ export const CONTEXT_MAX_DESC_CHARS =
 /** Strip deep description fields from injected JSON Schema to save tokens (default: true). */
 export const RESPONSE_SCHEMA_COMPACT =
     (process.env.RESPONSE_SCHEMA_COMPACT ?? 'true') === 'true';
+
+/** Strip ALL descriptions and noise from injected JSON Schema (default: true).
+ *  Field names are self-documenting; full descriptions are only useful the first
+ *  time a developer sees the schema but are re-billed on every LLM call. */
+export const RESPONSE_SCHEMA_STRIP_ALL_DESCRIPTIONS =
+    (process.env.RESPONSE_SCHEMA_STRIP_ALL_DESCRIPTIONS ?? 'true') === 'true';
+
+/** Request JSON mode from the LLM API when a responseFormat schema is set (default: true).
+ *  Sets `response_format: { type: "json_object" }` on the model, which constrains
+ *  the model to always output valid JSON. Requires an OpenAI-compatible API that
+ *  supports JSON mode. Disable with LLM_JSON_MODE=false if the API doesn't support it. */
+export const LLM_JSON_MODE =
+    (process.env.LLM_JSON_MODE ?? 'true') === 'true';
+
+// ─── Context Compaction ─────────────────────────────────────────────────────
+
+/** Max characters any single tool result may contribute to agent history. */
+export const MAX_TOOL_RESULT_CHARS =
+    parseInt(process.env.MAX_TOOL_RESULT_CHARS ?? '6000', 10);
+
+/** Number of most-recent tool results kept verbatim in ReAct history. Older ones are stubbed. */
+export const HISTORY_KEEP_RECENT_TOOL_RESULTS =
+    parseInt(process.env.HISTORY_KEEP_RECENT_TOOL_RESULTS ?? '2', 10);
+
+/** Enable the preModelHook that compacts ReAct history before each LLM call. */
+export const HISTORY_COMPACTION_ENABLED =
+    (process.env.HISTORY_COMPACTION_ENABLED ?? 'true') === 'true';
+
+/** Hard character ceiling for the assembled ReAct history passed to the LLM. */
+export const HISTORY_MAX_CHARS =
+    parseInt(process.env.HISTORY_MAX_CHARS ?? '30000', 10);
+
+/** Inject a distilled conventions digest in the prompt instead of making agents read_file them. */
+export const CONVENTIONS_INLINE_DIGEST =
+    (process.env.CONVENTIONS_INLINE_DIGEST ?? 'true') === 'true';
+
+/** Give developer agents git tools. The PR workflow already commits/pushes for them. */
+export const DEV_GIT_TOOLS_ENABLED =
+    (process.env.DEV_GIT_TOOLS_ENABLED ?? 'false') === 'true';
+
+/** Use the short persona variant for developer agents. */
+export const PERSONA_COMPACT =
+    (process.env.PERSONA_COMPACT ?? 'true') === 'true';
+
+/** Respawn a dev agent with a summarised handoff instead of poisoning tools at the ceiling. */
+export const AGENT_RESPAWN_ENABLED =
+    (process.env.AGENT_RESPAWN_ENABLED ?? 'true') === 'true';
+
+/** Max respawn generations per logical dev task. */
+export const AGENT_RESPAWN_MAX_GENERATIONS =
+    parseInt(process.env.AGENT_RESPAWN_MAX_GENERATIONS ?? '2', 10);
+
+/** Input-token threshold that triggers a respawn on the next step. */
+export const AGENT_RESPAWN_TOKEN_THRESHOLD =
+    parseInt(process.env.AGENT_RESPAWN_TOKEN_THRESHOLD ?? '14000', 10);
 
 // ─── Quality Gates ──────────────────────────────────────────────────────────
 
