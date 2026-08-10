@@ -44,7 +44,7 @@ const HITL_PHASES: PhaseName[] = [
 // ─── Conductor options ──────────────────────────────────────────────────────
 
 export interface ConductorOptions {
-    /** Interrupt before each HITL phase. Defaults to the RUN_MODE env value. */
+    /** Interrupt after each HITL phase. Defaults to the RUN_MODE env value. */
     mode?: 'autonomous' | 'human';
     /** Checkpointer. A MemorySaver is created when omitted. */
     checkpointer?: BaseCheckpointSaver;
@@ -235,9 +235,11 @@ export function buildConductorGraph(opts: ConductorOptions = {}) {
 
     return graph.compile({
         checkpointer,
-        // In human mode, interrupt before each HITL phase so the user can approve
+        // In human mode, interrupt after each HITL phase so the agent runs first,
+        // produces its output (including the MD mission report), and then the
+        // graph pauses for user review before advancing to the next phase.
         ...(resolvedMode === 'human'
-            ? { interruptBefore: HITL_PHASES }
+            ? { interruptAfter: HITL_PHASES }
             : {}),
     });
 }

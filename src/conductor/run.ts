@@ -164,6 +164,8 @@ export async function runHumanInTheLoop(opts: RunOptions): Promise<RunSession> {
 
         const state = await getState();
 
+        const config = { configurable: { thread_id: threadId } };
+
         // ── Enhance ─────────────────────────────────────────────────────
         if (decision === 'enhance') {
             if (!feedback || feedback.trim() === '') {
@@ -177,14 +179,15 @@ export async function runHumanInTheLoop(opts: RunOptions): Promise<RunSession> {
                 timestamp: new Date().toISOString(),
             };
             try {
-                const result = await conductor.invoke(
-                    {
-                        approvals: [approval],
-                        pendingRerun: state.phase as PhaseName,
-                        phaseFeedback: { [state.phase]: [feedback] },
-                    },
-                    { configurable: { thread_id: threadId } },
-                );
+                // Merge state updates into the checkpoint, then resume from
+                // the interrupt — invoke(null) continues from the checkpoint
+                // instead of re-starting from __start__.
+                await conductor.updateState(config, {
+                    approvals: [approval],
+                    pendingRerun: state.phase as PhaseName,
+                    phaseFeedback: { [state.phase]: [feedback] },
+                });
+                const result = await conductor.invoke(null, config);
                 return result as ProjectStateType;
             } catch (err: any) {
                 tokenTracker.setRunStatus('failed');
@@ -213,13 +216,11 @@ export async function runHumanInTheLoop(opts: RunOptions): Promise<RunSession> {
                 timestamp: new Date().toISOString(),
             };
             try {
-                const result = await conductor.invoke(
-                    {
-                        approvals: [approval],
-                        cancelled: true,
-                    },
-                    { configurable: { thread_id: threadId } },
-                );
+                await conductor.updateState(config, {
+                    approvals: [approval],
+                    cancelled: true,
+                });
+                const result = await conductor.invoke(null, config);
                 return result as ProjectStateType;
             } catch (err: any) {
                 tokenTracker.setRunStatus('failed');
@@ -240,7 +241,6 @@ export async function runHumanInTheLoop(opts: RunOptions): Promise<RunSession> {
         // ── Approve ─────────────────────────────────────────────────────
         log.info(`Phase "${state.phase}" approved. Resuming...`);
 
-        // Add approval to state
         const approval = {
             phase: state.phase,
             decision: 'approve' as const,
@@ -249,11 +249,8 @@ export async function runHumanInTheLoop(opts: RunOptions): Promise<RunSession> {
         };
 
         try {
-            const result = await conductor.invoke(
-                { approvals: [approval] },
-                { configurable: { thread_id: threadId } },
-            );
-
+            await conductor.updateState(config, { approvals: [approval] });
+            const result = await conductor.invoke(null, config);
             return result as ProjectStateType;
         } catch (err: any) {
             tokenTracker.setRunStatus('failed');
@@ -331,6 +328,7 @@ export async function resumeRun(
         }
 
         const state = await getState();
+        const config = { configurable: { thread_id: threadId } };
 
         if (decision === 'enhance') {
             if (!feedback || feedback.trim() === '') {
@@ -342,14 +340,12 @@ export async function resumeRun(
                 feedback,
                 timestamp: new Date().toISOString(),
             };
-            const result = await conductor.invoke(
-                {
-                    approvals: [approval],
-                    pendingRerun: state.phase as PhaseName,
-                    phaseFeedback: { [state.phase]: [feedback] },
-                },
-                { configurable: { thread_id: threadId } },
-            );
+            await conductor.updateState(config, {
+                approvals: [approval],
+                pendingRerun: state.phase as PhaseName,
+                phaseFeedback: { [state.phase]: [feedback] },
+            });
+            const result = await conductor.invoke(null, config);
             return result as ProjectStateType;
         }
 
@@ -361,10 +357,11 @@ export async function resumeRun(
                 feedback,
                 timestamp: new Date().toISOString(),
             };
-            const result = await conductor.invoke(
-                { approvals: [approval], cancelled: true },
-                { configurable: { thread_id: threadId } },
-            );
+            await conductor.updateState(config, {
+                approvals: [approval],
+                cancelled: true,
+            });
+            const result = await conductor.invoke(null, config);
             return result as ProjectStateType;
         }
 
@@ -374,10 +371,8 @@ export async function resumeRun(
             feedback,
             timestamp: new Date().toISOString(),
         };
-        const result = await conductor.invoke(
-            { approvals: [approval] },
-            { configurable: { thread_id: threadId } },
-        );
+        await conductor.updateState(config, { approvals: [approval] });
+        const result = await conductor.invoke(null, config);
         return result as ProjectStateType;
     }
 

@@ -1,0 +1,658 @@
+// ── Header ──────────────────────────────────────────────────────────────────
+.session-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 1.5rem;
+  gap: 1rem;
+}
+
+.header-left h1 {
+  margin-bottom: 0.4rem;
+}
+
+.header-meta {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.thread-id {
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  background: var(--bg-primary);
+  padding: 0.15rem 0.5rem;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+}
+
+.btn-back {
+  display: inline-block;
+  padding: 0.4rem 0.8rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  text-decoration: none;
+
+  &:hover {
+    color: var(--text-primary);
+    border-color: var(--accent-blue);
+    text-decoration: none;
+  }
+}
+
+// ── Loading / Error ─────────────────────────────────────────────────────────
+.loading-card, .error-card {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 2rem;
+}
+
+.spinner {
+  width: 20px;
+  height: 20px;
+  border: 3px solid var(--border);
+  border-top-color: var(--accent-blue);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.error-msg {
+  color: var(--accent-red);
+  font-size: 0.9rem;
+}
+
+// ── Session body ────────────────────────────────────────────────────────────
+.session-body {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+
+// ── Phase Timeline ──────────────────────────────────────────────────────────
+.phase-timeline-card {
+  padding: 1rem 1.5rem;
+  overflow-x: auto;
+}
+
+.phase-timeline {
+  display: flex;
+  align-items: flex-start;
+  gap: 0;
+  min-width: max-content;
+}
+
+.phase-step {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  position: relative;
+  min-width: 80px;
+  flex: 1;
+}
+
+.step-indicator {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.75rem;
+  font-weight: 700;
+  z-index: 1;
+  border: 2px solid var(--border);
+  background: var(--bg-primary);
+  margin-bottom: 0.4rem;
+}
+
+.phase-step.completed .step-indicator {
+  background: var(--accent-green);
+  border-color: var(--accent-green);
+  color: white;
+}
+
+.phase-step.current .step-indicator {
+  background: var(--accent-purple);
+  border-color: var(--accent-purple);
+}
+
+.step-check {
+  color: white;
+  font-size: 0.85rem;
+}
+
+.step-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--border);
+}
+
+.step-dot.pulse {
+  background: white;
+  animation: pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.5; transform: scale(0.8); }
+}
+
+.step-label {
+  font-size: 0.7rem;
+  color: var(--text-secondary);
+  text-align: center;
+  white-space: nowrap;
+}
+
+.phase-step.completed .step-label {
+  color: var(--accent-green);
+}
+
+.phase-step.current .step-label {
+  color: var(--accent-purple);
+  font-weight: 700;
+}
+
+.step-connector {
+  position: absolute;
+  top: 14px;
+  left: 50%;
+  width: 100%;
+  height: 2px;
+  background: var(--border);
+  z-index: 0;
+}
+
+.step-connector.completed {
+  background: var(--accent-green);
+}
+
+.step-connector.current {
+  background: linear-gradient(90deg, var(--accent-purple), var(--border));
+}
+
+// ── Observability Bar ───────────────────────────────────────────────────────
+.obs-bar {
+  display: flex;
+  gap: 1.5rem;
+  flex-wrap: wrap;
+  padding: 0.75rem 1rem;
+  border-radius: 8px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+}
+
+.obs-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.obs-label {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+  font-weight: 600;
+}
+
+.obs-value {
+  font-family: monospace;
+  font-weight: 700;
+  font-size: 0.85rem;
+}
+
+.status-ok { color: #4caf50; }
+.status-warn { color: #ff9800; }
+.status-degrade { color: #f44336; }
+.status-stop { color: #d32f2f; font-weight: 900; }
+
+// ── HITL Controls ───────────────────────────────────────────────────────────
+.hitl-controls-card {
+  border-color: var(--accent-purple);
+  border-width: 2px;
+}
+
+.hitl-title {
+  margin-bottom: 1rem;
+  font-size: 1rem;
+}
+
+.phase-name {
+  color: var(--accent-purple);
+}
+
+.hitl-loading {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 1rem 0;
+}
+
+.hitl-buttons {
+  display: flex;
+  gap: 0.75rem;
+  margin-top: 1rem;
+}
+
+.form-group {
+  margin-bottom: 0;
+
+  label {
+    display: block;
+    margin-bottom: 0.4rem;
+    font-weight: 600;
+    font-size: 0.85rem;
+    color: var(--text-secondary);
+  }
+}
+
+// ── Completion & Cancelled ──────────────────────────────────────────────────
+.completion-card {
+  border-color: var(--accent-green);
+  border-width: 2px;
+}
+
+.completion-title {
+  color: var(--accent-green);
+  margin-bottom: 1rem;
+}
+
+.completion-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 0.75rem;
+}
+
+.stat-item {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  padding: 0.6rem;
+  background: var(--bg-primary);
+  border-radius: 6px;
+}
+
+.stat-label {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+  font-weight: 600;
+}
+
+.stat-value {
+  font-size: 1.3rem;
+  font-weight: 700;
+  font-family: monospace;
+}
+
+.output-path {
+  margin-top: 1rem;
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+
+  code {
+    color: var(--text-primary);
+    background: var(--bg-primary);
+    padding: 0.15rem 0.4rem;
+    border-radius: 4px;
+  }
+}
+
+.cancelled-card {
+  border-color: var(--accent-red);
+  border-width: 2px;
+}
+
+.cancelled-title {
+  color: var(--accent-red);
+  margin-bottom: 0.5rem;
+}
+
+// ── Mission Report Card ─────────────────────────────────────────────────
+.mission-report-card {
+  border-color: var(--accent-blue);
+  border-width: 2px;
+}
+
+.report-header-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+  flex-wrap: wrap;
+
+  h2 {
+    margin: 0;
+    font-size: 1.1rem;
+    flex-shrink: 0;
+  }
+}
+
+.artifact-select {
+  width: auto;
+  min-width: 200px;
+  max-width: 400px;
+  padding: 0.35rem 0.6rem;
+  font-size: 0.8rem;
+}
+
+// ── Code Changes & PRs Card ────────────────────────────────────────────
+.code-changes-card {
+  border-color: var(--accent-green);
+  border-width: 2px;
+}
+
+.code-changes-title {
+  margin-bottom: 1rem;
+  color: var(--accent-green);
+  font-size: 1rem;
+}
+
+.pr-section {
+  margin-bottom: 1rem;
+}
+
+.pr-entry {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.5rem 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.85rem;
+}
+
+.pr-title {
+  flex: 1;
+  font-weight: 500;
+
+  a {
+    color: var(--accent-blue);
+    text-decoration: none;
+    &:hover { text-decoration: underline; }
+  }
+}
+
+.pr-branch {
+  font-size: 0.8rem;
+  color: var(--accent-blue);
+  background: var(--bg-primary);
+  padding: 0.15rem 0.5rem;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+}
+
+.file-changes-section {
+  margin-top: 0.5rem;
+}
+
+// ── Output Tabs ─────────────────────────────────────────────────────────────
+.output-card {
+  padding: 0;
+}
+
+.output-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0;
+  border-bottom: 1px solid var(--border);
+  padding: 0 0.5rem;
+  overflow-x: auto;
+}
+
+.tab-btn {
+  padding: 0.6rem 1rem;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+
+  &:hover {
+    color: var(--text-primary);
+    opacity: 1;
+  }
+
+  &.active {
+    color: var(--accent-blue);
+    border-bottom-color: var(--accent-blue);
+  }
+}
+
+.output-panel {
+  padding: 1.25rem;
+  min-height: 200px;
+  max-height: 600px;
+  overflow-y: auto;
+}
+
+// ── Data tables ─────────────────────────────────────────────────────────────
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+
+  th, td {
+    padding: 0.5rem 0.75rem;
+    text-align: left;
+    border-bottom: 1px solid var(--border);
+  }
+
+  th {
+    color: var(--text-secondary);
+    font-weight: 600;
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    background: var(--bg-primary);
+  }
+
+  td code {
+    font-size: 0.8rem;
+    color: var(--accent-blue);
+  }
+}
+
+// ── Output section items ────────────────────────────────────────────────────
+h3 {
+  font-size: 0.9rem;
+  margin: 1rem 0 0.5rem;
+  color: var(--text-secondary);
+
+  &:first-child {
+    margin-top: 0;
+  }
+}
+
+.arch-style {
+  font-size: 1rem;
+  font-weight: 600;
+  margin-bottom: 1rem;
+  color: var(--accent-purple);
+}
+
+.mermaid-block pre {
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 1rem;
+  overflow-x: auto;
+  font-size: 0.8rem;
+}
+
+.epic-item {
+  padding: 0.6rem 0;
+  border-bottom: 1px solid var(--border);
+
+  p {
+    margin-top: 0.3rem;
+    color: var(--text-secondary);
+    font-size: 0.85rem;
+  }
+
+  strong {
+    margin-left: 0.4rem;
+  }
+}
+
+.story-card {
+  padding: 0.75rem;
+  margin-bottom: 0.5rem;
+  background: var(--bg-primary);
+  border-radius: 6px;
+}
+
+.story-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.ac-list {
+  margin-top: 0.5rem;
+  padding-left: 0.5rem;
+}
+
+.ac-label {
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  font-weight: 600;
+}
+
+.ac-list ul {
+  margin: 0.3rem 0 0 1rem;
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+
+  li {
+    margin-bottom: 0.2rem;
+  }
+}
+
+.report-card {
+  padding: 0.6rem 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.report-header {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.report-card p {
+  margin-top: 0.3rem;
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+}
+
+.devops-item {
+  padding: 0.3rem 0;
+  font-size: 0.85rem;
+
+  code {
+    color: var(--accent-blue);
+  }
+}
+
+.migration-item {
+  padding: 0.3rem 0;
+  font-size: 0.85rem;
+}
+
+// ── JSON Tree ───────────────────────────────────────────────────────────────
+.json-tree {
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 1rem;
+  font-size: 0.8rem;
+  overflow-x: auto;
+  max-height: 500px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+// ── Transcript ──────────────────────────────────────────────────────────────
+.transcript-card h2 {
+  font-size: 1rem;
+}
+
+.transcript-log {
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+.transcript-entry {
+  display: flex;
+  gap: 0.5rem;
+  padding: 0.3rem 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.8rem;
+  font-family: monospace;
+}
+
+.transcript-time {
+  color: var(--text-secondary);
+  min-width: 80px;
+  flex-shrink: 0;
+}
+
+.transcript-agent {
+  color: var(--accent-purple);
+  font-weight: 600;
+  min-width: 100px;
+  flex-shrink: 0;
+}
+
+.transcript-text {
+  color: var(--text-primary);
+  word-break: break-word;
+}
+
+// ── Event log (reused from dashboard) ───────────────────────────────────────
+.event-log {
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+.event-entry {
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
+  padding: 0.4rem 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.85rem;
+}
+
+.event-time {
+  color: var(--text-secondary);
+  font-family: monospace;
+  min-width: 70px;
+}
+
+.event-data {
+  color: var(--text-secondary);
+  font-family: monospace;
+  word-break: break-all;
+}
+
+.empty-state {
+  color: var(--text-secondary);
+  text-align: center;
+  padding: 2rem;
+}

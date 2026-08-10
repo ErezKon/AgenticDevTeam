@@ -1,0 +1,476 @@
+<div class="run-session">
+  <!-- A. Header Bar -->
+  <header class="session-header">
+    <div class="header-left">
+      <h1>{{ state?.input?.systemName || 'Run Session' }}</h1>
+      <div class="header-meta">
+        <code class="thread-id">{{ threadId }}</code>
+        <span class="badge badge-purple">{{ phase || '...' }}</span>
+        <span class="badge" [ngClass]="state?.input?.runType === 'greenfield' ? 'badge-green' : 'badge-blue'">
+          {{ state?.input?.runType || 'greenfield' }}
+        </span>
+        <span *ngIf="state?.cancelled" class="badge badge-red">Cancelled</span>
+      </div>
+    </div>
+    <div class="header-right">
+      <a routerLink="/" class="btn-back">&larr; Dashboard</a>
+    </div>
+  </header>
+
+  <!-- Loading state -->
+  <div *ngIf="!state && !error" class="card loading-card">
+    <div class="spinner"></div>
+    <span>Loading run state...</span>
+  </div>
+
+  <!-- Error state -->
+  <div *ngIf="error" class="card error-card">
+    <span class="error-msg">{{ error }}</span>
+    <button class="btn-primary" (click)="refreshState()" style="margin-top: 0.5rem;">Retry</button>
+  </div>
+
+  <div *ngIf="state" class="session-body">
+    <!-- B. Phase Timeline Stepper -->
+    <section class="card phase-timeline-card">
+      <div class="phase-timeline">
+        <div *ngFor="let step of visiblePhases; let i = index"
+             class="phase-step"
+             [ngClass]="phaseStatus(step)">
+          <div class="step-indicator">
+            <span *ngIf="phaseStatus(step) === 'completed'" class="step-check">&#10003;</span>
+            <span *ngIf="phaseStatus(step) === 'current'" class="step-dot pulse"></span>
+            <span *ngIf="phaseStatus(step) === 'pending'" class="step-dot"></span>
+          </div>
+          <span class="step-label">{{ step.label }}</span>
+          <div *ngIf="i < visiblePhases.length - 1" class="step-connector"
+               [ngClass]="phaseStatus(step)"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- F. Stats Bar -->
+    <section class="obs-bar" *ngIf="totalCalls > 0 || budgetLevel !== 'ok'">
+      <div class="obs-item" *ngIf="totalCalls > 0">
+        <span class="obs-label">LLM Calls</span>
+        <span class="obs-value">{{ totalCalls }}</span>
+      </div>
+      <div class="obs-item" *ngIf="totalTokens > 0">
+        <span class="obs-label">Tokens</span>
+        <span class="obs-value">{{ totalTokens.toLocaleString() }}</span>
+      </div>
+      <div class="obs-item">
+        <span class="obs-label">Budget</span>
+        <span class="obs-value" [ngClass]="budgetLevelClass()">
+          {{ budgetLevel }} ({{ (budgetUtilisation * 100).toFixed(0) }}%)
+        </span>
+      </div>
+    </section>
+
+    <!-- Agent Mission Report (Primary Review View) -->
+    <section class="card mission-report-card" *ngIf="currentArtifact">
+      <div class="report-header-bar">
+        <h2>{{ currentArtifact.title }}</h2>
+        <span class="badge badge-blue">{{ currentArtifact.agentId }}</span>
+        <select *ngIf="artifacts.length > 1"
+                class="artifact-select"
+                [ngModel]="currentArtifact"
+                (ngModelChange)="selectArtifact($event)"
+                [compareWith]="compareArtifacts">
+          <option *ngFor="let a of artifacts" [ngValue]="a">{{ a.title }} ({{ a.agentId }})</option>
+        </select>
+      </div>
+      <app-markdown-viewer [content]="currentArtifact.content"></app-markdown-viewer>
+    </section>
+
+    <!-- Code Changes & PRs (for dev phases) -->
+    <section class="card code-changes-card" *ngIf="isDevPhase && (state.fileChanges?.length || state.pullRequests?.length)">
+      <h2 class="code-changes-title">Code Changes & Pull Requests</h2>
+
+      <div *ngIf="state.pullRequests?.length" class="pr-section">
+        <h3>Pull Requests ({{ state.pullRequests.length }})</h3>
+        <div *ngFor="let pr of state.pullRequests" class="pr-entry">
+          <span class="badge"
+            [ngClass]="{
+              'badge-green': pr.status === 'merged',
+              'badge-yellow': pr.status === 'open',
+              'badge-red': pr.status === 'closed'
+            }">{{ pr.status }}</span>
+          <span class="pr-title">
+            <a *ngIf="pr.url" [href]="pr.url" target="_blank" rel="noopener">#{{ pr.number }} {{ pr.title }}</a>
+            <span *ngIf="!pr.url">#{{ pr.number }} {{ pr.title }}</span>
+          </span>
+          <code class="pr-branch">{{ pr.branch }}</code>
+        </div>
+      </div>
+
+      <div *ngIf="state.fileChanges?.length" class="file-changes-section">
+        <h3>File Changes ({{ state.fileChanges.length }})</h3>
+        <table class="data-table">
+          <thead><tr><th>File Path</th><th>Action</th></tr></thead>
+          <tbody>
+            <tr *ngFor="let fc of state.fileChanges">
+              <td><code>{{ fc.filePath }}</code></td>
+              <td>
+                <span class="badge"
+                  [ngClass]="{
+                    'badge-green': fc.action === 'add',
+                    'badge-blue': fc.action === 'modify',
+                    'badge-red': fc.action === 'delete'
+                  }">{{ fc.action }}</span>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- D. HITL Controls Card -->
+    <section class="card hitl-controls-card" *ngIf="!completed && !state?.cancelled">
+      <h2 class="hitl-title">
+        Phase '<span class="phase-name">{{ phase }}</span>' has completed. Review the output above
+      </h2>
+
+      <div *ngIf="loading" class="hitl-loading">
+        <div class="spinner"></div>
+        <span>Processing decision...</span>
+      </div>
+
+      <div *ngIf="!loading">
+        <div class="form-group">
+          <label for="feedback">Feedback (required for enhance, optional for deny)</label>
+          <textarea id="feedback" [(ngModel)]="feedbackText" rows="3"
+            placeholder="Provide feedback for enhancing or denying this phase..."></textarea>
+        </div>
+
+        <div class="hitl-buttons">
+          <button class="btn-success" (click)="approve()">Approve</button>
+          <button class="btn-primary" (click)="enhance()">Enhance</button>
+          <button class="btn-danger" (click)="deny()">Deny</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- Completion summary -->
+    <section class="card completion-card" *ngIf="completed">
+      <h2 class="completion-title">Run Complete</h2>
+      <div class="completion-stats">
+        <div class="stat-item">
+          <span class="stat-label">Epics</span>
+          <span class="stat-value">{{ state.epics?.length || 0 }}</span>
+        </div>
+        <div class="stat-item">
+          <span class="stat-label">User Stories</span>
+          <span class="stat-value">{{ state.userStories?.length || 0 }}</span>
+        </div>
+        <div class="stat-item">
+          <span class="stat-label">Tasks</span>
+          <span class="stat-value">{{ state.tasks?.length || 0 }}</span>
+        </div>
+        <div class="stat-item">
+          <span class="stat-label">File Changes</span>
+          <span class="stat-value">{{ state.fileChanges?.length || 0 }}</span>
+        </div>
+        <div class="stat-item">
+          <span class="stat-label">PRs</span>
+          <span class="stat-value">{{ state.pullRequests?.length || 0 }}</span>
+        </div>
+        <div class="stat-item">
+          <span class="stat-label">Test Reports</span>
+          <span class="stat-value">{{ state.testReports?.length || 0 }}</span>
+        </div>
+        <div class="stat-item">
+          <span class="stat-label">Bugs Found</span>
+          <span class="stat-value">{{ state.bugs?.length || 0 }}</span>
+        </div>
+        <div class="stat-item">
+          <span class="stat-label">LLM Calls</span>
+          <span class="stat-value">{{ totalCalls }}</span>
+        </div>
+      </div>
+      <div *ngIf="state.outputPath" class="output-path">
+        Output: <code>{{ state.outputPath }}</code>
+      </div>
+    </section>
+
+    <!-- Cancelled summary -->
+    <section class="card cancelled-card" *ngIf="state?.cancelled && !completed">
+      <h2 class="cancelled-title">Run Cancelled</h2>
+      <p>This run was denied by the user and has been cancelled.</p>
+    </section>
+
+    <!-- C. Phase Output Viewer (Tabbed) -->
+    <section class="card output-card">
+      <div class="output-tabs">
+        <button *ngFor="let tab of availableTabs"
+          class="tab-btn"
+          [class.active]="activeTab === tab.id"
+          (click)="activeTab = tab.id">
+          {{ tab.label }}
+        </button>
+      </div>
+
+      <div class="output-panel">
+        <!-- Architecture Tab -->
+        <div *ngIf="activeTab === 'architecture' && state.architecture">
+          <h3>Architecture Style</h3>
+          <p class="arch-style">{{ state.architecture.style }}</p>
+
+          <h3>Components</h3>
+          <table class="data-table">
+            <thead><tr><th>Name</th><th>Type</th><th>Description</th></tr></thead>
+            <tbody>
+              <tr *ngFor="let comp of state.architecture.components">
+                <td><strong>{{ comp.name }}</strong></td>
+                <td><span class="badge badge-blue">{{ comp.type }}</span></td>
+                <td>{{ comp.description }}</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <div *ngIf="state.architecture.mermaidDiagram" class="mermaid-block">
+            <h3>Diagram</h3>
+            <pre><code>{{ state.architecture.mermaidDiagram }}</code></pre>
+          </div>
+        </div>
+
+        <!-- Tech Stack Tab -->
+        <div *ngIf="activeTab === 'techStack'">
+          <table class="data-table">
+            <thead><tr><th>Layer</th><th>Choice</th><th>Rationale</th></tr></thead>
+            <tbody>
+              <tr *ngFor="let tech of state.techStack">
+                <td><strong>{{ tech.layer }}</strong></td>
+                <td>{{ tech.choice }}</td>
+                <td>{{ tech.rationale }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <!-- Epics Tab -->
+        <div *ngIf="activeTab === 'epics'">
+          <div *ngFor="let epic of state.epics" class="epic-item">
+            <span class="badge badge-purple">{{ epic.id }}</span>
+            <strong>{{ epic.title }}</strong>
+            <p>{{ epic.description }}</p>
+          </div>
+        </div>
+
+        <!-- User Stories Tab -->
+        <div *ngIf="activeTab === 'stories'">
+          <div *ngFor="let story of state.userStories" class="story-card">
+            <div class="story-header">
+              <span class="badge badge-blue">{{ story.id }}</span>
+              <strong>{{ story.title }}</strong>
+            </div>
+            <div *ngIf="story.acceptanceCriteria?.length" class="ac-list">
+              <span class="ac-label">Acceptance Criteria:</span>
+              <ul>
+                <li *ngFor="let ac of story.acceptanceCriteria">{{ ac }}</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+
+        <!-- Tasks Tab -->
+        <div *ngIf="activeTab === 'tasks'">
+          <table class="data-table">
+            <thead><tr><th>ID</th><th>Title</th><th>Layer</th><th>Tech</th><th>Story</th></tr></thead>
+            <tbody>
+              <tr *ngFor="let task of state.tasks">
+                <td><code>{{ task.id }}</code></td>
+                <td>{{ task.title }}</td>
+                <td>{{ task.layer }}</td>
+                <td>{{ task.suggestedTech }}</td>
+                <td>{{ task.storyId }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <!-- Assignments Tab -->
+        <div *ngIf="activeTab === 'assignments'">
+          <table class="data-table">
+            <thead><tr><th>Dev Agent</th><th>Branch</th><th>Tasks</th><th>Reviewers</th></tr></thead>
+            <tbody>
+              <tr *ngFor="let a of state.assignments">
+                <td><strong>{{ a.devAgentId }}</strong></td>
+                <td><code>{{ a.branchName }}</code></td>
+                <td>{{ a.taskIds?.join(', ') }}</td>
+                <td>{{ a.reviewerIds?.join(', ') }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <!-- DB Design Tab -->
+        <div *ngIf="activeTab === 'dbDesign' && state.dbDesign">
+          <h3>Entities</h3>
+          <table class="data-table">
+            <thead><tr><th>Name</th><th>Fields</th></tr></thead>
+            <tbody>
+              <tr *ngFor="let entity of state.dbDesign.entities">
+                <td><strong>{{ entity.name }}</strong></td>
+                <td>
+                  <span *ngFor="let field of entity.fields; let last = last">
+                    {{ field.name }}: {{ field.type }}{{ !last ? ', ' : '' }}
+                  </span>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+
+          <div *ngIf="state.dbDesign.erdDiagram" class="mermaid-block">
+            <h3>ERD</h3>
+            <pre><code>{{ state.dbDesign.erdDiagram }}</code></pre>
+          </div>
+
+          <div *ngIf="state.dbDesign.migrations?.length">
+            <h3>Migrations ({{ state.dbDesign.migrations.length }})</h3>
+            <div *ngFor="let m of state.dbDesign.migrations" class="migration-item">
+              <code>{{ m.filename }}</code>
+            </div>
+          </div>
+        </div>
+
+        <!-- File Changes Tab -->
+        <div *ngIf="activeTab === 'fileChanges'">
+          <table class="data-table">
+            <thead><tr><th>File Path</th><th>Action</th></tr></thead>
+            <tbody>
+              <tr *ngFor="let fc of state.fileChanges">
+                <td><code>{{ fc.filePath }}</code></td>
+                <td>
+                  <span class="badge"
+                    [ngClass]="{
+                      'badge-green': fc.action === 'add',
+                      'badge-blue': fc.action === 'modify',
+                      'badge-red': fc.action === 'delete'
+                    }">{{ fc.action }}</span>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <!-- Test Reports Tab -->
+        <div *ngIf="activeTab === 'testReports'">
+          <div *ngFor="let report of state.testReports" class="report-card">
+            <div class="report-header">
+              <strong>{{ report.name }}</strong>
+              <span class="badge" [ngClass]="report.passed ? 'badge-green' : 'badge-red'">
+                {{ report.passed ? 'PASS' : 'FAIL' }}
+              </span>
+            </div>
+            <p *ngIf="report.summary">{{ report.summary }}</p>
+          </div>
+        </div>
+
+        <!-- Bugs Tab -->
+        <div *ngIf="activeTab === 'bugs'">
+          <table class="data-table">
+            <thead><tr><th>ID</th><th>Severity</th><th>Description</th><th>Status</th></tr></thead>
+            <tbody>
+              <tr *ngFor="let bug of state.bugs">
+                <td><code>{{ bug.id }}</code></td>
+                <td>
+                  <span class="badge"
+                    [ngClass]="{
+                      'badge-red': bug.severity === 'critical' || bug.severity === 'high',
+                      'badge-yellow': bug.severity === 'medium',
+                      'badge-blue': bug.severity === 'low'
+                    }">{{ bug.severity }}</span>
+                </td>
+                <td>{{ bug.description }}</td>
+                <td>{{ bug.status }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <!-- PRs Tab -->
+        <div *ngIf="activeTab === 'pullRequests'">
+          <table class="data-table">
+            <thead><tr><th>#</th><th>Title</th><th>Status</th><th>Branch</th></tr></thead>
+            <tbody>
+              <tr *ngFor="let pr of state.pullRequests">
+                <td>{{ pr.number }}</td>
+                <td>{{ pr.title }}</td>
+                <td>
+                  <span class="badge"
+                    [ngClass]="{
+                      'badge-green': pr.status === 'merged',
+                      'badge-yellow': pr.status === 'open',
+                      'badge-red': pr.status === 'closed'
+                    }">{{ pr.status }}</span>
+                </td>
+                <td><code>{{ pr.branch }}</code></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <!-- DevOps Tab -->
+        <div *ngIf="activeTab === 'devops' && state.devopsPlan">
+          <div *ngIf="state.devopsPlan.dockerfiles?.length">
+            <h3>Dockerfiles ({{ state.devopsPlan.dockerfiles.length }})</h3>
+            <div *ngFor="let df of state.devopsPlan.dockerfiles" class="devops-item">
+              <code>{{ df.path || df }}</code>
+            </div>
+          </div>
+          <div *ngIf="state.devopsPlan.composeFile">
+            <h3>Docker Compose</h3>
+            <pre><code>{{ state.devopsPlan.composeFile }}</code></pre>
+          </div>
+          <div *ngIf="state.devopsPlan.k8sManifests?.length">
+            <h3>K8s Manifests ({{ state.devopsPlan.k8sManifests.length }})</h3>
+            <div *ngFor="let m of state.devopsPlan.k8sManifests" class="devops-item">
+              <code>{{ m.path || m }}</code>
+            </div>
+          </div>
+          <div *ngIf="state.runningContainers?.length">
+            <h3>Running Containers</h3>
+            <div *ngFor="let c of state.runningContainers" class="devops-item">
+              <code>{{ c }}</code>
+            </div>
+          </div>
+        </div>
+
+        <!-- Raw JSON Tab -->
+        <div *ngIf="activeTab === 'raw'">
+          <pre class="json-tree"><code>{{ prettyJson(state) }}</code></pre>
+        </div>
+      </div>
+    </section>
+
+    <!-- E. Transcript Log -->
+    <section class="card transcript-card">
+      <h2 style="margin-bottom: 0.75rem;">Transcript (last {{ transcriptMessages.length }})</h2>
+      <div class="transcript-log" #transcriptContainer>
+        <div *ngFor="let msg of transcriptMessages" class="transcript-entry">
+          <span class="transcript-time">{{ msg.timestamp || msg.ts }}</span>
+          <span class="transcript-agent">{{ msg.agentId || msg.agent || 'system' }}:</span>
+          <span class="transcript-text">{{ msg.message || msg.text }}</span>
+        </div>
+        <div *ngIf="transcriptMessages.length === 0" class="empty-state">
+          No transcript messages yet.
+        </div>
+      </div>
+    </section>
+
+    <!-- WebSocket Events Log -->
+    <section class="card">
+      <h2 style="margin-bottom: 0.75rem;">Live Events ({{ events.length }})</h2>
+      <div class="event-log">
+        <div *ngFor="let msg of events.slice().reverse().slice(0, 50)" class="event-entry">
+          <span class="event-time">{{ msg.timestamp | date:'HH:mm:ss' }}</span>
+          <span class="event-type badge" [ngClass]="eventBadgeClass(msg.event)">{{ msg.event }}</span>
+          <span class="event-data">{{ msg.data | json }}</span>
+        </div>
+        <div *ngIf="events.length === 0" class="empty-state">
+          Waiting for WebSocket events...
+        </div>
+      </div>
+    </section>
+  </div>
+</div>

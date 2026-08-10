@@ -23,7 +23,8 @@ export type RunEventType =
     | 'gate:result'
     | 'tokens:update'
     | 'budget:level'
-    | 'transcript';
+    | 'transcript'
+    | 'hitl:waiting';
 
 export interface RunEvent {
     type: RunEventType;

@@ -89,6 +89,42 @@ function printAgentRoster() {
     console.log('');
 }
 
+function printArtifactReport(state: ProjectStateType): void {
+    const latestArtifact = state.artifacts?.[state.artifacts.length - 1];
+    if (!latestArtifact || !state.workspacePath) return;
+
+    const filePath = path.join(state.workspacePath, latestArtifact.filePath);
+    if (!fs.existsSync(filePath)) return;
+
+    const content = fs.readFileSync(filePath, 'utf-8');
+    console.log(`\n${color256(255)}${'─'.repeat(60)}${LogColors.RESET}`);
+    console.log(`${color256(46)}${latestArtifact.title}${LogColors.RESET}`);
+    console.log(`${color256(255)}${'─'.repeat(60)}${LogColors.RESET}`);
+    console.log(content);
+    console.log(`${color256(255)}${'─'.repeat(60)}${LogColors.RESET}\n`);
+}
+
+function printAllArtifacts(state: ProjectStateType): void {
+    if (!state.artifacts?.length || !state.workspacePath) {
+        console.log(`${TAG} No mission reports available yet.`);
+        return;
+    }
+
+    for (const artifact of state.artifacts) {
+        const filePath = path.join(state.workspacePath, artifact.filePath);
+        if (!fs.existsSync(filePath)) {
+            console.log(`${TAG} ${artifact.title} — file not found: ${artifact.filePath}`);
+            continue;
+        }
+        const content = fs.readFileSync(filePath, 'utf-8');
+        console.log(`\n${color256(255)}${'═'.repeat(60)}${LogColors.RESET}`);
+        console.log(`${color256(46)}${artifact.title}${LogColors.RESET}  ${color256(33)}[${artifact.agentId}]${LogColors.RESET}`);
+        console.log(`${color256(255)}${'═'.repeat(60)}${LogColors.RESET}`);
+        console.log(content);
+    }
+    console.log(`${color256(255)}${'═'.repeat(60)}${LogColors.RESET}\n`);
+}
+
 function printPhaseStatus(state: ProjectStateType) {
     console.log(`\n${color256(255)}─── Current State ───${LogColors.RESET}`);
     console.log(`  Phase:       ${state.phase}`);
@@ -312,6 +348,9 @@ async function startHitlRun() {
             break;
         }
 
+        // Display the latest agent's mission report
+        printArtifactReport(state);
+
         // Show latest transcript messages
         const recentTranscript = state.transcript.slice(-5);
         if (recentTranscript.length > 0) {
@@ -322,13 +361,14 @@ async function startHitlRun() {
             console.log('');
         }
 
-        console.log(`${TAG} Phase "${state.phase}" is ready for review.`);
+        console.log(`${TAG} Phase "${state.phase}" completed. Review the report above.`);
         console.log('  a) Approve and continue');
         console.log('  d) Deny (stop the run)');
         console.log('  e) Enhance (provide feedback and re-run this phase)');
+        console.log('  r) Show all mission reports');
         console.log('  s) Show full state details');
 
-        const decision = await ask('Your decision [a/d/e/s]: ');
+        const decision = await ask('Your decision [a/d/e/r/s]: ');
 
         switch (decision.toLowerCase()) {
             case 'a': {
@@ -363,6 +403,10 @@ async function startHitlRun() {
                 } catch (err: any) {
                     console.error(`${TAG} ${LogColors.RED}Error: ${err.message}${LogColors.RESET}`);
                 }
+                break;
+            }
+            case 'r': {
+                printAllArtifacts(state);
                 break;
             }
             case 's': {
@@ -464,6 +508,9 @@ async function startMaintainRun() {
                     break;
                 }
 
+                // Display the latest agent's mission report
+                printArtifactReport(state);
+
                 const recentTranscript = state.transcript.slice(-5);
                 if (recentTranscript.length > 0) {
                     console.log(`${color256(255)}Recent activity:${LogColors.RESET}`);
@@ -473,13 +520,14 @@ async function startMaintainRun() {
                     console.log('');
                 }
 
-                console.log(`${TAG} Phase "${state.phase}" is ready for review.`);
+                console.log(`${TAG} Phase "${state.phase}" completed. Review the report above.`);
                 console.log('  a) Approve and continue');
                 console.log('  d) Deny (stop the run)');
                 console.log('  e) Enhance (provide feedback and re-run this phase)');
+                console.log('  r) Show all mission reports');
                 console.log('  s) Show full state details');
 
-                const decision = await ask('Your decision [a/d/e/s]: ');
+                const decision = await ask('Your decision [a/d/e/r/s]: ');
 
                 switch (decision.toLowerCase()) {
                     case 'a': {
@@ -508,6 +556,10 @@ async function startMaintainRun() {
                         try { await session.resume('enhance', feedback); } catch (err: any) {
                             console.error(`${TAG} ${LogColors.RED}Error: ${err.message}${LogColors.RESET}`);
                         }
+                        break;
+                    }
+                    case 'r': {
+                        printAllArtifacts(state);
                         break;
                     }
                     case 's': {

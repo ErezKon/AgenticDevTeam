@@ -455,6 +455,12 @@ async function invokeAgent(
 const intakeLog = getLogger('[Intake]', 255);
 
 export async function intakeNode(state: ProjectStateType): Promise<Partial<ProjectStateType>> {
+    // Idempotency guard: skip if already initialized (prevents re-creation on graph replay)
+    if (state.outputPath && state.workspacePath) {
+        intakeLog.info('Intake already completed — skipping (idempotent guard).');
+        return {};
+    }
+
     intakeLog.info('Starting intake phase...');
     emitRunEvent('phase:start', { phase: 'intake' });
     tokenTracker.reset();
@@ -726,7 +732,7 @@ export async function intakeNode(state: ProjectStateType): Promise<Partial<Proje
         outputPath,
         systemBranch,
         gitContext,
-        phase: nextPhase as PhaseName,
+        phase: 'intake' as PhaseName,
         transcript: [msg('conductor', 'intake', `Intake complete (${state.input.runType ?? 'greenfield'}). System branch: ${systemBranch}. Repo: ${gitContext.owner}/${gitContext.repo}. Requirements: ${requirementsText.length} chars`)],
     };
 }
@@ -793,7 +799,7 @@ export async function codebaseAnalyzerNode(state: ProjectStateType): Promise<Par
     return {
         ...rerunUpdate,
         codebaseAnalysis: output as CodebaseAnalysis,
-        phase: 'architect' as PhaseName,
+        phase: 'codebase-analyzer' as PhaseName,
         artifacts: [artifact],
         transcript: [msg('codebase-analyzer', 'codebase-analyzer', `Analyzed ${output.modules?.length ?? 0} modules across ${output.primaryLanguages?.length ?? 0} languages`)],
         tokenUsage: tokenUsage ? [tokenUsage] : [],
@@ -860,7 +866,7 @@ export async function architectNode(state: ProjectStateType): Promise<Partial<Pr
         architecture: output.architecture,
         techStack: output.techStack ?? [],
         epics: output.epics ?? [],
-        phase: 'product-manager' as PhaseName,
+        phase: 'architect' as PhaseName,
         artifacts: [artifact],
         transcript: [msg('architect', 'architect', `Designed ${output.architecture?.components?.length ?? 0} components, ${output.epics?.length ?? 0} epics`)],
         tokenUsage: tokenUsage ? [tokenUsage] : [],
@@ -926,7 +932,7 @@ export async function productManagerNode(state: ProjectStateType): Promise<Parti
         ...rerunUpdate,
         userStories: output.userStories ?? [],
         tasks: output.tasks ?? [],
-        phase: 'dba' as PhaseName,
+        phase: 'product-manager' as PhaseName,
         artifacts: [artifact],
         transcript: [msg('product-manager', 'product-manager', `Created ${output.userStories?.length ?? 0} stories, ${output.tasks?.length ?? 0} tasks`)],
         tokenUsage: tokenUsage ? [tokenUsage] : [],
@@ -992,7 +998,7 @@ export async function dbaNode(state: ProjectStateType): Promise<Partial<ProjectS
     return {
         ...rerunUpdate,
         dbDesign: output.dbDesign,
-        phase: 'team-leader' as PhaseName,
+        phase: 'dba' as PhaseName,
         artifacts: [artifact],
         transcript: [msg('dba', 'dba', `Designed ${output.dbDesign?.entities?.length ?? 0} entities on ${output.dbDesign?.engine}`)],
         tokenUsage: tokenUsage ? [tokenUsage] : [],
@@ -1061,7 +1067,7 @@ export async function teamLeaderNode(state: ProjectStateType): Promise<Partial<P
     return {
         ...rerunUpdate,
         assignments: output.assignments ?? [],
-        phase: 'development' as PhaseName,
+        phase: 'team-leader' as PhaseName,
         artifacts: [artifact],
         transcript: [msg('team-leader', 'team-leader', `Created ${output.assignments?.length ?? 0} assignments`)],
         tokenUsage: tokenUsage ? [tokenUsage] : [],
@@ -1083,7 +1089,7 @@ export async function developmentNode(state: ProjectStateType): Promise<Partial<
     if (pending.length === 0) {
         devLog.warn('No pending assignments — skipping development phase');
         emitRunEvent('phase:end', { phase: 'development', nextPhase: 'qa', skipped: true });
-        return { phase: 'qa' as PhaseName, transcript: [msg('conductor', 'development', 'No pending assignments')] };
+        return { phase: 'development' as PhaseName, transcript: [msg('conductor', 'development', 'No pending assignments')] };
     }
 
     const apiKey = await getAccessToken();
@@ -1158,7 +1164,7 @@ export async function developmentNode(state: ProjectStateType): Promise<Partial<
             ...result.transcript,
             msg('conductor', 'development', `Development phase complete: ${result.fileChanges.length} files changed, ${result.pullRequests.length} PRs merged. Sync: ${syncResult.details}`),
         ],
-        phase: 'qa' as PhaseName,
+        phase: 'development' as PhaseName,
         tokenUsage: result.tokenUsage ?? [],
     };
 }
@@ -1403,7 +1409,7 @@ export async function bugfixTriageNode(state: ProjectStateType): Promise<Partial
         bugLog.info('No critical/major bugs — skipping to DevOps');
         emitRunEvent('phase:end', { phase: 'bugfix-triage', nextPhase: 'devops', skipped: true });
         return {
-            phase: 'devops' as PhaseName,
+            phase: 'bugfix-triage' as PhaseName,
             iteration: { bugfix: iteration },
             transcript: [msg('team-leader', 'bugfix-triage', 'No critical bugs to fix')],
         };
@@ -1446,7 +1452,7 @@ IMPORTANT: When triaging lint errors about "unused imports" or "defined but neve
         assignments: namespacedAssignments,
         fixedBugIds: bugIdsBeingFixed,
         iteration: { bugfix: iteration },
-        phase: 'development' as PhaseName,
+        phase: 'bugfix-triage' as PhaseName,
         transcript: [msg('team-leader', 'bugfix-triage', `Iteration ${iteration}: reassigned ${namespacedAssignments.length} bug fixes for ${bugIdsBeingFixed.length} bugs`)],
         tokenUsage: tokenUsage ? [tokenUsage] : [],
     };
@@ -1563,7 +1569,7 @@ export async function devopsNode(state: ProjectStateType): Promise<Partial<Proje
         devopsPlan: output.devops,
         fileChanges: output.fileChanges ?? [],
         runningContainers: verifiedContainers,
-        phase: 'e2e' as PhaseName,
+        phase: 'devops' as PhaseName,
         artifacts: [artifact],
         transcript,
         tokenUsage: tokenUsage ? [tokenUsage] : [],
@@ -1590,7 +1596,7 @@ export async function e2eNode(state: ProjectStateType): Promise<Partial<ProjectS
         transcript.push(msg('qa-e2e', 'e2e', `Skipped — ${reason}`));
         emitRunEvent('phase:end', { phase: 'e2e', nextPhase: 'finalize', skipped: true, reason });
         return {
-            phase: 'finalize' as PhaseName,
+            phase: 'e2e' as PhaseName,
             transcript,
             tokenUsage: e2eTokenUsage,
         };
@@ -1629,7 +1635,7 @@ export async function e2eNode(state: ProjectStateType): Promise<Partial<ProjectS
             testReports: e2eReport ? [e2eReport] : [],
             bugs: allBugs,
             artifacts: [e2eArtifact],
-            phase: 'finalize' as PhaseName,
+            phase: 'e2e' as PhaseName,
             transcript,
             tokenUsage: e2eTokenUsage,
         };
@@ -1640,7 +1646,7 @@ export async function e2eNode(state: ProjectStateType): Promise<Partial<ProjectS
         emitRunEvent('phase:end', { phase: 'e2e', nextPhase: 'finalize', error: err.message });
         return {
             ...rerunUpdate,
-            phase: 'finalize' as PhaseName,
+            phase: 'e2e' as PhaseName,
             transcript,
             tokenUsage: e2eTokenUsage,
         };

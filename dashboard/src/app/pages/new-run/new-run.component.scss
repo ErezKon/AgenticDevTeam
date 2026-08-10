@@ -30,9 +30,75 @@
   font-size: 0.9rem;
 }
 
+.drop-zone {
+  position: relative;
+  border: 2px dashed var(--border);
+  border-radius: 8px;
+  padding: 0.5rem;
+  transition: border-color 0.2s, background 0.2s;
+
+  &.drag-over {
+    border-color: var(--accent-blue, #3b82f6);
+    background: rgba(59, 130, 246, 0.06);
+  }
+}
+
+.drop-zone-hint {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 1rem 0 0.5rem;
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+  pointer-events: none;
+
+  .drop-icon {
+    font-size: 1.6rem;
+  }
+
+  small {
+    opacity: 0.6;
+    font-size: 0.75rem;
+  }
+}
+
+.drop-zone-file {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.4rem 0.25rem;
+
+  .file-badge {
+    font-size: 0.8rem;
+    font-weight: 600;
+    background: var(--accent-blue, #3b82f6);
+    color: #fff;
+    padding: 0.15rem 0.6rem;
+    border-radius: 4px;
+  }
+
+  .btn-clear {
+    background: none;
+    border: none;
+    color: var(--text-secondary);
+    font-size: 1.1rem;
+    cursor: pointer;
+    padding: 0 0.3rem;
+    line-height: 1;
+
+    &:hover {
+      color: var(--accent-red, #ef4444);
+    }
+  }
+}
+
 textarea {
   resize: vertical;
   min-height: 200px;
+  border: none;
+  outline: none;
+  width: 100%;
 }
 
 .hint {
