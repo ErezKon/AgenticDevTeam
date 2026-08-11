@@ -863,6 +863,23 @@ See [`.env.example`](.env.example) for the full template.
 | `AGENT_RESPAWN_MAX_GENERATIONS` | `2` | Max respawn generations per logical dev task |
 | `AGENT_RESPAWN_TOKEN_THRESHOLD` | `14000` | Input-token threshold that triggers a respawn |
 | `RESPONSE_SCHEMA_STRIP_ALL_DESCRIPTIONS` | `true` | Strip ALL descriptions from injected JSON Schema for maximum token savings |
+| **Quality Gates** | | |
+| `QUALITY_GATES_ENABLED` | `true` | Enable multi-language quality gates (install/typecheck/build/lint/test) |
+| `QUALITY_GATE_STEPS` | `install,typecheck,build,lint,test` | Comma-separated gate steps to run |
+| `QUALITY_GATE_TIMEOUT_MS` | `300000` | Timeout (ms) per quality gate step (5 min) |
+| `QUALITY_GATE_STRICT_TOOLCHAIN` | `true` | Fail the gate when a stack's toolchain is missing (set to false only for local experiments) |
+| `QUALITY_GATE_SCAN_DEPTH` | `3` | Max directory depth scanned when detecting stack roots in monorepos |
+| `QUALITY_GATE_MAX_ROOTS` | `8` | Max stack roots gated per run (guards pathological trees) |
+| **Product Verification** | | |
+| `PRODUCT_VERIFY_ENABLED` | `true` | Enable artifact / import-resolution / smoke verification |
+| `PRODUCT_MIN_ARTIFACT_BYTES` | `2048` | Minimum total bytes a build must emit to count as real |
+| `PRODUCT_RESOLVE_MAX_FILES` | `2000` | Max source files scanned by the import-resolution check |
+| `PRODUCT_SMOKE_BASE_PORT` | `18190` | First host port used by the smoke server (probes upward) |
+| `PRODUCT_SMOKE_TIMEOUT_MS` | `60000` | Timeout (ms) for the smoke server to become ready |
+| **Gate Integrity (Plan 19 Sub-Plan 02)** | | |
+| `GATE_INTEGRITY_MODE` | `enforce` | Baseline-diff enforcement: `off` / `warn` / `enforce` |
+| `FS_CONFIG_PROTECTION` | `deny` | Protect config files from agent writes: `off` / `warn` / `deny` |
+| `REJECT_TRIVIAL_TESTS` | `true` | Reject tests whose subject is not reachable from an entry point |
 
 ### New variables (Plan 16)
 

@@ -49,6 +49,16 @@ const DENY_PATTERNS: { pattern: RegExp; reason: string }[] = [
     { pattern: /\bgit\s+push\s+(-\w*f\w*|--force)\b/,                    reason: 'force-push' },
     { pattern: /\bchmod\s+(-\w*R\w*\s+)?777\s+\//,                       reason: 'chmod 777 on root paths' },
     { pattern: />\s*\/dev\/sd/,                                            reason: 'writing to block device' },
+    // ── Gate Integrity (Sub-Plan 02): prevent config tampering via shell ──
+    { pattern: /\bnpm\s+pkg\s+set\s+scripts\./,                           reason: 'modifying package.json scripts via npm pkg set' },
+    { pattern: /\bnpm\s+pkg\s+delete\s+scripts\./,                        reason: 'deleting package.json scripts via npm pkg delete' },
+    { pattern: /\bgit\s+checkout\s+--\s+.*package\.json/,                  reason: 'reverting package.json via git checkout' },
+    { pattern: /\bgit\s+restore\s+.*package\.json/,                        reason: 'reverting package.json via git restore' },
+    { pattern: /\bsed\s+-i\b.*package\.json/,                              reason: 'modifying package.json via sed -i' },
+    { pattern: /\bperl\s+-pi\b.*package\.json/,                            reason: 'modifying package.json via perl -pi' },
+    { pattern: />\s*package\.json/,                                         reason: 'overwriting package.json via shell redirect' },
+    { pattern: /\btruncate\b.*package\.json/,                               reason: 'truncating package.json' },
+    { pattern: /\brm\b.*\.(?:test|spec)\.[jt]sx?/,                         reason: 'deleting a test file' },
 ];
 
 /**

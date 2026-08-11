@@ -318,15 +318,59 @@ export const QUALITY_GATES_ENABLED =
 
 /** Which gate steps to run (comma-separated). */
 export const QUALITY_GATE_STEPS =
-    (process.env.QUALITY_GATE_STEPS ?? 'install,build,lint,test').split(',') as ('install' | 'build' | 'lint' | 'test')[];
+    (process.env.QUALITY_GATE_STEPS ?? 'install,typecheck,build,lint,test').split(',') as ('install' | 'typecheck' | 'build' | 'lint' | 'test')[];
 
 /** Timeout (ms) for each quality gate step (default 5 min). */
 export const QUALITY_GATE_TIMEOUT_MS =
     parseInt(process.env.QUALITY_GATE_TIMEOUT_MS ?? '300000', 10);
 
-/** Fail the gate when a stack's toolchain is missing (default: false — missing tools produce 'skipped'). */
+/** Fail the gate when a stack's toolchain is missing (default: true — missing tools fail the gate). */
 export const QUALITY_GATE_STRICT_TOOLCHAIN =
-    (process.env.QUALITY_GATE_STRICT_TOOLCHAIN ?? 'false') === 'true';
+    (process.env.QUALITY_GATE_STRICT_TOOLCHAIN ?? 'true') === 'true';
+
+/** Max directory depth scanned when detecting stack roots (monorepo packages). */
+export const QUALITY_GATE_SCAN_DEPTH =
+    parseInt(process.env.QUALITY_GATE_SCAN_DEPTH ?? '3', 10);
+
+/** Max stack roots gated per run (guards pathological trees). */
+export const QUALITY_GATE_MAX_ROOTS =
+    parseInt(process.env.QUALITY_GATE_MAX_ROOTS ?? '8', 10);
+
+// ─── Product Verification ───────────────────────────────────────────────────
+
+/** Enable artifact / import-resolution / smoke verification of the generated product. */
+export const PRODUCT_VERIFY_ENABLED =
+    (process.env.PRODUCT_VERIFY_ENABLED ?? 'true') === 'true';
+
+/** Minimum total bytes a build must emit before it counts as a real build. */
+export const PRODUCT_MIN_ARTIFACT_BYTES =
+    parseInt(process.env.PRODUCT_MIN_ARTIFACT_BYTES ?? '2048', 10);
+
+/** Max source files scanned by the import-resolution check. */
+export const PRODUCT_RESOLVE_MAX_FILES =
+    parseInt(process.env.PRODUCT_RESOLVE_MAX_FILES ?? '2000', 10);
+
+/** First host port used by the smoke server (probes upward when busy). */
+export const PRODUCT_SMOKE_BASE_PORT =
+    parseInt(process.env.PRODUCT_SMOKE_BASE_PORT ?? '18190', 10);
+
+/** Timeout (ms) for the smoke server to become ready and answer. */
+export const PRODUCT_SMOKE_TIMEOUT_MS =
+    parseInt(process.env.PRODUCT_SMOKE_TIMEOUT_MS ?? '60000', 10);
+
+// ─── Gate Integrity ─────────────────────────────────────────────────────────
+
+/** Baseline-diff enforcement for gate tampering: 'off' | 'warn' | 'enforce'. */
+export const GATE_INTEGRITY_MODE =
+    (process.env.GATE_INTEGRITY_MODE ?? 'enforce') as 'off' | 'warn' | 'enforce';
+
+/** Protect configuration files from agent writes: 'off' | 'warn' | 'deny'. Per-agent overrides apply. */
+export const FS_CONFIG_PROTECTION =
+    (process.env.FS_CONFIG_PROTECTION ?? 'deny') as 'off' | 'warn' | 'deny';
+
+/** Reject test files whose subject is not reachable from an application entry point. */
+export const REJECT_TRIVIAL_TESTS =
+    (process.env.REJECT_TRIVIAL_TESTS ?? 'true') === 'true';
 
 // ─── Security Gates ─────────────────────────────────────────────────────────
 

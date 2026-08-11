@@ -57,6 +57,7 @@ function makeMinimalState(overrides: Partial<ProjectStateType> = {}): ProjectSta
         artifacts: [],
         transcript: [],
         tokenUsage: [],
+        configBaseline: null,
         ...overrides,
     };
 }

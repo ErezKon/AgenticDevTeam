@@ -388,9 +388,50 @@ Graceful degradation on budget limits:
 
 Multi-language deterministic verification:
 - **7 stacks**: Node, Maven, Gradle, Go, Python, .NET, Rust
-- **4 steps**: install, build, lint, test
-- Detects stacks by marker files (package.json, pom.xml, go.mod, etc.)
+- **5 steps**: install, typecheck, build, lint, test
+- **Multi-root detection** (`detectStackRoots`): walks up to `QUALITY_GATE_SCAN_DEPTH` levels deep, prunes
+  `node_modules`/`.git`/`dist`/etc., npm-workspace-aware (tags `isWorkspaceMember`)
+- **Script resolver** for Node: reads `package.json` scripts and resolves to `real`/`fallback`/`absent` mode —
+  no more `--if-present` (a missing build script is now a real failure, not a silent pass)
+- **Honest aggregation**: `passed = executed.length > 0 && executed.every(r => r.passed)`;
+  all-skipped or absent-required-step reports are `inconclusive`, not passing
+- `QUALITY_GATE_STRICT_TOOLCHAIN` defaults to `true` (missing toolchain = failure)
 - Synthesizes bugs with stable IDs for deduplication
+- `gateReportToTestReport` never returns `null` — returns `status: 'inconclusive'` for unverifiable reports
+
+### Product Verification (`product-verify.ts`)
+
+Three checks that verify the generated product actually works:
+- **Artifact check** (`verifyBuildArtifacts`): confirms build produced real output in `dist/`/`build/` etc.;
+  catches `"build": "echo Build successful"` (exits 0, no artifacts = failure)
+- **Import resolution** (`findUnresolvedReferences`): static analysis of all source files for broken imports,
+  missing CSS, absent HTML `src`/`href` targets, and undeclared npm packages
+- **Smoke test** (`runSmokeTest`): inline static file server serves built artifacts, verifies HTTP 200 and that
+  sub-resources resolve; no external dependencies (no Playwright)
+- Wired into PR workflow (artifacts+resolve only) and QA node (full mode with smoke)
+- Synthesises `PRODUCT-ARTIFACTS-*`, `PRODUCT-RESOLVE`, and `PRODUCT-SMOKE` bugs
+
+### Gate Integrity (`gate-integrity.ts`) — Sub-Plan 02
+
+Prevents agents from gaming quality gates instead of fixing code. Three layers:
+
+1. **Config baseline & tamper detection** — `captureConfigBaseline()` snapshots package.json scripts,
+   dependencies, test files, and counts before and after the dev agent runs. `detectTampering()`
+   compares the two baselines and flags tampering:
+   - `script-neutered` / `script-removed` / `script-weakened` (critical/major)
+   - `deps-removed`, `workspaces-removed`, `test-file-deleted`, `test-count-reduced`, `test-skipped`
+   - `typecheck-weakened`, `lint-weakened`, `gitignore-widened`
+
+2. **Trivial test detection** — `detectTrivialTests()` builds an import graph from product source
+   files and entry points, then flags test files whose subject is not reachable from any entry point
+   (`subject-not-in-product`), tests with tautological assertions, or single-arithmetic tests.
+
+3. **Protected paths** — `workspace-tools.ts` supports a `protectionMode` option (`off`/`warn`/`deny`)
+   that blocks writes to config files during repair loops. `shell-tools.ts` denies shell commands that
+   would modify package.json, revert config via git, or delete test files.
+
+Key env vars: `GATE_INTEGRITY_MODE` (off/warn/enforce), `FS_CONFIG_PROTECTION` (off/warn/deny),
+`REJECT_TRIVIAL_TESTS` (true/false).
 
 ### Security Gates (`security-gates.ts`)
 

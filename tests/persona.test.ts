@@ -34,8 +34,9 @@ describe('buildDevPersonaCompact', () => {
             conventionFiles: ['Universal.md', 'React.md'],
         });
         // The conventions digest (extracted headings/rules) adds content, but
-        // the total should still be well under the ~7000 of the old persona
-        expect(persona.length).toBeLessThan(3500);
+        // the total should still be well under the ~7000 of the old persona.
+        // Sub-Plan 02 added anti-gaming rules (~400 chars), raising this ceiling.
+        expect(persona.length).toBeLessThan(4000);
     });
 
     test('retains NO DEAD CODE rule', () => {

@@ -33,8 +33,15 @@ import { emitRunEvent } from '../utils/event-bus';
 import { GITHUB_MODE, createLocalGitHub } from '../utils/github-local';
 import { storiesForIds } from './context-builder';
 import { isBlockingReview, evaluateProgress, MAX_NO_PROGRESS_ITERATIONS } from './review-policy';
-import { runQualityGates, gateReportToMarkdown } from './quality-gates';
+import { runQualityGates, gateReportToMarkdown, detectStackRoots } from './quality-gates';
+import { runProductVerification } from './product-verify';
 import { scanForSecrets, securityReportToMarkdown } from './security-gates';
+import {
+    captureConfigBaseline, detectTampering, tamperFindingsToMarkdown,
+    detectTrivialTests, findTestFiles, findProductSourceFiles,
+    type ConfigBaseline, type TamperFinding,
+} from './gate-integrity';
+import { GATE_INTEGRITY_MODE } from '../config';
 import { parseAgentJson, validateAgentOutput } from '../utils/structured-output';
 import { DeveloperOutputSchema } from '../agents/developers/schemas/dev-output.schema';
 import { ReviewOutputSchema } from '../agents/developers/schemas/review-output.schema';
@@ -528,6 +535,18 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
         gitExec(worktreeWorkspace, `fetch origin ${baseBranch}`);
         const baseRef = resolveBaseRef(worktreeWorkspace, baseBranch);
 
+        // ── 0a. Capture per-branch config baseline for tamper detection ──
+        let branchBaseline: ConfigBaseline | null = null;
+        if (GATE_INTEGRITY_MODE !== 'off') {
+            try {
+                const worktreeRoots = detectStackRoots(worktreeWorkspace);
+                branchBaseline = captureConfigBaseline(worktreeWorkspace, worktreeRoots);
+                log.info(`Config baseline captured: ${Object.keys(branchBaseline.scripts).length} package.json(s), ${branchBaseline.testFiles.length} test files`);
+            } catch (blErr: any) {
+                log.warn(`Config baseline capture failed (non-fatal): ${blErr.message}`);
+            }
+        }
+
         // ── 1. Run dev agent(s) on assignments ──────────────────────────
         // Group by developer agent
         const byDev = new Map<string, Assignment[]>();
@@ -616,11 +635,23 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
         // Run multi-language quality gates (install/build/lint/test) to detect
         // failures early. If gates fail and effective prTestRepairAttempts > 0, give
         // the dev agent a repair attempt before opening the PR.
+        // Also run product verification (artifacts+resolve only — no smoke server in PR worktrees).
         let gateReport: GateReport | null = null;
         try {
+            // Run artifact and resolve checks in the worktree (cheap, deterministic)
+            let productVerifyReport;
+            try {
+                const worktreeRoots = detectStackRoots(worktreeWorkspace);
+                productVerifyReport = await runProductVerification(worktreeWorkspace, worktreeRoots, 'artifacts+resolve');
+                log.info(`Product verification: artifacts=${productVerifyReport.artifacts.filter(a => a.passed).length}/${productVerifyReport.artifacts.length}, unresolved refs=${productVerifyReport.resolveIssues.length}`);
+            } catch (pvErr: any) {
+                log.warn(`Product verification error (non-fatal): ${pvErr.message}`);
+            }
+
             gateReport = runQualityGates(worktreeWorkspace, {
                 timeoutMs: PR_TEST_TIMEOUT_MS,
                 installTimeoutMs: PR_TEST_INSTALL_TIMEOUT_MS,
+                productVerify: productVerifyReport,
             });
             if (gateReport && gateReport.results.length > 0) {
                 if (gateReport.passed) {
@@ -662,7 +693,19 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                                     `Do NOT prefix paths with "generated-projects/${projectSlug}/" — all file operations are relative to the project root.`,
                                     `\n## Failing Quality Gate Steps\n\n${failDetails}`,
                                     `\n## Instructions`,
-                                    `Fix the failing tests. Do not disable or delete tests to make them pass. Do not weaken lint rules or skip build steps. Commit and push.`,
+                                    `Fix the SOURCE CODE so that the project's EXISTING build, lint and test commands pass unchanged.`,
+                                    ``,
+                                    `HARD CONSTRAINTS — these are enforced mechanically, not on trust:`,
+                                    `- You MUST NOT modify \`scripts\` in any package.json. The \`build\`, \`test\`, \`lint\` and`,
+                                    `  \`typecheck\` commands are frozen. Writes to protected config files are REFUSED by your tools.`,
+                                    `- You MUST NOT delete, rename, skip (\`it.skip\`, \`xit\`, \`--passWithNoTests\`) or weaken any test.`,
+                                    `- You MUST NOT add a test whose subject is not part of the application (a test for a helper that`,
+                                    `  nothing imports does not count and will be rejected).`,
+                                    `- You MUST NOT remove dependencies, remove \`workspaces\`, relax \`tsconfig\` strictness, or add`,
+                                    `  entries to \`.gitignore\`/eslint ignore files.`,
+                                    `- If the build fails because a file is missing, CREATE THE MISSING FILE.`,
+                                    `- If the build fails because an import path is wrong, FIX THE IMPORT.`,
+                                    `Any of the above is detected by a baseline diff; the change is reverted and the PR is blocked.`,
                                 ].join('\n');
 
                                 log.info(`Quality gate repair attempt ${repair + 1}/${effectiveRepairAttempts}`);
@@ -703,7 +746,89 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
             log.warn(`Post-dev quality gate error: ${testErr.message}`);
         }
 
-        // ── 1b. Check for actual commits before creating PR ─────────────
+        // ── 1b. Gate integrity: tamper detection ──────────────────────────
+        let integrityFindings: TamperFinding[] = [];
+        if (GATE_INTEGRITY_MODE !== 'off' && branchBaseline) {
+            try {
+                const currentRoots = detectStackRoots(worktreeWorkspace);
+                const currentBaseline = captureConfigBaseline(worktreeWorkspace, currentRoots);
+                integrityFindings = detectTampering(branchBaseline, currentBaseline, worktreeWorkspace);
+
+                // Also run trivial test detection
+                const testFiles = findTestFiles(worktreeWorkspace);
+                const productFiles = findProductSourceFiles(worktreeWorkspace);
+                const trivialFindings = detectTrivialTests(worktreeWorkspace, testFiles, productFiles);
+                for (const tf of trivialFindings) {
+                    // Check if this is a new test file (not in baseline)
+                    if (!branchBaseline.testFiles.includes(tf.file)) {
+                        integrityFindings.push({
+                            kind: 'trivial-test-added',
+                            severity: 'critical',
+                            file: tf.file,
+                            detail: `${tf.reason}: ${tf.detail}`,
+                        });
+                    }
+                }
+
+                if (integrityFindings.length > 0) {
+                    const criticals = integrityFindings.filter(f => f.severity === 'critical');
+                    log.error(`Gate integrity: ${integrityFindings.length} finding(s) (${criticals.length} critical)`);
+                    for (const f of integrityFindings) {
+                        log.error(`  [${f.severity.toUpperCase()}] ${f.kind}: ${f.file} — ${f.detail}`);
+                    }
+                    allTranscript.push(msg('conductor', `Gate integrity: ${integrityFindings.length} finding(s) detected\n${integrityFindings.map(f => `- [${f.severity}] ${f.kind}: ${f.detail}`).join('\n')}`));
+
+                    if (criticals.length > 0 && GATE_INTEGRITY_MODE === 'enforce') {
+                        // Revert protected files to baseline content
+                        log.warn('Reverting protected files to baseline content...');
+                        for (const [relPath, body] of Object.entries(branchBaseline.protectedBodies)) {
+                            const absPath = path.join(worktreeWorkspace, relPath);
+                            if (fs.existsSync(absPath)) {
+                                const currentBody = fs.readFileSync(absPath, 'utf-8');
+                                if (currentBody !== body) {
+                                    fs.writeFileSync(absPath, body, 'utf-8');
+                                    log.info(`  Reverted: ${relPath}`);
+                                }
+                            }
+                        }
+
+                        // Delete fabricated test files (in current but not baseline)
+                        for (const f of integrityFindings) {
+                            if (f.kind === 'trivial-test-added') {
+                                const absPath = path.join(worktreeWorkspace, f.file);
+                                if (fs.existsSync(absPath)) {
+                                    fs.unlinkSync(absPath);
+                                    log.info(`  Deleted fabricated test: ${f.file}`);
+                                }
+                            }
+                        }
+
+                        // Re-commit reverted state
+                        gitExec(worktreeWorkspace, 'add .');
+                        const revertStatus = gitExec(worktreeWorkspace, 'status --short');
+                        if (revertStatus && !revertStatus.includes('nothing to commit')) {
+                            gitExec(worktreeWorkspace, `commit -m "[${projectSlug}]-integrity: revert tampering — ${criticals.length} critical finding(s)"`);
+                            gitPush(worktreeWorkspace, branchName, gitContext);
+                        }
+
+                        // Re-run quality gates on reverted tree
+                        try {
+                            gateReport = runQualityGates(worktreeWorkspace, {
+                                timeoutMs: PR_TEST_TIMEOUT_MS,
+                                installTimeoutMs: PR_TEST_INSTALL_TIMEOUT_MS,
+                            });
+                            log.info(`Quality gates after revert: ${gateReport?.passed ? 'passed' : 'failed'}`);
+                        } catch (rerunErr: any) {
+                            log.warn(`Quality gate re-run after revert failed: ${rerunErr.message}`);
+                        }
+                    }
+                }
+            } catch (intErr: any) {
+                log.warn(`Gate integrity check failed (non-fatal): ${intErr.message}`);
+            }
+        }
+
+        // ── 1c. Check for actual commits before creating PR ─────────────
         // If no commits exist between base and this branch, skip PR creation
         // to avoid the "No commits between" GitHub API error.
         const diffCheck = gitExec(worktreeWorkspace, `log ${baseRef}..HEAD --oneline`);
@@ -741,6 +866,10 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
         // Append quality gate results to the PR description
         if (gateReport && gateReport.results.length > 0) {
             prBody += `\n\n## Quality Gates\n\n${gateReportToMarkdown(gateReport)}`;
+        }
+        // Append gate integrity findings to the PR description
+        if (integrityFindings.length > 0) {
+            prBody += `\n\n${tamperFindingsToMarkdown(integrityFindings)}`;
         }
 
         // ── 1c. Secret scan before PR (when SECURITY_GATE_IN_PR=true) ────
@@ -1070,6 +1199,12 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                                         `2. Make the fix.`,
                                         `3. Commit with a message like "fix: address review comment — <description>".`,
                                         `4. Push when done.`,
+                                        ``,
+                                        `HARD CONSTRAINTS (enforced mechanically):`,
+                                        `- Do NOT modify \`scripts\` in any package.json (writes are REFUSED by your tools).`,
+                                        `- Do NOT delete, skip, or weaken tests. Do NOT add trivial tests for non-product code.`,
+                                        `- Do NOT relax tsconfig/eslint strictness or add source paths to .gitignore.`,
+                                        `- Fix the SOURCE CODE, not the build/test configuration.`,
                                     ].join('\n');
 
                                     try {
@@ -1178,6 +1313,12 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                                 `2. Make the fix.`,
                                 `3. Commit with a message like "fix: address review comment — <description>".`,
                                 `4. Push when done.`,
+                                ``,
+                                `HARD CONSTRAINTS (enforced mechanically):`,
+                                `- Do NOT modify \`scripts\` in any package.json (writes are REFUSED by your tools).`,
+                                `- Do NOT delete, skip, or weaken tests. Do NOT add trivial tests for non-product code.`,
+                                `- Do NOT relax tsconfig/eslint strictness or add source paths to .gitignore.`,
+                                `- Fix the SOURCE CODE, not the build/test configuration.`,
                             ].join('\n');
 
                             try {
@@ -1272,6 +1413,12 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                         `2. Review the ENTIRE codebase on this branch for quality issues.`,
                         `3. Fix any additional issues you find.`,
                         `4. Commit all changes when done.`,
+                        ``,
+                        `HARD CONSTRAINTS (enforced mechanically):`,
+                        `- Do NOT modify \`scripts\` in any package.json (writes are REFUSED by your tools).`,
+                        `- Do NOT delete, skip, or weaken tests. Do NOT add trivial tests for non-product code.`,
+                        `- Do NOT relax tsconfig/eslint strictness or add source paths to .gitignore.`,
+                        `- Fix the SOURCE CODE, not the build/test configuration.`,
                     ].join('\n');
 
                     try {
@@ -1458,6 +1605,13 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
         }
 
         // ── 5. Build result ─────────────────────────────────────────────
+        // If critical integrity findings exist in enforce mode, block the merge
+        const criticalIntegrity = integrityFindings.filter(f => f.severity === 'critical');
+        if (criticalIntegrity.length > 0 && GATE_INTEGRITY_MODE === 'enforce' && prStatus === 'approved') {
+            log.warn(`PR blocked due to ${criticalIntegrity.length} critical integrity finding(s)`);
+            prStatus = 'open';
+        }
+
         const pullRequest: PullRequest = {
             id: `PR-${ghPr.number}`,
             prNumber: ghPr.number,
@@ -1472,6 +1626,7 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
             assignmentIds: assignments.map(a => a.id),
             taskType,
             currentState,
+            ...(integrityFindings.length > 0 ? { integrityFindings } : {}),
         };
 
         return {

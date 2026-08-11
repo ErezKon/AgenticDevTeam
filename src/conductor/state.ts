@@ -29,6 +29,7 @@ import type {
     TokenCallRecord,
     GitContext,
 } from '../agents/_shared/base-schemas';
+import type { ConfigBaseline } from './gate-integrity';
 
 // ─── Reducers ───────────────────────────────────────────────────────────────
 
@@ -230,6 +231,12 @@ export const ProjectState = Annotation.Root({
     tokenUsage: Annotation<TokenCallRecord[]>({
         reducer: appendReducer,
         default: () => [],
+    }),
+
+    // ── Config baseline (gate integrity, Sub-Plan 02) ────────────────────
+    configBaseline: Annotation<ConfigBaseline | null>({
+        reducer: replaceReducer,
+        default: () => null,
     }),
 });
 

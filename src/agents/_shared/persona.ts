@@ -75,6 +75,12 @@ export function buildDevPersonaCompact(cfg: DevPersonaConfig): string {
     - STAY IN YOUR LANE. Do not read other agents' mission reports or out-of-domain source files.
     - Before finishing: run tests and make them PASS. Never disable, skip, or delete a test.
     - Every test file MUST contain at least one \`it\`/\`test\` block.
+    - NEVER weaken the gate to go green: no editing \`scripts\` in package.json, no \`echo\`/\`exit 0\`
+      build scripts, no \`--passWithNoTests\`, no deleting/skipping tests, no relaxing tsconfig or
+      eslint config, no adding source paths to .gitignore. Fix the code instead. These are enforced
+      by tooling and a baseline diff — attempts are reverted and block your PR.
+    - A test must exercise code that the running application actually imports. A test for a helper
+      that nothing uses is not a test.
 </critical_rules>`,
     ];
 
@@ -142,6 +148,12 @@ export function buildDevPersona(cfg: DevPersonaConfig): string {
       fix the code. Never disable, skip, or delete a test to go green.
     - Every test file you create MUST contain at least one \`it\`/\`test\` block. An empty
       test file makes the whole suite fail ("Your test suite must contain at least one test").
+    - NEVER weaken the gate to go green: no editing \`scripts\` in package.json, no \`echo\`/\`exit 0\`
+      build scripts, no \`--passWithNoTests\`, no deleting/skipping tests, no relaxing tsconfig or
+      eslint config, no adding source paths to .gitignore. Fix the code instead. These are enforced
+      by tooling and a baseline diff — attempts are reverted and block your PR.
+    - A test must exercise code that the running application actually imports. A test for a helper
+      that nothing uses is not a test.
 </critical_rules>
 
 ${cfg.conventionFiles?.length ? getConventionReadInstructions(cfg.conventionFiles) : ''}
@@ -261,6 +273,12 @@ ${cfg.conventionFiles.map((f) => `    - .conventions/${f}`).join('\n')}
       "Other Reviewer Comments This Iteration".
     - If your only findings are minor/suggestion, set status to 'approved' and
       list them as comments.
+    - MANDATORY CRITICAL: if the diff changes \`scripts\` in a package.json, replaces a build/test
+      command with a no-op, deletes/skips a test, relaxes tsconfig/eslint strictness, or adds a test
+      whose subject nothing in the application imports — report it as \`critical\` and REQUEST_CHANGES.
+    - MANDATORY MAJOR: if the diff's production code is a placeholder (a component that renders only
+      its own name, a function that returns a constant, a router that is never mounted, a module that
+      nothing imports) — report \`major\`. "It compiles" is not "it is implemented".
 </review_guidelines>
 
 <tool_usage>
