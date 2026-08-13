@@ -1,0 +1,102 @@
+{
+  "layout": "single-root",
+  "roots": [
+    {
+      "dir": ".",
+      "kind": "frontend",
+      "stack": "node",
+      "entryPoints": [
+        "src/index.tsx"
+      ],
+      "sourceDirs": [
+        "src"
+      ],
+      "testDirs": [
+        "tests"
+      ],
+      "scripts": {
+        "build": "vite build",
+        "test": "jest"
+      },
+      "buildOutputDir": "dist"
+    }
+  ],
+  "modules": [
+    {
+      "id": "MOD-UI-APP",
+      "path": "src/App.tsx",
+      "componentName": "UI",
+      "exports": [
+        {
+          "name": "App",
+          "kind": "component",
+          "signature": "React.FC"
+        }
+      ],
+      "dependsOn": [
+        "MOD-ENGINE",
+        "MOD-UI-CALC_DISPLAY",
+        "MOD-UI-CALC_BUTTONS"
+      ]
+    },
+    {
+      "id": "MOD-UI-CALC_DISPLAY",
+      "path": "src/components/Display.tsx",
+      "componentName": "UI",
+      "exports": [
+        {
+          "name": "Display",
+          "kind": "component",
+          "signature": "React.FC<{value: string}>"
+        }
+      ],
+      "dependsOn": []
+    },
+    {
+      "id": "MOD-UI-CALC_BUTTONS",
+      "path": "src/components/Buttons.tsx",
+      "componentName": "UI",
+      "exports": [
+        {
+          "name": "Buttons",
+          "kind": "component",
+          "signature": "React.FC<{onPress: (value: string) => void}>"
+        }
+      ],
+      "dependsOn": []
+    },
+    {
+      "id": "MOD-ENGINE",
+      "path": "src/engine/calculator.ts",
+      "componentName": "Calculator Engine",
+      "exports": [
+        {
+          "name": "evaluate",
+          "kind": "function",
+          "signature": "(expression: string) => number"
+        }
+      ],
+      "dependsOn": [
+        "MOD-UTILS"
+      ]
+    },
+    {
+      "id": "MOD-UTILS",
+      "path": "src/utils/validation.ts",
+      "componentName": "Validation Utils",
+      "exports": [
+        {
+          "name": "isValidExpression",
+          "kind": "function",
+          "signature": "(expr: string) => boolean"
+        }
+      ],
+      "dependsOn": []
+    }
+  ],
+  "namingConvention": "PascalCase components, camelCase utils, kebab-case files",
+  "sharedTypes": [],
+  "frozenPaths": [
+    "src/index.tsx"
+  ]
+}
