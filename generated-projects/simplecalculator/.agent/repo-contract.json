@@ -6,8 +6,7 @@
       "kind": "frontend",
       "stack": "node",
       "entryPoints": [
-        "index.html",
-        "src/main.tsx"
+        "src/index.tsx"
       ],
       "sourceDirs": [
         "src"
@@ -24,116 +23,134 @@
   ],
   "modules": [
     {
-      "id": "MOD-CALC-ENGINE",
+      "id": "MOD-ENGINE",
       "path": "src/engine/calculatorEngine.ts",
       "componentName": "Calculator Engine",
       "exports": [
         {
-          "name": "CalculatorEngine",
-          "kind": "class",
-          "signature": "class CalculatorEngine { evaluate(expression: string): number; clear(): void; }"
-        }
-      ],
-      "dependsOn": [
-        "MOD-MATH-UTILS",
-        "MOD-CONSTANTS"
-      ]
-    },
-    {
-      "id": "MOD-MATH-UTILS",
-      "path": "src/utils/mathUtils.ts",
-      "componentName": "Math Utilities",
-      "exports": [
-        {
-          "name": "sqrt",
+          "name": "evaluate",
           "kind": "function",
-          "signature": "function sqrt(x: number): number"
-        },
-        {
-          "name": "pow",
-          "kind": "function",
-          "signature": "function pow(base: number, exponent: number): number"
-        },
-        {
-          "name": "log",
-          "kind": "function",
-          "signature": "function log(x: number, base?: number): number"
-        },
-        {
-          "name": "ln",
-          "kind": "function",
-          "signature": "function ln(x: number): number"
-        },
-        {
-          "name": "sin",
-          "kind": "function",
-          "signature": "function sin(rad: number): number"
-        },
-        {
-          "name": "cos",
-          "kind": "function",
-          "signature": "function cos(rad: number): number"
-        },
-        {
-          "name": "tan",
-          "kind": "function",
-          "signature": "function tan(rad: number): number"
+          "signature": "evaluate(expression: string): number"
         },
         {
           "name": "factorial",
           "kind": "function",
-          "signature": "function factorial(n: number): number"
-        },
-        {
-          "name": "abs",
-          "kind": "function",
-          "signature": "function abs(x: number): number"
-        },
-        {
-          "name": "radToDeg",
-          "kind": "function",
-          "signature": "function radToDeg(rad: number): number"
-        },
-        {
-          "name": "degToRad",
-          "kind": "function",
-          "signature": "function degToRad(deg: number): number"
-        },
-        {
-          "name": "percent",
-          "kind": "function",
-          "signature": "function percent(x: number): number"
+          "signature": "factorial(n: number): number"
         }
       ],
-      "dependsOn": []
+      "dependsOn": [
+        "MOD-SCI-OPS"
+      ]
     },
     {
-      "id": "MOD-CONSTANTS",
-      "path": "src/constants.ts",
-      "componentName": "Constants",
+      "id": "MOD-SCI-OPS",
+      "path": "src/engine/scientificOps.ts",
+      "componentName": "Calculator Engine",
       "exports": [
+        {
+          "name": "sqrt",
+          "kind": "function",
+          "signature": "sqrt(x: number): number"
+        },
+        {
+          "name": "pow",
+          "kind": "function",
+          "signature": "pow(base: number, exponent: number): number"
+        },
+        {
+          "name": "log10",
+          "kind": "function",
+          "signature": "log10(x: number): number"
+        },
+        {
+          "name": "ln",
+          "kind": "function",
+          "signature": "ln(x: number): number"
+        },
+        {
+          "name": "sin",
+          "kind": "function",
+          "signature": "sin(rad: number): number"
+        },
+        {
+          "name": "cos",
+          "kind": "function",
+          "signature": "cos(rad: number): number"
+        },
+        {
+          "name": "tan",
+          "kind": "function",
+          "signature": "tan(rad: number): number"
+        },
+        {
+          "name": "factorial",
+          "kind": "function",
+          "signature": "factorial(n: number): number"
+        },
         {
           "name": "PI",
           "kind": "const",
-          "signature": "const PI: number"
+          "signature": "PI: number"
         },
         {
           "name": "E",
           "kind": "const",
-          "signature": "const E: number"
+          "signature": "E: number"
+        },
+        {
+          "name": "abs",
+          "kind": "function",
+          "signature": "abs(x: number): number"
+        },
+        {
+          "name": "radToDeg",
+          "kind": "function",
+          "signature": "radToDeg(rad: number): number"
+        },
+        {
+          "name": "degToRad",
+          "kind": "function",
+          "signature": "degToRad(deg: number): number"
+        },
+        {
+          "name": "percent",
+          "kind": "function",
+          "signature": "percent(x: number): number"
         }
       ],
       "dependsOn": []
     },
     {
-      "id": "MOD-SCIENTIFIC-BUTTON",
-      "path": "src/components/ScientificButton.tsx",
+      "id": "MOD-UI",
+      "path": "src/ui/Calculator.tsx",
       "componentName": "Calculator UI",
       "exports": [
         {
-          "name": "ScientificButton",
+          "name": "Calculator",
           "kind": "component",
-          "signature": "function ScientificButton(props: { symbol: string; tooltip: string; onClick: () => void; }): JSX.Element"
+          "signature": "Calculator(): JSX.Element"
+        }
+      ],
+      "dependsOn": [
+        "MOD-ENGINE",
+        "MOD-TOOLTIP",
+        "MOD-BUTTON"
+      ]
+    },
+    {
+      "id": "MOD-BUTTON",
+      "path": "src/ui/Button.tsx",
+      "componentName": "Calculator UI",
+      "exports": [
+        {
+          "name": "Button",
+          "kind": "component",
+          "signature": "Button(props: ButtonProps): JSX.Element"
+        },
+        {
+          "name": "ButtonProps",
+          "kind": "type",
+          "signature": "ButtonProps = { label: string; symbol?: string; onClick: () => void; tooltip?: string; }"
         }
       ],
       "dependsOn": [
@@ -142,51 +159,26 @@
     },
     {
       "id": "MOD-TOOLTIP",
-      "path": "src/components/Tooltip.tsx",
-      "componentName": "Calculator UI",
+      "path": "src/ui/Tooltip.tsx",
+      "componentName": "Tooltip Service",
       "exports": [
         {
           "name": "Tooltip",
           "kind": "component",
-          "signature": "function Tooltip(props: { text: string; children: React.ReactNode; }): JSX.Element"
-        }
-      ],
-      "dependsOn": []
-    },
-    {
-      "id": "MOD-CALC-UI",
-      "path": "src/components/CalculatorUI.tsx",
-      "componentName": "Calculator UI",
-      "exports": [
+          "signature": "Tooltip(props: TooltipProps): JSX.Element"
+        },
         {
-          "name": "CalculatorUI",
-          "kind": "component",
-          "signature": "function CalculatorUI(): JSX.Element"
-        }
-      ],
-      "dependsOn": [
-        "MOD-CALC-ENGINE",
-        "MOD-SCIENTIFIC-BUTTON",
-        "MOD-TOOLTIP"
-      ]
-    },
-    {
-      "id": "MOD-TYPES",
-      "path": "src/types.ts",
-      "componentName": "shared",
-      "exports": [
-        {
-          "name": "Operator",
+          "name": "TooltipProps",
           "kind": "type",
-          "signature": "type Operator = '+' | '-' | '*' | '/' | '^' | '√' | 'log' | 'ln' | 'sin' | 'cos' | 'tan' | '!' | '%' | '(' | ')'"
+          "signature": "TooltipProps = { text: string; children: ReactNode; }"
         }
       ],
       "dependsOn": []
     }
   ],
-  "namingConvention": "PascalCase for React components, camelCase for functions and utilities, UPPER_SNAKE_CASE for constants",
+  "namingConvention": "PascalCase for React components, camelCase for functions and variables, UPPER_SNAKE_CASE for constants",
   "sharedTypes": [
-    "src/types.ts"
+    "src/types/common.ts"
   ],
   "frozenPaths": []
 }

@@ -8,13 +8,13 @@
 
 ## Naming Convention
 
-PascalCase for React components, camelCase for functions and utilities, UPPER_SNAKE_CASE for constants
+PascalCase for React components, camelCase for functions and variables, UPPER_SNAKE_CASE for constants
 
 ## Stack Roots
 
 ### `.` (frontend / node)
 
-- **Entry points:** `index.html`, `src/main.tsx`
+- **Entry points:** `src/index.tsx`
 - **Source dirs:** `src`
 - **Test dirs:** `tests`
 - **Build output:** `dist/`
@@ -28,14 +28,12 @@ PascalCase for React components, camelCase for functions and utilities, UPPER_SN
 
 | ID | Path | Component | Exports | Depends On |
 |----|------|-----------|---------|------------|
-| MOD-CALC-ENGINE | `src/engine/calculatorEngine.ts` | Calculator Engine | `CalculatorEngine` (class) | MOD-MATH-UTILS, MOD-CONSTANTS |
-| MOD-MATH-UTILS | `src/utils/mathUtils.ts` | Math Utilities | `sqrt` (function), `pow` (function), `log` (function), `ln` (function), `sin` (function), `cos` (function), `tan` (function), `factorial` (function), `abs` (function), `radToDeg` (function), `degToRad` (function), `percent` (function) | — |
-| MOD-CONSTANTS | `src/constants.ts` | Constants | `PI` (const), `E` (const) | — |
-| MOD-SCIENTIFIC-BUTTON | `src/components/ScientificButton.tsx` | Calculator UI | `ScientificButton` (component) | MOD-TOOLTIP |
-| MOD-TOOLTIP | `src/components/Tooltip.tsx` | Calculator UI | `Tooltip` (component) | — |
-| MOD-CALC-UI | `src/components/CalculatorUI.tsx` | Calculator UI | `CalculatorUI` (component) | MOD-CALC-ENGINE, MOD-SCIENTIFIC-BUTTON, MOD-TOOLTIP |
-| MOD-TYPES | `src/types.ts` | shared | `Operator` (type) | — |
+| MOD-ENGINE | `src/engine/calculatorEngine.ts` | Calculator Engine | `evaluate` (function), `factorial` (function) | MOD-SCI-OPS |
+| MOD-SCI-OPS | `src/engine/scientificOps.ts` | Calculator Engine | `sqrt` (function), `pow` (function), `log10` (function), `ln` (function), `sin` (function), `cos` (function), `tan` (function), `factorial` (function), `PI` (const), `E` (const), `abs` (function), `radToDeg` (function), `degToRad` (function), `percent` (function) | — |
+| MOD-UI | `src/ui/Calculator.tsx` | Calculator UI | `Calculator` (component) | MOD-ENGINE, MOD-TOOLTIP, MOD-BUTTON |
+| MOD-BUTTON | `src/ui/Button.tsx` | Calculator UI | `Button` (component), `ButtonProps` (type) | MOD-TOOLTIP |
+| MOD-TOOLTIP | `src/ui/Tooltip.tsx` | Tooltip Service | `Tooltip` (component), `TooltipProps` (type) | — |
 
 ## Shared Types
 
-- `src/types.ts`
+- `src/types/common.ts`
