@@ -35,7 +35,7 @@ import { getLogger } from './utils/logger';
 import { LogColors, color256 } from './utils/log-colors.util';
 import { tokenTracker } from './utils/token-tracker';
 import { refreshTokenReport } from './utils/token-report';
-import { onRunEvent, getRecentEvents } from './utils/event-bus';
+import { onRunEvent, getRecentEvents, getAllEvents } from './utils/event-bus';
 import * as path from 'path';
 import * as fs from 'fs';
 
@@ -149,7 +149,13 @@ app.post('/api/run', async (req, res) => {
             runAutonomous({ systemName, requirementsText: text, mode: 'autonomous', runType: resolvedRunType, existingProjectPath, repoTarget })
                 .then((state) => {
                     states.set(systemName, state);
-                    broadcast('run:complete', { systemName, state });
+                    const acceptance = state.acceptance;
+                    const status = state.cancelled ? 'cancelled'
+                        : acceptance?.status === 'accepted' ? 'completed'
+                        : acceptance?.status === 'partial' ? 'partial'
+                        : acceptance?.status === 'inconclusive' ? 'inconclusive'
+                        : 'failed';
+                    broadcast('run:complete', { systemName, state, status, blockers: acceptance?.blockers ?? [] });
                 })
                 .catch((err) => {
                     // run.ts already flushes the token report on failure,

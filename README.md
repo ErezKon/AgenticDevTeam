@@ -1,6 +1,6 @@
 # AgenticDevTeam
 
-> A LangGraph-orchestrated multi-agent system that ingests a requirements document and autonomously designs, builds, tests, and containerizes a complete software product — or maintains, extends, and fixes an existing one.
+> A LangGraph-orchestrated multi-agent system that ingests a requirements document and autonomously designs, builds, tests, and containerizes a complete software product — reporting truthful acceptance status (`completed`, `failed`, `partial`, or `inconclusive`) based on deterministic verification gates — or maintains, extends, and fixes an existing one.
 
 ---
 
@@ -43,7 +43,7 @@ Given a requirements document (Markdown, TXT, PDF, or DOCX), the system will:
 3. **Model** the database — entities, relationships, indexes, migrations, and ERD
 4. **Assign** tasks to the right developers based on rank, specialty, and dependency order
 5. **Implement** the full codebase with concurrent developer agents writing real files
-6. **Test** with unit/integration suites and Playwright MCP-driven end-to-end browser tests
+6. **Test** with unit/integration suites and Playwright MCP-driven end-to-end browser tests. E2E tests require a running Playwright MCP server and are gated by a preflight check. When unavailable, a local-server smoke test provides the fallback verification.
 7. **Deploy** via auto-generated Dockerfiles, docker-compose, and Kubernetes manifests
 8. **Iterate** through a bug-fix loop until quality gates pass or the iteration limit is reached
 
@@ -158,7 +158,7 @@ flowchart LR
 | 4 | **DBA** | `dbaNode` | Design database — entities, relationships, indexes, migration scripts, and ERD diagram |
 | 5 | **Team Leader** | `teamLeaderNode` | Assign tasks to developers based on rank, specialty, dependencies, and complexity |
 | 6 | **Development** | `developmentNode` | Fan-out assignments to developer agents with topological sorting and concurrency control |
-| 7 | **QA** | `qaNode` | QA Lead creates test plan → QA Unit writes & runs tests → QA E2E drives Playwright browser tests |
+| 7 | **QA** | `qaNode` | QA Lead creates test plan → QA Unit writes tests on a PR branch; the conductor runs them via test-runner parsers and parses the output independently → QA E2E drives Playwright browser tests |
 | 8 | **Bug-fix Triage** | `bugfixTriageNode` | Team Leader re-assigns critical/major bugs to developers (loops back to Development) |
 | 9 | **DevOps** | `devopsNode` | Generate Dockerfiles, docker-compose, K8s manifests; build images; run containers; health-check |
 | 10 | **Finalize** | `finalizeNode` | Write final mission report with summary, stats, and Mermaid diagrams; close run |
@@ -440,7 +440,7 @@ In the New Run form, a **Project Hosting** dropdown appears when the run type is
 
 ## Context Compaction & Token Optimization
 
-The system includes a suite of context compaction mechanisms that reduce LLM input tokens by **60-75%** (projected: ~31M to ~8-12M tokens on equivalent workloads). All optimizations are enabled by default and individually configurable via environment variables.
+The system includes a suite of context compaction mechanisms tuned for correctness — context budgets are sized for accurate agent work rather than minimised for cost. All optimizations are enabled by default and individually configurable via environment variables.
 
 ### The Problem
 
@@ -880,6 +880,43 @@ See [`.env.example`](.env.example) for the full template.
 | `GATE_INTEGRITY_MODE` | `enforce` | Baseline-diff enforcement: `off` / `warn` / `enforce` |
 | `FS_CONFIG_PROTECTION` | `deny` | Protect config files from agent writes: `off` / `warn` / `deny` |
 | `REJECT_TRIVIAL_TESTS` | `true` | Reject tests whose subject is not reachable from an entry point |
+| **Architecture Contract (Plan 19 Sub-Plan 05)** | | |
+| `REPO_CONTRACT_MODE` | `enforce` | Enforce the Architect's repo contract: `off` / `warn` / `enforce` |
+| `REPO_CONTRACT_MAX_MODULES` | `60` | Cap on declared modules in the contract |
+| `CONTRACT_STUB_SCAFFOLD` | `true` | Create typed interface stubs for every declared module during scaffolding |
+| `CONTRACT_PROMPT_MAX_CHARS` | `6000` | Char budget for the contract section injected into agent prompts |
+| **PR Workflow / Work Preservation (Plan 19 Sub-Plan 06)** | | |
+| `WORKTREE_SALVAGE_MAX` | `10` | Max failed worktrees retained under `.worktrees-failed/` for salvage |
+| `PR_SALVAGE_PATCHES` | `true` | Export `git format-patch` bundles for every branch that fails to merge |
+| `MERGE_CONFLICT_FIX_ATTEMPTS` | `1` | Dev-agent attempts at resolving a merge conflict before reporting blocked |
+| `ASSIGNMENT_MAX_ATTEMPTS` | `3` | Max times a single assignment may be re-dispatched |
+| `CONFIG_OWNERSHIP_SCAFFOLD_ONLY` | `true` | Only the scaffold branch may modify shared root config files |
+| **QA Real Execution (Plan 19 Sub-Plan 09)** | | |
+| `QA_ENFORCE_SUFFICIENCY` | `true` | Enforce test-sufficiency rules (min counts, coverage floor, per-story coverage) |
+| `QA_MIN_TOTAL_TESTS` | `0` | Minimum total non-trivial executed tests. 0 = derive as `max(5, storyCount)` |
+| `QA_MIN_TESTS_PER_STORY` | `1` | Minimum tagged passing tests per user story |
+| `QA_MIN_COVERAGE_PCT` | `40` | Minimum line-coverage percentage. 0 = off |
+| `QA_TEST_TIMEOUT_MS` | `600000` | Timeout (ms) for a single test-runner invocation |
+| `QA_MAX_INVOCATIONS` | `12` | Max qa-unit invocations per QA phase |
+| `QA_TESTS_VIA_PR` | `true` | Route QA-authored tests through the PR workflow |
+| **Requirements Traceability (Plan 19 Sub-Plan 10)** | | |
+| `MIN_AC_COVERAGE_PCT` | `70` | Minimum verified AC coverage % for AC_COVERAGE acceptance criterion. Only `source:'executed'` tests count. 0 = off |
+| `MIN_AC_IMPLEMENTED_PCT` | `90` | Minimum implemented (merged code exists) AC %. 0 = off |
+| `MIN_AC_COVERAGE_MAX_BUGS` | `25` | Max bugs synthesised for uncovered criteria |
+| `TRACEABILITY_JSON` | `true` | Write `outputs/<run>/traceability.json` alongside the markdown |
+| **DevOps & E2E Hardening (Plan 19 Sub-Plan 11)** | | |
+| `E2E_BUGFIX_ENABLED` | `true` | Allow E2E failures to trigger a bugfix iteration. Was `false`. |
+| `E2E_ALLOW_LOCAL_SERVER` | `true` | Serve the built product locally for E2E when no Docker services are available |
+| `ACCEPT_REQUIRE_E2E` | `false` | Make the E2E acceptance criterion required |
+| `PLAYWRIGHT_MCP_STARTUP_TIMEOUT_MS` | `60000` | Playwright MCP startup budget (ms) |
+| `PLAYWRIGHT_MCP_CONNECT_RETRIES` | `2` | Connection retries for the Playwright MCP server |
+| `PLAYWRIGHT_AUTO_INSTALL` | `true` | Auto-install Playwright chromium when browsers are missing |
+| `DEVOPS_FALLBACK_ENABLED` | `true` | Generate a deterministic Dockerfile/compose when the DevOps agent fails |
+| **Observability & Regression (Plan 19 Sub-Plan 12)** | | |
+| `EVENT_BUFFER_SIZE` | `5000` | Events kept in the ring buffer (was 500) |
+| `EVENT_PRIORITY_BUFFER_SIZE` | `500` | High-severity events retained regardless of ring eviction |
+| `RUN_LEDGER_ENABLED` | `true` | Write outputs/<run>/ledger.jsonl and run-report.md |
+| `RUN_INVARIANTS_MODE` | `warn` | Run-invariant enforcement: off/warn/strict |
 
 ### New variables (Plan 16)
 

@@ -28,11 +28,13 @@ export const dbaSystemPrompt = `
 </critical_rules>
 
 <workflow>
-    1. REVIEW the architecture, components, and user stories to identify all data entities.
+    1. REVIEW the architecture, components, user stories, and repo contract to identify data entities.
     2. DESIGN entities with columns, types, and constraints.
     3. MAP relationships between entities.
     4. PLAN indexes for the most critical query patterns.
-    5. WRITE migration files for the initial schema.
+    5. WRITE migration files for the initial schema. If a repo contract is provided, place
+       migration files in the backend root's source directory (e.g. packages/backend/src/db/
+       or src/db/).
     6. COMPOSE sample queries for the most complex operations.
     7. INCLUDE a Mermaid ERD diagram in the erdMermaid field of your response.
     8. OUTPUT the structured DbDesign response.

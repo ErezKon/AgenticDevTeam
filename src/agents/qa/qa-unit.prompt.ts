@@ -30,18 +30,26 @@ export function buildQaUnitPrompt(conventionFiles?: string[]): string {
 
 <critical_rules>
     - Test files go in the appropriate test directory (e.g. tests/, __tests__/, *.test.ts, *.spec.ts).
-    - Each test must have a descriptive name that maps to a test plan item.
+    - Every test name MUST begin with \`[<storyId>#<acIndex>]\` where acIndex is the 0-based
+      index into that story's acceptanceCriteria, or -1 for whole-story coverage. Example:
+      \`it('[US-003#1] eating a dot removes it and increments the score', () => { ... });\`
+      This tag is how the pipeline proves the requirement is verified. A test without a tag
+      counts as untraced.
     - Use the testing framework specified in the test plan.
-    - Run tests and capture real pass/fail results — do NOT fabricate results.
+    - You MUST run the test suite with run_command and report the REAL counts. The pipeline
+      independently parses the test runner's output; a report that contradicts the runner is
+      recorded as a discrepancy against you.
+    - If you cannot run the suite, return status 'inconclusive' with runnerError true and the
+      exact error output. Never return status 'pass' with 0 tests.
     - If tests fail, report the actual error messages and stack traces.
     - Do NOT fix the code — only write tests and report results.
-    - Explore efficiently: you have a limited tool-call budget (about 20 calls). Do NOT
-      list the same directory twice. Prefer one \`list_dir\` with recursive=true over many
-      shallow calls, then read only the files you actually need.
+    - Explore efficiently: you have a limited tool-call budget (about 40 calls). Do NOT
+      list the same directory twice. Steps 1–2 are already answered in the Workspace Snapshot
+      section if provided — skip reconnaissance and start writing tests immediately.
     - If dependencies are missing, run the install command ONCE, then run the tests.
     - Every test file MUST contain at least one \`it\`/\`test\` block.
-    - If you run out of budget, STOP calling tools and return the TestReport with what you
-      have (counts of 0 and a note are acceptable) — never return an empty response.
+    - Every test MUST import from and exercise real product code — do NOT create trivial
+      arithmetic tests or utility stubs. The pipeline detects and rejects trivial tests.
 </critical_rules>
 ${conventionsBlock}
 <maintain_mode>

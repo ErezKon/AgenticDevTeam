@@ -17,7 +17,7 @@ import { buildDevAgent } from '../agents/developers/dev-agent.builder';
 import { buildReviewerAgent } from '../agents/developers/reviewer-agent.builder';
 import { getDevAgent, DEV_AGENTS } from '../agents/developers/registry';
 import { resolveConventionFiles } from '../utils/coding-conventions';
-import { gitExec, gitPush, findGitRoot } from '../utils/git-exec';
+import { gitExec, gitExecVerbose, gitPush, findGitRoot } from '../utils/git-exec';
 import {
     GITHUB_TOKEN, GITHUB_OWNER, GITHUB_REPO,
     DEV_RECURSION_LIMIT, REVIEWER_RECURSION_LIMIT,
@@ -26,13 +26,28 @@ import {
     PR_TEST_INSTALL_TIMEOUT_MS, PR_TEST_TIMEOUT_MS,
     SECURITY_GATE_IN_PR,
     AGENT_RESPAWN_ENABLED, AGENT_RESPAWN_MAX_GENERATIONS,
+    WORKTREE_SALVAGE_MAX, PR_SALVAGE_PATCHES,
+    MERGE_CONFLICT_FIX_ATTEMPTS,
 } from '../config';
 import { buildHandoff, renderHandoff } from './agent-respawn';
 import { getEffectiveLimits } from '../utils/run-budget';
+import { buildWorkspaceSnapshot } from './workspace-snapshot';
+import { reconcileFileChanges } from './file-change-reconciliation';
+import {
+    SNAPSHOT_MAX_FILES, SNAPSHOT_MAX_CHARS, RECONCILE_FILE_CHANGES,
+} from '../config';
 import { emitRunEvent } from '../utils/event-bus';
 import { GITHUB_MODE, createLocalGitHub } from '../utils/github-local';
-import { storiesForIds } from './context-builder';
-import { isBlockingReview, evaluateProgress, MAX_NO_PROGRESS_ITERATIONS } from './review-policy';
+import { storiesForIds, tasksForIds } from './context-builder';
+import {
+    isBlockingReview, evaluateProgress, MAX_NO_PROGRESS_ITERATIONS,
+    type ReviewOutcome, decideMerge, selectEscalationCandidate,
+    evaluateQuorum, enforceCriteriaVerdicts, reviewCommentsToBugs, blockedPrBug,
+} from './review-policy';
+import {
+    REVIEW_MERGE_POLICY, REVIEW_QUORUM, REVIEW_ABSTAIN_RETRIES,
+    ESCALATION_TOOL_CALL_BONUS, REVIEW_MAJORS_TO_BUGS,
+} from '../config';
 import { runQualityGates, gateReportToMarkdown, detectStackRoots } from './quality-gates';
 import { runProductVerification } from './product-verify';
 import { scanForSecrets, securityReportToMarkdown } from './security-gates';
@@ -42,13 +57,16 @@ import {
     type ConfigBaseline, type TamperFinding,
 } from './gate-integrity';
 import { GATE_INTEGRITY_MODE } from '../config';
+import { classifyPrFailure, isFatalPrFailure } from './pr-failure';
+import { resolveKnownConflicts, listConflictedFiles } from './merge-resolve';
+import type { CompletionEvidence } from './assignment-policy';
 import { parseAgentJson, validateAgentOutput } from '../utils/structured-output';
 import { DeveloperOutputSchema } from '../agents/developers/schemas/dev-output.schema';
 import { ReviewOutputSchema } from '../agents/developers/schemas/review-output.schema';
 import type { GateReport } from './quality-gates';
 import type {
     Assignment, FileChange, ArtifactRef, TranscriptMessage,
-    PhaseName, PullRequest, PRReview, GitContext, TechDecision, UserStory,
+    PhaseName, PullRequest, PRReview, GitContext, TechDecision, UserStory, Task,
 } from '../agents/_shared/base-schemas';
 import type { DeveloperOutput } from '../agents/developers/schemas/dev-output.schema';
 import type { ReviewOutput } from '../agents/developers/schemas/review-output.schema';
@@ -76,8 +94,13 @@ export interface PRWorkflowInput {
     /** User stories from the PM — when present, only the stories for this branch's
      *  assignments are injected into the dev prompt (fixes A8: every dev got all stories). */
     userStories?: UserStory[];
+    /** Tasks from the PM plan — when present, only the tasks for this branch's
+     *  assignments are injected into the dev prompt (P11: task descriptions reach developers). */
+    tasks?: Task[];
     /** Whether we are operating on an existing codebase (maintain mode). */
     isMaintainMode?: boolean;
+    /** Run output directory — used for salvage patch export (Sub-Plan 06 §3). */
+    outputPath?: string;
 }
 
 export interface PRWorkflowResult {
@@ -86,6 +109,12 @@ export interface PRWorkflowResult {
     artifacts: ArtifactRef[];
     transcript: TranscriptMessage[];
     tokenUsage: TokenCallRecord[];
+    /** Evidence of assignment completion with real file changes (Sub-Plan 06 §6). */
+    completionEvidence?: CompletionEvidence[];
+    /** Branch salvaged to outputPath/salvage/ (Sub-Plan 06 §3). */
+    salvageBranch?: string;
+    /** Phantom file changes: claimed by agents but not found on disk (Sub-Plan 08 §7). */
+    phantomFileChanges?: FileChange[];
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -154,6 +183,137 @@ function slugify(text: string): string {
 // ensureDepsAndRunTests removed — replaced by runQualityGates (fixes A6)
 
 // findGitRoot imported from ../utils/git-exec
+
+// ─── Durable commit (Sub-Plan 06 §2) ────────────────────────────────────────
+
+/**
+ * Stage, commit and push whatever is in the worktree. Safe to call repeatedly.
+ * MUST be called from a `finally` block after every agent invocation: an agent that
+ * throws (recursion limit, loop-guard poisoning, connection error) has usually already
+ * written files, and those writes are otherwise lost when the worktree is removed.
+ * Returns the new HEAD sha, or null when there was nothing to commit.
+ */
+export function commitWorktree(
+    worktreeWorkspace: string,
+    branchName: string,
+    projectSlug: string,
+    storyId: string,
+    type: 'feat' | 'fix' | 'test' | 'refactor' | 'chore',
+    subject: string,
+    gitContext?: GitContext | null,
+): string | null {
+    try {
+        gitExec(worktreeWorkspace, 'add .');
+        const statusOutput = gitExec(worktreeWorkspace, 'status --short');
+        if (!statusOutput || statusOutput.includes('nothing to commit') || statusOutput.startsWith('Error:')) {
+            return null; // nothing to commit
+        }
+        const commitMsg = `[${projectSlug}]-[${storyId}]-${type}: ${subject}`;
+        gitExec(worktreeWorkspace, `commit -m "${commitMsg.replace(/"/g, '\\"')}"`);
+        gitPush(worktreeWorkspace, branchName, gitContext);
+        const sha = gitExec(worktreeWorkspace, 'rev-parse HEAD');
+        return sha.startsWith('Error:') ? null : sha;
+    } catch (err: any) {
+        log.warn(`commitWorktree failed (non-fatal): ${err.message}`);
+        return null;
+    }
+}
+
+// ─── Worktree salvage (Sub-Plan 06 §3) ──────────────────────────────────────
+
+/**
+ * Export a `git format-patch` bundle and a diagnostic README for a branch
+ * that failed to merge. The patches are written to `<outputPath>/salvage/<slug>/`.
+ */
+function salvageWorktree(
+    worktreeWorkspace: string,
+    gitRoot: string,
+    baseRef: string,
+    branchName: string,
+    failureReason: string,
+    outputPath: string,
+): void {
+    if (!PR_SALVAGE_PATCHES) return;
+    const slug = branchName.replace(/[^a-zA-Z0-9]+/g, '-');
+    const salvageDir = path.join(outputPath, 'salvage', slug);
+    try {
+        fs.mkdirSync(salvageDir, { recursive: true });
+        // Export patches
+        gitExec(worktreeWorkspace, `format-patch ${baseRef}..HEAD -o "${salvageDir}"`);
+        // Write diagnostic README
+        const gitLog = gitExec(worktreeWorkspace, 'log --oneline');
+        const diffStat = gitExec(worktreeWorkspace, `diff --stat ${baseRef}..HEAD`);
+        const readme = [
+            `# Salvaged branch: ${branchName}`,
+            ``,
+            `**Base ref:** ${baseRef}`,
+            `**Failure reason:** ${failureReason}`,
+            `**Salvage date:** ${new Date().toISOString()}`,
+            ``,
+            `## Commits`,
+            '```',
+            gitLog,
+            '```',
+            ``,
+            `## Diff stat`,
+            '```',
+            diffStat,
+            '```',
+        ].join('\n');
+        fs.writeFileSync(path.join(salvageDir, 'README.md'), readme, 'utf-8');
+        log.info(`Salvage patches written to ${salvageDir}`);
+        emitRunEvent('pr:salvage', { branch: branchName, salvageDir, reason: failureReason });
+    } catch (err: any) {
+        log.warn(`Salvage export failed (non-fatal): ${err.message}`);
+    }
+}
+
+/**
+ * Evict the oldest failed worktrees beyond the retention cap.
+ */
+function evictStaleSalvageWorktrees(gitRoot: string): void {
+    const failedDir = path.join(gitRoot, '.worktrees-failed');
+    if (!fs.existsSync(failedDir)) return;
+    try {
+        const entries = fs.readdirSync(failedDir)
+            .map(name => ({ name, mtime: fs.statSync(path.join(failedDir, name)).mtimeMs }))
+            .sort((a, b) => a.mtime - b.mtime); // oldest first
+        while (entries.length > WORKTREE_SALVAGE_MAX) {
+            const oldest = entries.shift()!;
+            fs.rmSync(path.join(failedDir, oldest.name), { recursive: true, force: true });
+            log.info(`Evicted stale salvage worktree: ${oldest.name}`);
+        }
+    } catch (err: any) {
+        log.warn(`Eviction of stale salvage worktrees failed (non-fatal): ${err.message}`);
+    }
+}
+
+/**
+ * Find an existing open PR for the given head branch to avoid 422 errors.
+ */
+async function findExistingPR(
+    octokit: any, owner: string, repo: string, head: string,
+): Promise<{ number: number; html_url: string; node_id: string } | null> {
+    try {
+        const headRef = `${owner}:${head}`;
+        const { data } = await octokit.pulls.list({ owner, repo, head: headRef, state: 'open' });
+        if (data.length > 0) {
+            const pr = data[0];
+            log.info(`Found existing open PR #${pr.number} for ${head}`);
+            return { number: pr.number, html_url: pr.html_url, node_id: pr.node_id ?? `pr-${pr.number}` };
+        }
+        // Also try bare branch name (for local mode)
+        const { data: data2 } = await octokit.pulls.list({ owner, repo, head, state: 'open' });
+        if (data2.length > 0) {
+            const pr = data2[0];
+            log.info(`Found existing open PR #${pr.number} for ${head} (bare)`);
+            return { number: pr.number, html_url: pr.html_url, node_id: pr.node_id ?? `pr-${pr.number}` };
+        }
+    } catch (err: any) {
+        log.warn(`Failed to list existing PRs: ${err.message}`);
+    }
+    return null;
+}
 
 // ─── PR title & description builders ─────────────────────────────────────────
 
@@ -333,9 +493,22 @@ async function invokeDevAgent(
 
                 // Build handoff for the next generation
                 handoff = buildHandoff(result.messages ?? [], gen + 1);
+
+                // Sub-Plan 08 §4: progress-gated respawn — a generation that
+                // produced zero writes does not get another respawn
+                if (handoff.filesWritten.length === 0) {
+                    log.warn(`${agentId} generation ${gen} produced zero writes — terminating instead of respawning`);
+                    tokenTracker.endInvocation(invocationId, respawnCount > 0 ? respawnCount : undefined);
+                    return {
+                        output: parsed.output,
+                        tokenUsage: allTokenUsage[0] ?? null,
+                        allTokenUsage: allTokenUsage.length > 1 ? allTokenUsage : undefined,
+                    };
+                }
+
                 log.info(
                     `Respawning ${agentId} (generation ${gen + 1}): ` +
-                    `${handoff.filesWritten.length} files carried forward`,
+                    `${handoff.filesWritten.length} files carried forward, handoff ${renderHandoff(handoff).length} chars`,
                 );
                 emitRunEvent('agent:respawn', {
                     agentId,
@@ -356,10 +529,15 @@ async function invokeDevAgent(
     }, `dev-${threadSuffix}`);
 }
 
+/**
+ * Invoke a reviewer agent and return a ReviewOutcome (not a coerced ReviewOutput).
+ *
+ * Sub-Plan 07: every failure mode returns `abstained` — never a fake `approved`.
+ */
 async function invokeReviewerAgent(
     agent: any, userMessage: string, threadSuffix: string,
     agentId: string, model: string,
-): Promise<{ output: ReviewOutput; tokenUsage: TokenCallRecord | null }> {
+): Promise<{ outcome: ReviewOutcome; tokenUsage: TokenCallRecord | null }> {
     return retryWithBackoff(async () => {
         // Track this reviewer invocation
         const invocationId = tokenTracker.startInvocation(agentId, 'review');
@@ -374,10 +552,10 @@ async function invokeReviewerAgent(
         } catch (err: any) {
             const m = String(err?.message ?? err);
             if (m.includes('Recursion limit') || m.includes('recursion limit')) {
-                log.warn(`Reviewer ${agentId} hit the recursion limit — abstaining (treated as approved).`);
+                log.warn(`Reviewer ${agentId} hit the recursion limit — abstaining.`);
                 tokenTracker.endInvocation(invocationId);
                 return {
-                    output: { status: 'approved', summary: 'Reviewer abstained: tool-call budget exhausted.', comments: [] },
+                    outcome: { kind: 'abstained' as const, reviewerId: agentId, reason: 'recursion-limit' as const, detail: 'Tool-call budget exhausted' },
                     tokenUsage: null,
                 };
             }
@@ -387,16 +565,16 @@ async function invokeReviewerAgent(
         tokenTracker.endInvocation(invocationId);
         const tokenUsage = extractTokenUsageFromMessages(result, agentId, model, 'review');
 
-        // Guard against empty or missing messages
+        // Guard against empty or missing messages — abstain, not approve
         if (!result?.messages || result.messages.length === 0) {
-            log.warn(`Reviewer ${agentId} returned no messages — defaulting to approved`);
-            return { output: { status: 'approved', summary: 'Reviewer returned no messages.', comments: [] }, tokenUsage };
+            log.warn(`Reviewer ${agentId} returned no messages — abstaining`);
+            return { outcome: { kind: 'abstained' as const, reviewerId: agentId, reason: 'empty-output' as const, detail: 'Reviewer returned no messages' }, tokenUsage };
         }
 
         const last = result.messages[result.messages.length - 1];
         if (!last || last.content == null) {
-            log.warn(`Reviewer ${agentId} returned message with no content — defaulting to approved`);
-            return { output: { status: 'approved', summary: 'Reviewer returned empty content.', comments: [] }, tokenUsage };
+            log.warn(`Reviewer ${agentId} returned message with no content — abstaining`);
+            return { outcome: { kind: 'abstained' as const, reviewerId: agentId, reason: 'empty-output' as const, detail: 'Reviewer returned empty content' }, tokenUsage };
         }
 
         const raw = typeof last.content === 'string' ? last.content : JSON.stringify(last.content);
@@ -405,40 +583,23 @@ async function invokeReviewerAgent(
             throw new Error(`Invalid JSON output from reviewer agent: ${parseResult.error}`);
         }
 
-        // Validate against ReviewOutputSchema — log issues, default to approved on garbage
+        // Validate against ReviewOutputSchema — abstain on garbage, not approve
         const validation = validateAgentOutput(ReviewOutputSchema, parseResult.value);
         if (!validation.ok) {
-            log.warn(`Reviewer ${agentId} output schema issues (defaulting to approved):\n${validation.issues}`);
-            return { output: { status: 'approved', summary: `Reviewer returned invalid schema: ${validation.issues}`, comments: [] }, tokenUsage };
+            log.warn(`Reviewer ${agentId} output schema issues — abstaining:\n${validation.issues}`);
+            return { outcome: { kind: 'abstained' as const, reviewerId: agentId, reason: 'schema-invalid' as const, detail: `Schema issues: ${validation.issues}` }, tokenUsage };
         }
-        return { output: validation.value as ReviewOutput, tokenUsage };
+
+        const output = validation.value as ReviewOutput;
+        // Determine outcome kind from reviewer's stated status
+        const kind = output.status === 'approved' ? 'approved' as const : 'changes_requested' as const;
+        return { outcome: { kind, reviewerId: agentId, output }, tokenUsage };
     }, `review-${threadSuffix}`);
 }
 
 // ─── Escalation helper ──────────────────────────────────────────────────────
-
-/**
- * Find a higher-rank agent for escalation.
- * Escalation path: junior → senior → principal → cross-domain principal.
- */
-function findEscalationAgent(
-    currentAgentId: string,
-    excludeIds: string[],
-): string | null {
-    const current = getDevAgent(currentAgentId);
-    if (!current) return null;
-
-    const rankOrder: Record<string, number> = { junior: 0, senior: 1, principal: 2 };
-    const minRank = rankOrder[current.rank] + 1;
-
-    const candidates = DEV_AGENTS.filter(a => {
-        if (excludeIds.includes(a.id) || a.id === currentAgentId) return false;
-        if (a.domain !== current.domain && a.rank !== 'principal') return false;
-        return rankOrder[a.rank] >= Math.min(minRank, 2);
-    }).sort((a, b) => rankOrder[a.rank] - rankOrder[b.rank]);
-
-    return candidates[0]?.id ?? null;
-}
+// Sub-Plan 07: `selectEscalationCandidate` from review-policy.ts replaces
+// the old `findEscalationAgent`. It never returns null for a valid author.
 
 // ─── Base-ref resolution ─────────────────────────────────────────────────────
 
@@ -463,7 +624,7 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
     const {
         branchName, baseBranch, assignments, reviewerAgentIds, taskType,
         workspacePath, apiKey, contextPrompt, currentState, projectSlug, gitContext,
-        techStack, userStories, isMaintainMode,
+        techStack, userStories, tasks, isMaintainMode, outputPath,
     } = input;
 
     // Resolve owner/repo from gitContext (falls back to config constants)
@@ -473,6 +634,7 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
     const primaryStoryId = assignments[0]?.storyId ?? 'CLEANUP';
 
     const allFileChanges: FileChange[] = [];
+    const allPhantomFileChanges: FileChange[] = [];
     const allArtifacts: ArtifactRef[] = [];
     const allTranscript: TranscriptMessage[] = [];
     const allTokenUsage: TokenCallRecord[] = [];
@@ -575,14 +737,39 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
             ).join('\n\n');
 
             // Build the per-branch story section (fixes A8: every dev got all stories)
-            const branchStoryIds = [...new Set(devAssignments.map(a => a.storyId).filter(Boolean))] as string[];
-            const storySection = (userStories?.length && branchStoryIds.length)
-                ? `\n## User Stories for This Branch\n\n${storiesForIds(userStories, branchStoryIds)}`
+            const branchStoryIds = [...new Set(devAssignments.flatMap(a => [a.storyId, ...(a.additionalStoryIds ?? [])]).filter(Boolean))] as string[];
+            let storySection = '';
+            if (userStories?.length && branchStoryIds.length) {
+                const { text: storyText, missing: missingStoryIds } = storiesForIds(userStories, branchStoryIds);
+                storySection = `\n## User Stories for This Branch\n\n${storyText}`;
+                if (missingStoryIds.length > 0) {
+                    log.error(`Assignment(s) on branch ${branchName} reference unknown story id(s): ${missingStoryIds.join(', ')} — the developer will have NO acceptance criteria. This is a planning defect.`);
+                }
+            }
+
+            // Build the per-branch task section (P11: task descriptions now reach developers)
+            const branchTaskIds = [...new Set(devAssignments.flatMap(a => a.taskIds ?? []))];
+            const taskSection = (tasks?.length && branchTaskIds.length)
+                ? `\n## Tasks for This Branch\n\n${tasksForIds(tasks, branchTaskIds)}`
                 : '';
+
+            // Sub-Plan 08 §2: inject workspace snapshot so agents stop wasting
+            // tool budget on `list_dir` / `read_file package.json` reconnaissance
+            let snapshotSection = '';
+            try {
+                snapshotSection = '\n' + buildWorkspaceSnapshot(worktreeWorkspace, {
+                    maxFiles: SNAPSHOT_MAX_FILES,
+                    maxChars: SNAPSHOT_MAX_CHARS,
+                });
+            } catch (snapErr: any) {
+                log.warn(`Workspace snapshot failed (non-fatal): ${snapErr.message}`);
+            }
 
             const message = [
                 contextPrompt,
+                snapshotSection,
                 storySection,
+                taskSection,
                 `\n## Project Slug: ${projectSlug}`,
                 `\n## Your Branch: ${branchName}`,
                 `\nYou are already on this branch. Do NOT create or switch branches — your workspace is isolated for this branch.`,
@@ -597,7 +784,21 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                 const { output, tokenUsage: devTokenUsage, allTokenUsage: devAllTokenUsage } = await invokeDevAgent(agent, message, `${entry.id}-${branchName}`, entry.id, devModel, buildAgentFn);
                 if (devTokenUsage) allTokenUsage.push(devTokenUsage);
                 if (devAllTokenUsage) allTokenUsage.push(...devAllTokenUsage.slice(1)); // first already pushed above
-                if (output.fileChanges) allFileChanges.push(...output.fileChanges);
+
+                // Sub-Plan 08 §7: reconcile agent-claimed fileChanges against the worktree
+                if (RECONCILE_FILE_CHANGES && output.fileChanges?.length) {
+                    const recon = reconcileFileChanges(worktreeWorkspace, output.fileChanges);
+                    if (recon.phantoms.length > 0 || recon.unreported.length > 0) {
+                        log.warn(
+                            `${entry.id} claimed ${output.fileChanges.length} changes; ` +
+                            `${recon.verified.length} verified, ${recon.phantoms.length} phantom, ${recon.unreported.length} unreported`,
+                        );
+                        allPhantomFileChanges.push(...recon.phantoms);
+                    }
+                    allFileChanges.push(...recon.verified, ...recon.unreported);
+                } else if (output.fileChanges) {
+                    allFileChanges.push(...output.fileChanges);
+                }
 
                 const artifact = writeArtifact({
                     agentId: entry.id,
@@ -620,6 +821,10 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
             } catch (err: any) {
                 log.error(`Dev agent ${devId} failed: ${err.message}`);
                 allTranscript.push(msg(devId, `Failed: ${err.message}`));
+            } finally {
+                // Sub-Plan 06 §2: commit in finally — agent may have written files before throwing
+                commitWorktree(worktreeWorkspace, branchName, projectSlug, primaryStoryId, 'feat',
+                    `partial work from ${devId} (durable commit)`, gitContext);
             }
         }
 
@@ -716,15 +921,15 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                                 );
                                 if (repairTokenUsage) allTokenUsage.push(repairTokenUsage);
                                 if (repairOutput.fileChanges) allFileChanges.push(...repairOutput.fileChanges);
+                            } catch (repairErr: any) {
+                                log.warn(`Quality gate repair attempt failed (non-fatal): ${repairErr.message}`);
+                            } finally {
+                                // Sub-Plan 06 §2: commit repair work in finally
+                                commitWorktree(worktreeWorkspace, branchName, projectSlug, primaryStoryId, 'fix',
+                                    `repair failing quality gates (attempt ${repair + 1})`, gitContext);
+                            }
 
-                                // Commit and push repair changes
-                                gitExec(worktreeWorkspace, 'add .');
-                                const repairStatus = gitExec(worktreeWorkspace, 'status --short');
-                                if (repairStatus && !repairStatus.includes('nothing to commit')) {
-                                    gitExec(worktreeWorkspace, `commit -m "[${projectSlug}]-[${primaryStoryId}]-fix: repair failing quality gates"`);
-                                }
-                                gitPush(worktreeWorkspace, branchName, gitContext);
-
+                            try {
                                 // Re-run quality gates
                                 gateReport = runQualityGates(worktreeWorkspace, {
                                     timeoutMs: PR_TEST_TIMEOUT_MS,
@@ -735,8 +940,8 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                                     allTranscript.push(msg('conductor', `Quality gates passed after repair attempt ${repair + 1}`));
                                     break;
                                 }
-                            } catch (repairErr: any) {
-                                log.warn(`Quality gate repair attempt failed (non-fatal): ${repairErr.message}`);
+                            } catch (gateErr: any) {
+                                log.warn(`Quality gate re-run failed: ${gateErr.message}`);
                             }
                         }
                     }
@@ -896,23 +1101,74 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
         log.info(`Creating PR: "${prTitle}"`);
         const octokit = getOctokit(gitContext);
         let ghPr: { number: number; html_url: string; node_id: string };
-        try {
-            const { data } = await octokit.pulls.create({
-                owner: ghOwner,
-                repo: ghRepo,
-                title: prTitle,
-                body: prBody,
-                head: branchName,
-                base: baseBranch,
-            });
-            ghPr = { number: data.number, html_url: data.html_url, node_id: data.node_id };
-        } catch (octokitErr: any) {
-            if (GITHUB_MODE === 'local') {
-                // In local mode, Octokit is a local stand-in — if it fails, do not fall back to curl
-                throw octokitErr;
+
+        // Sub-Plan 06 §4: Check for existing open PR before creating (prevents 422 deadlock)
+        const existingPR = await findExistingPR(octokit, ghOwner, ghRepo, branchName);
+        if (existingPR) {
+            ghPr = existingPR;
+            log.info(`Reusing existing PR #${ghPr.number} for ${branchName}`);
+            // Update the PR body with current changes
+            try {
+                await octokit.pulls.update({
+                    owner: ghOwner, repo: ghRepo,
+                    pull_number: ghPr.number,
+                    body: prBody,
+                });
+            } catch (updateErr: any) {
+                log.warn(`Failed to update existing PR body: ${updateErr.message}`);
             }
-            log.warn(`Octokit PR creation failed (${octokitErr.status ?? 'unknown'}), falling back to curl`);
-            ghPr = createPRViaCurl(prTitle, prBody, branchName, baseBranch, gitContext);
+        } else {
+            try {
+                const { data } = await octokit.pulls.create({
+                    owner: ghOwner,
+                    repo: ghRepo,
+                    title: prTitle,
+                    body: prBody,
+                    head: branchName,
+                    base: baseBranch,
+                });
+                ghPr = { number: data.number, html_url: data.html_url, node_id: data.node_id };
+            } catch (octokitErr: any) {
+                // Sub-Plan 06 §4: classify the error
+                const classification = classifyPrFailure(octokitErr);
+
+                // Auth errors are fatal — stop the entire run
+                if (isFatalPrFailure(classification)) {
+                    throw new Error(`Fatal PR error (${classification.kind}): ${classification.message}`);
+                }
+
+                // pr-already-exists: list and reuse instead of falling back to curl
+                if (classification.kind === 'pr-already-exists') {
+                    const reusePR = await findExistingPR(octokit, ghOwner, ghRepo, branchName);
+                    if (reusePR) {
+                        ghPr = reusePR;
+                        log.info(`Reusing existing PR #${ghPr.number} after 422`);
+                    } else {
+                        throw octokitErr; // cannot recover
+                    }
+                } else if (GITHUB_MODE === 'local') {
+                    // In local mode, Octokit is a local stand-in — do not fall back to curl
+                    throw octokitErr;
+                } else {
+                    log.warn(`Octokit PR creation failed (${classification.kind}), falling back to curl`);
+                    try {
+                        ghPr = createPRViaCurl(prTitle, prBody, branchName, baseBranch, gitContext);
+                    } catch (curlErr: any) {
+                        const curlClassification = classifyPrFailure(curlErr);
+                        if (curlClassification.kind === 'pr-already-exists') {
+                            const reusePR = await findExistingPR(octokit, ghOwner, ghRepo, branchName);
+                            if (reusePR) {
+                                ghPr = reusePR;
+                                log.info(`Reusing existing PR #${ghPr.number} after curl 422`);
+                            } else {
+                                throw curlErr;
+                            }
+                        } else {
+                            throw curlErr;
+                        }
+                    }
+                }
+            }
         }
         log.info(`PR #${ghPr.number} created: ${ghPr.html_url}`);
         emitRunEvent('pr:opened', { prNumber: ghPr.number, title: prTitle, branch: branchName, baseBranch });
@@ -936,8 +1192,9 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
 
         // ── 3. Review loop ──────────────────────────────────────────────
         const allReviews: PRReview[] = [];
+        const allOutcomes: ReviewOutcome[] = [];
         const seenCommentKeys = new Set<string>();
-        let prStatus: 'open' | 'approved' | 'merged' | 'closed' | 'escalated_open' = 'open';
+        let prStatus: 'open' | 'approved' | 'merged' | 'closed' | 'escalated_open' | 'blocked' = 'open';
 
         /** SHA of the last commit that reviewers actually reviewed. */
         let lastReviewedSha = '';
@@ -985,9 +1242,20 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
             const prDiff = gitExec(worktreeWorkspace, `diff ${baseRef}...${branchName} -- . ${DIFF_EXCLUDE_SPECS}`);
 
             // ── Skip reviewers on empty diff (Change 4) ─────────────────
+            // Sub-Plan 07: empty diff → changes_requested (not approved).
+            // An empty PR delivered nothing; it must not be merged.
             if (!prDiff || prDiff.trim() === '' || prDiff.startsWith('Error:')) {
-                log.warn('Empty or unavailable diff — skipping review iteration.');
-                prStatus = 'approved';
+                log.warn('Empty or unavailable diff — no production code produced.');
+                allOutcomes.push({
+                    kind: 'changes_requested',
+                    reviewerId: 'automated-verification',
+                    output: {
+                        status: 'changes_requested',
+                        summary: 'No changes were produced for this assignment',
+                        comments: [{ filePath: '.', body: 'No changes were produced for this assignment', severity: 'critical' }],
+                        criteriaVerdicts: [],
+                    },
+                });
                 break;
             }
 
@@ -1081,26 +1349,37 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
 
                     try {
                         const reviewerModel = getModelForRank(reviewerEntry.rank as DevRank);
-                        const { output: reviewOutput, tokenUsage: revTokenUsage } = await invokeReviewerAgent(
+                        const { outcome: rawOutcome, tokenUsage: revTokenUsage } = await invokeReviewerAgent(
                             reviewerAgent, reviewMsg, `${reviewerId}-pr${ghPr.number}-iter${iteration}`,
                             `${reviewerId}-reviewer`, reviewerModel,
                         );
                         if (revTokenUsage) allTokenUsage.push(revTokenUsage);
-                        // B10: Fallback for undefined status
-                        if (!reviewOutput.status) {
-                            reviewerLog.warn('Reviewer returned undefined status — treating as approved');
-                            reviewOutput.status = 'approved';
-                        }
+
+                        // Sub-Plan 07 §5.3: enforce criteriaVerdicts consistency
+                        const assignmentHasCriteria = assignments.some(a =>
+                            (a.acIndexes ?? []).length > 0 || (a.additionalStoryIds ?? []).length > 0,
+                        );
+                        const outcome = enforceCriteriaVerdicts(rawOutcome, assignmentHasCriteria);
+                        allOutcomes.push(outcome);
+
+                        // Extract reviewOutput for downstream use (fix, record, comment)
+                        const reviewOutput: ReviewOutput = outcome.kind === 'abstained'
+                            ? { status: 'changes_requested', summary: `Abstained: ${outcome.detail}`, comments: [], criteriaVerdicts: [] }
+                            : outcome.output;
 
                         // ── Only blocking severities block (Change 3) ───────
-                        if (reviewOutput.status === 'changes_requested' && !isBlockingReview(reviewOutput.comments ?? [])) {
+                        // Sub-Plan 07: non-blocking comments are still recorded, but do not
+                        // downgrade the outcome kind — the outcome is already set above.
+                        if (outcome.kind === 'changes_requested' && !isBlockingReview(reviewOutput.comments ?? [])) {
                             reviewerLog.info('Only non-blocking comments (minor/suggestion) — recording as approved-with-comments.');
-                            reviewOutput.status = 'approved';
+                            // Upgrade to approved — review had substance but nothing blocking
+                            allOutcomes[allOutcomes.length - 1] = { kind: 'approved', reviewerId, output: { ...reviewOutput, status: 'approved' } };
                         }
 
                         reviewResults.push({ reviewerId, output: reviewOutput });
-                        reviewerLog.info(`Decision: ${reviewOutput.status} (${reviewOutput.comments?.length ?? 0} comments)`);
-                        emitRunEvent('pr:reviewed', { prNumber: ghPr.number, reviewerId, status: reviewOutput.status, comments: reviewOutput.comments?.length ?? 0 });
+                        const effectiveStatus = allOutcomes[allOutcomes.length - 1].kind;
+                        reviewerLog.info(`Decision: ${effectiveStatus} (${reviewOutput.comments?.length ?? 0} comments)`);
+                        emitRunEvent('pr:reviewed', { prNumber: ghPr.number, reviewerId, status: effectiveStatus, comments: reviewOutput.comments?.length ?? 0 });
 
                         // B2: Log individual review comments to the run log
                         for (const c of reviewOutput.comments ?? []) {
@@ -1158,7 +1437,8 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
 
                         // ── Sequential fix: address this reviewer's comments
                         //    before the next reviewer sees the code ────────────
-                        if (reviewOutput.status === 'changes_requested' && iteration < effectiveReviewLimit) {
+                        const lastOutcome = allOutcomes[allOutcomes.length - 1];
+                        if (lastOutcome.kind === 'changes_requested' && iteration < effectiveReviewLimit) {
                             const thisReviewerComments = (reviewOutput.comments ?? [])
                                 .map((c: any) => ({
                                     reviewer: reviewerId,
@@ -1218,14 +1498,6 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                                         if (fixOutput.fileChanges) allFileChanges.push(...fixOutput.fileChanges);
                                         devLog.info(`Fix complete: ${fixOutput.fileChanges?.length ?? 0} changes (from ${reviewerId})`);
                                         allTranscript.push(msg(primaryDevId, `Fixed ${fixOutput.fileChanges?.length ?? 0} files from ${reviewerId}'s review`));
-
-                                        // Ensure pushed
-                                        gitExec(worktreeWorkspace, 'add .');
-                                        const fixStatus = gitExec(worktreeWorkspace, 'status --short');
-                                        if (fixStatus && !fixStatus.includes('nothing to commit')) {
-                                            gitExec(worktreeWorkspace, `commit -m "[${projectSlug}]-[${primaryStoryId}]-fix: address ${reviewerId} review (iteration ${iteration})"`);
-                                        }
-                                        gitPush(worktreeWorkspace, branchName, gitContext);
                                     } catch (fixErr: any) {
                                         log.error(`Fix attempt for ${reviewerId}'s comments failed: ${fixErr.message}`);
                                         allTranscript.push(msg(primaryDevId, `Fix failed for ${reviewerId}: ${fixErr.message}`));
@@ -1237,6 +1509,10 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                                                 await new Promise(r => setTimeout(r, 30_000));
                                             }
                                         }
+                                    } finally {
+                                        // Sub-Plan 06 §2: commit per-reviewer fix work in finally
+                                        commitWorktree(worktreeWorkspace, branchName, projectSlug, primaryStoryId, 'fix',
+                                            `address ${reviewerId} review (iteration ${iteration})`, gitContext);
                                     }
                                 }
                             }
@@ -1247,18 +1523,22 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                     }
                 }
 
-                // Check if all reviewers approved
-                const allApproved = reviewerAgentIds.every(rid => {
-                    const latest = allReviews
-                        .filter(r => r.reviewerId === rid)
-                        .sort((a, b) => b.iteration - a.iteration)[0];
-                    return latest?.status === 'approved';
+                // Check if quorum met using ReviewOutcome (Sub-Plan 07)
+                const iterationOutcomes = allOutcomes.filter(o => {
+                    // Only count the latest outcome per reviewer this iteration
+                    const rid = o.reviewerId;
+                    return allOutcomes.filter(oo => oo.reviewerId === rid).pop() === o;
                 });
-
-                if (allApproved) {
-                    log.info('All reviewers approved!');
+                const quorumResult = evaluateQuorum(iterationOutcomes, REVIEW_QUORUM);
+                if (quorumResult.met) {
+                    log.info(`All reviewers approved (quorum ${quorumResult.approvals}/${REVIEW_QUORUM} met)!`);
                     prStatus = 'approved';
                     break;
+                }
+
+                // Sub-Plan 07 §2: All abstained → retry with fresh agents
+                if (quorumResult.allAbstained) {
+                    log.warn(`All ${quorumResult.abstentions} reviewer(s) abstained — will retry (REVIEW_ABSTAIN_RETRIES: ${REVIEW_ABSTAIN_RETRIES})`);
                 }
             } // end if (!skipReviewPhase)
 
@@ -1328,14 +1608,6 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                                 if (fixOutput.fileChanges) allFileChanges.push(...fixOutput.fileChanges);
                                 devLog.info(`Fix complete: ${fixOutput.fileChanges?.length ?? 0} changes`);
                                 allTranscript.push(msg(primaryDevId, `Fixed ${fixOutput.fileChanges?.length ?? 0} files based on review comments`));
-
-                                // Ensure pushed
-                                gitExec(worktreeWorkspace, 'add .');
-                                const fixStatus = gitExec(worktreeWorkspace, 'status --short');
-                                if (fixStatus && !fixStatus.includes('nothing to commit')) {
-                                    gitExec(worktreeWorkspace, `commit -m "[${projectSlug}]-[${primaryStoryId}]-fix: address review comments (iteration ${iteration})"`);
-                                }
-                                gitPush(worktreeWorkspace, branchName, gitContext);
                             } catch (err: any) {
                                 log.error(`Fix attempt failed: ${err.message}`);
                                 if (err.message?.includes('429') || err.message?.includes('rate limit') || err.message?.includes('Rate limit') || err.message?.includes('Request limit')) {
@@ -1358,6 +1630,10 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                                     break;
                                 }
                                 allTranscript.push(msg(primaryDevId, `Fix failed: ${err.message}`));
+                            } finally {
+                                // Sub-Plan 06 §2: commit no-progress fix work in finally
+                                commitWorktree(worktreeWorkspace, branchName, projectSlug, primaryStoryId, 'fix',
+                                    `address review comments (no-progress retry, iteration ${iteration})`, gitContext);
                             }
                         }
                     }
@@ -1381,9 +1657,9 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                 log.warn(`PR #${ghPr.number} has unresolved CRITICALs after ${reviewLimit} iterations. Escalating developer...`);
                 allTranscript.push(msg('conductor', `Escalating: unresolved CRITICALs after max iterations`));
 
-                // Find escalated dev (higher rank than original dev)
+                // Sub-Plan 07 §4: selectEscalationCandidate always finds a candidate
                 const originalDevId = assignments[0].devAgentId;
-                const escalatedDevId = findEscalationAgent(
+                const escalatedDevId = selectEscalationCandidate(
                     originalDevId,
                     [...reviewerAgentIds, originalDevId],
                 );
@@ -1426,17 +1702,11 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                         const { output: fixOutput, tokenUsage: escTokenUsage } = await invokeDevAgent(escalatedDev, escalationMsg, `escalation-${escalatedDevId}`, escalatedDevId, escModel, buildEscalatedFn);
                         if (escTokenUsage) allTokenUsage.push(escTokenUsage);
                         if (fixOutput.fileChanges) allFileChanges.push(...fixOutput.fileChanges);
-                        gitExec(worktreeWorkspace, 'add .');
-                        const st = gitExec(worktreeWorkspace, 'status --short');
-                        if (st && !st.includes('nothing to commit')) {
-                            gitExec(worktreeWorkspace, `commit -m "[${projectSlug}]-[${primaryStoryId}]-fix: escalated dev fixes"`);
-                        }
-                        gitPush(worktreeWorkspace, branchName, gitContext);
                         log.info(`Escalated dev ${escalatedDevId} completed fixes`);
                         allTranscript.push(msg(escalatedDevId, `Escalated dev fixes applied`));
 
                         // Find escalated reviewer (higher rank, not the originals)
-                        const escalatedReviewerId = findEscalationAgent(
+                        const escalatedReviewerId = selectEscalationCandidate(
                             escalatedDevId,
                             [...reviewerAgentIds, escalatedDevId, originalDevId],
                         );
@@ -1470,24 +1740,26 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
 
                             try {
                                 const escRevModel = getModelForRank(escalatedReviewerEntry.rank as DevRank);
-                                const { output: escalatedReviewOutput, tokenUsage: escRevTokenUsage } = await invokeReviewerAgent(
+                                const { outcome: escalatedOutcome, tokenUsage: escRevTokenUsage } = await invokeReviewerAgent(
                                     escalatedReviewer, escalatedReviewMsg, `escalated-${escalatedReviewerId}-pr${ghPr.number}`,
                                     `${escalatedReviewerId}-reviewer`, escRevModel,
                                 );
                                 if (escRevTokenUsage) allTokenUsage.push(escRevTokenUsage);
+                                allOutcomes.push(escalatedOutcome);
 
-                                if (!escalatedReviewOutput.status) {
-                                    escalatedReviewOutput.status = 'approved';
-                                }
+                                // Sub-Plan 07: abstained escalated reviewer is NOT approved
+                                const escalatedReviewOutput: ReviewOutput = escalatedOutcome.kind === 'abstained'
+                                    ? { status: 'changes_requested', summary: `Escalated reviewer abstained: ${escalatedOutcome.detail}`, comments: [], criteriaVerdicts: [] }
+                                    : escalatedOutcome.output;
 
-                                escalatedReviewerLog.info(`Escalated decision: ${escalatedReviewOutput.status} (${escalatedReviewOutput.comments?.length ?? 0} comments)`);
+                                escalatedReviewerLog.info(`Escalated decision: ${escalatedOutcome.kind} (${escalatedReviewOutput.comments?.length ?? 0} comments)`);
                                 for (const c of escalatedReviewOutput.comments ?? []) {
                                     escalatedReviewerLog.info(`  ${c.filePath}${c.line ? ':' + c.line : ''} — [${(c.severity ?? 'info').toUpperCase()}] ${c.body}`);
                                 }
 
                                 allReviews.push({
                                     reviewerId: escalatedReviewerId,
-                                    status: escalatedReviewOutput.status === 'approved' ? 'approved' : 'changes_requested',
+                                    status: escalatedOutcome.kind === 'approved' ? 'approved' : 'changes_requested',
                                     comments: (escalatedReviewOutput.comments ?? []).map((c: any, idx: number) => ({
                                         id: `${escalatedReviewerId}-escalated-${idx}`,
                                         reviewerId: escalatedReviewerId,
@@ -1500,13 +1772,13 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                                     iteration: reviewLimit + 1,
                                 });
 
-                                if (escalatedReviewOutput.status === 'approved') {
+                                if (escalatedOutcome.kind === 'approved') {
                                     log.info(`Escalated reviewer approved PR #${ghPr.number}`);
                                     prStatus = 'approved';
                                 } else {
-                                    log.warn(`Escalated reviewer also requested changes for PR #${ghPr.number} — leaving open for human intervention`);
+                                    log.warn(`Escalated reviewer also requested changes for PR #${ghPr.number} — leaving open`);
                                     prStatus = 'open';
-                                    allTranscript.push(msg('conductor', `Escalated reviewer rejected — PR left open for human intervention`));
+                                    allTranscript.push(msg('conductor', `Escalated reviewer rejected — PR left open`));
                                 }
                             } catch (escRevErr: any) {
                                 log.error(`Escalated review failed: ${escRevErr.message}`);
@@ -1517,36 +1789,161 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                     } catch (escErr: any) {
                         log.error(`Escalated dev failed: ${escErr.message}`);
                         allTranscript.push(msg('conductor', `Escalation failed: ${escErr.message}`));
+                    } finally {
+                        // Sub-Plan 06 §2: commit escalation dev work in finally
+                        commitWorktree(worktreeWorkspace, branchName, projectSlug, primaryStoryId, 'fix',
+                            `escalated dev fixes from ${escalatedDevId}`, gitContext);
                     }
                 } else {
-                    log.warn('No escalation candidate found — proceeding with merge despite CRITICALs');
+                    // Sub-Plan 07 §4: selectEscalationCandidate should never return null,
+                    // but if it does (e.g. registry is empty), leave PR open.
+                    log.warn('No escalation candidate found — leaving PR open');
+                    allTranscript.push(msg('conductor', `No escalation candidate found — PR left open`));
                 }
             }
         }
 
-        // ── 4. Merge PR ─────────────────────────────────────────────────
-        if (prStatus === 'approved' || prStatus === 'open') {
+        // ── 4. Merge PR (Sub-Plan 07: evidence-based) ───────────────────
+        // Collect evidence for decideMerge
+        const allBlockingComments = allReviews
+            .flatMap(r => r.comments)
+            .filter(c => !c.resolved && (c.severity === 'critical' || c.severity === 'major'));
+        const diffStatForMerge = gitExec(worktreeWorkspace, `diff --name-only ${baseRef}...HEAD`);
+        const filesChangedCount = (diffStatForMerge && !diffStatForMerge.startsWith('Error:'))
+            ? diffStatForMerge.split('\n').filter(f => f.trim()).length : 0;
+
+        const unmetCriteriaCount = allOutcomes
+            .filter((o): o is Extract<ReviewOutcome, { kind: 'approved' | 'changes_requested' }> => o.kind !== 'abstained')
+            .reduce((sum, o) => sum + (o.output.criteriaVerdicts ?? []).filter(v => !v.met).length, 0);
+
+        const mergeDecision = decideMerge({
+            approvals: allOutcomes.filter(o => o.kind === 'approved').length,
+            blockingComments: allBlockingComments,
+            abstentions: allOutcomes.filter(o => o.kind === 'abstained').length,
+            gateReport,
+            integrityFindings,
+            layoutViolations: [],
+            filesChanged: filesChangedCount,
+            iterationsUsed: getEffectiveLimits().maxReviewIterations,
+            policy: REVIEW_MERGE_POLICY,
+            quorum: REVIEW_QUORUM,
+            unmetCriteriaCount,
+        });
+
+        if (!mergeDecision.merge && REVIEW_MERGE_POLICY !== 'legacy') {
+            log.warn(`PR #${ghPr.number} blocked: ${mergeDecision.reason}`);
+            prStatus = 'blocked';
+            emitRunEvent('pr:blocked', { prNumber: ghPr.number, blockers: mergeDecision.blockers });
+            allTranscript.push(msg('conductor', `PR #${ghPr.number} BLOCKED: ${mergeDecision.blockers.join('; ')}`));
+
+            // Post blocker comment on the PR
+            try {
+                await octokit.issues.createComment({
+                    owner: ghOwner, repo: ghRepo,
+                    issue_number: ghPr.number,
+                    body: `:x: **[BLOCKED]** This PR cannot be merged.\n\n${mergeDecision.blockers.map(b => `- ${b}`).join('\n')}`,
+                });
+            } catch (commentErr: any) {
+                log.warn(`Failed to post blocker comment: ${commentErr.message}`);
+            }
+        }
+
+        if (prStatus === 'approved' || (prStatus === 'open' && REVIEW_MERGE_POLICY === 'legacy')) {
             if (prStatus === 'open') {
-                log.warn(`Max review iterations reached. Merging PR #${ghPr.number} despite pending reviews.`);
-                allTranscript.push(msg('conductor', `WARNING: Max review iterations reached, merging anyway`));
+                log.warn(`Max review iterations reached. Merging PR #${ghPr.number} despite pending reviews (legacy policy).`);
+                allTranscript.push(msg('conductor', `WARNING: Max review iterations reached, merging anyway (legacy policy)`));
             }
 
-            // B4: Rebase onto latest base branch before merging to prevent conflicts
+            // Sub-Plan 06 §5c: Merge ladder (merge, not rebase — branch is already pushed/reviewed)
             gitExec(worktreeWorkspace, `fetch origin ${baseBranch}`);
-            const rebaseResult = gitExec(worktreeWorkspace, `rebase origin/${baseBranch}`);
-            if (rebaseResult.startsWith('Error:')) {
-                log.warn(`Rebase failed for ${branchName}, attempting merge commit instead`);
-                gitExec(worktreeWorkspace, 'rebase --abort');
-                const mergeLocalResult = gitExec(worktreeWorkspace, `merge origin/${baseBranch} --no-edit`);
-                if (mergeLocalResult.startsWith('Error:')) {
-                    log.error(`Cannot resolve conflicts for ${branchName}: ${mergeLocalResult}`);
-                    prStatus = 'open';
-                    allTranscript.push(msg('conductor', `Merge blocked: unresolvable conflicts on ${branchName}`));
+
+            // Check if already up to date
+            const isAncestor = gitExecVerbose(worktreeWorkspace, `merge-base --is-ancestor origin/${baseBranch} HEAD`);
+            if (!isAncestor.ok) {
+                // Need to integrate base changes
+                const mergeResult = gitExecVerbose(worktreeWorkspace, `merge origin/${baseBranch} --no-edit`);
+                if (!mergeResult.ok) {
+                    // Merge failed — attempt auto-resolution
+                    log.warn(`Merge conflict on ${branchName}, attempting auto-resolution...`);
+                    const conflicted = listConflictedFiles(worktreeWorkspace);
+                    let resolved = false;
+
+                    if (conflicted.length > 0) {
+                        const resolution = resolveKnownConflicts(worktreeWorkspace, conflicted, `origin/${baseBranch}`);
+                        if (resolution.unresolved.length === 0) {
+                            // All conflicts auto-resolved
+                            gitExec(worktreeWorkspace, `commit --no-edit`);
+                            resolved = true;
+                            log.info(`All ${resolution.resolved.length} conflict(s) auto-resolved`);
+                        } else {
+                            // Some unresolved — give dev agent a chance
+                            log.warn(`${resolution.unresolved.length} conflict(s) need manual resolution: ${resolution.unresolved.join(', ')}`);
+                            for (let attempt = 0; attempt < MERGE_CONFLICT_FIX_ATTEMPTS; attempt++) {
+                                try {
+                                    const primaryDevId = assignments[0].devAgentId;
+                                    const primaryEntry = getDevAgent(primaryDevId);
+                                    if (!primaryEntry) break;
+
+                                    const conflictConventions = resolveConventionFiles(primaryEntry.languages, techStack);
+                                    const buildConflictFn = () => buildDevAgent(apiKey, primaryEntry, worktreeWorkspace, gitContext, baseBranch, conflictConventions, isMaintainMode);
+                                    const conflictAgent = buildConflictFn();
+
+                                    // Read conflict markers (capped)
+                                    const conflictDetails = resolution.unresolved.map(f => {
+                                        try {
+                                            const content = fs.readFileSync(path.join(worktreeWorkspace, f), 'utf-8');
+                                            return `### ${f}\n\`\`\`\n${content.slice(0, 3000)}\n\`\`\``;
+                                        } catch { return `### ${f}\n(cannot read)`; }
+                                    }).join('\n\n');
+
+                                    const conflictMsg = [
+                                        contextPrompt,
+                                        `\n## Merge Conflict Resolution`,
+                                        `\nYour branch \`${branchName}\` has merge conflicts with \`${baseBranch}\`.`,
+                                        `\n## Conflicted Files\n\n${conflictDetails}`,
+                                        `\n## Instructions`,
+                                        `Resolve ALL conflict markers (<<<<<<< / ======= / >>>>>>>) in the listed files.`,
+                                        `Keep YOUR changes where they represent intended functionality.`,
+                                        `Keep BASE changes for shared config (package.json scripts, tsconfig).`,
+                                        `After resolving, stage all files with git add.`,
+                                    ].join('\n');
+
+                                    const conflictModel = getModelForRank(primaryEntry.rank as DevRank);
+                                    try {
+                                        await invokeDevAgent(conflictAgent, conflictMsg, `conflict-${primaryEntry.id}-${branchName}`, primaryEntry.id, conflictModel, buildConflictFn);
+                                    } catch (devConflictErr: any) {
+                                        log.warn(`Dev conflict resolution attempt ${attempt + 1} failed: ${devConflictErr.message}`);
+                                    } finally {
+                                        commitWorktree(worktreeWorkspace, branchName, projectSlug, primaryStoryId, 'fix',
+                                            `resolve merge conflicts (attempt ${attempt + 1})`, gitContext);
+                                    }
+
+                                    // Check if conflicts are resolved
+                                    const stillConflicted = listConflictedFiles(worktreeWorkspace);
+                                    if (stillConflicted.length === 0) {
+                                        resolved = true;
+                                        log.info(`Merge conflicts resolved by dev agent (attempt ${attempt + 1})`);
+                                        break;
+                                    }
+                                } catch (conflictErr: any) {
+                                    log.error(`Conflict resolution attempt ${attempt + 1} failed: ${conflictErr.message}`);
+                                }
+                            }
+                        }
+                    }
+
+                    if (!resolved) {
+                        // Cannot resolve — salvage and mark as blocked
+                        log.error(`Cannot resolve conflicts for ${branchName}`);
+                        emitRunEvent('pr:conflict', { branch: branchName, baseBranch });
+                        prStatus = 'open';
+                        allTranscript.push(msg('conductor', `Merge blocked: unresolvable conflicts on ${branchName}`));
+                    } else {
+                        gitPush(worktreeWorkspace, branchName, gitContext);
+                    }
                 } else {
                     gitPush(worktreeWorkspace, branchName, gitContext);
                 }
-            } else {
-                gitPush(worktreeWorkspace, branchName, gitContext);
             }
 
             // Verify branch exists on remote before merging
@@ -1612,6 +2009,42 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
             prStatus = 'open';
         }
 
+        // Sub-Plan 06 §6: Compute evidence-based completion
+        let completionEvidence: CompletionEvidence[] | undefined;
+        let salvageBranch: string | undefined;
+        if (prStatus === 'merged') {
+            // Count real source file changes on the merged branch
+            const diffNames = gitExec(worktreeWorkspace, `diff --name-only ${baseRef}..HEAD`);
+            const changedFiles = (diffNames && !diffNames.startsWith('Error:'))
+                ? diffNames.split('\n').filter(f => f.trim() && !f.startsWith('docs/') && !f.startsWith('.agent/') && !f.startsWith('.conventions/') && !f.endsWith('-mission.md'))
+                : [];
+
+            completionEvidence = assignments.map(a => {
+                // Check declared modules exist on disk
+                const moduleIds = a.moduleIds ?? [];
+                let declaredPresent = 0;
+                for (const modId of moduleIds) {
+                    // moduleId is a path like "src/game/GameEngine.ts"
+                    if (fs.existsSync(path.join(worktreeWorkspace, modId))) {
+                        declaredPresent++;
+                    }
+                }
+                return {
+                    assignmentId: a.id,
+                    filesChanged: changedFiles.length,
+                    declaredModulesPresent: declaredPresent,
+                    declaredModulesTotal: moduleIds.length,
+                    gatePassed: gateReport?.passed ?? false,
+                    merged: true,
+                };
+            });
+        } else if ((prStatus === 'open' || prStatus === 'blocked') && outputPath) {
+            // Sub-Plan 06 §3: Salvage the branch
+            salvageWorktree(worktreeWorkspace, gitRoot, baseRef, branchName,
+                `PR #${ghPr.number} not merged (status: ${prStatus})`, outputPath);
+            salvageBranch = branchName;
+        }
+
         const pullRequest: PullRequest = {
             id: `PR-${ghPr.number}`,
             prNumber: ghPr.number,
@@ -1635,16 +2068,57 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
             artifacts: allArtifacts,
             transcript: allTranscript,
             tokenUsage: allTokenUsage,
+            completionEvidence,
+            salvageBranch,
+            phantomFileChanges: allPhantomFileChanges.length > 0 ? allPhantomFileChanges : undefined,
         };
     } finally {
-        // ── Cleanup worktree and local branch ───────────────────────────
-        // (gitExec swallows errors internally, so this won't throw)
+        // ── Sub-Plan 06 §3: Worktree disposal ───────────────────────────
+        // Successful merge → remove (as before).
+        // Anything else  → move to .worktrees-failed/ for salvage, do not delete remote branch.
         if (fs.existsSync(worktreeDir)) {
-            gitExec(gitRoot, `worktree remove "${worktreeDir}" --force`);
-            log.info(`Cleaned up worktree: ${worktreeSlug}`);
+            // Determine if this was a successful merge by checking if the branch was deleted
+            // (remote branch deletion only happens on success path above)
+            const branchStillExists = (() => {
+                try {
+                    const localBranches = gitExec(gitRoot, `branch --list ${branchName}`);
+                    return localBranches.trim().length > 0;
+                } catch { return true; }
+            })();
+
+            if (!branchStillExists) {
+                // Success path — remove worktree
+                gitExec(gitRoot, `worktree remove "${worktreeDir}" --force`);
+                log.info(`Cleaned up worktree: ${worktreeSlug}`);
+            } else {
+                // Failure path — preserve for salvage
+                const failedDir = path.join(gitRoot, '.worktrees-failed');
+                try {
+                    fs.mkdirSync(failedDir, { recursive: true });
+                    const failedPath = path.join(failedDir, worktreeSlug);
+                    // Remove destination if it already exists
+                    if (fs.existsSync(failedPath)) {
+                        fs.rmSync(failedPath, { recursive: true, force: true });
+                    }
+                    // git worktree move requires the destination to NOT exist
+                    const moveResult = gitExecVerbose(gitRoot, `worktree move "${worktreeDir}" "${failedPath}"`);
+                    if (moveResult.ok) {
+                        log.info(`Preserved failed worktree: ${worktreeSlug} → .worktrees-failed/`);
+                    } else {
+                        // Fallback: just rename the directory
+                        fs.renameSync(worktreeDir, failedPath);
+                        log.info(`Moved failed worktree directory: ${worktreeSlug} → .worktrees-failed/`);
+                    }
+                    evictStaleSalvageWorktrees(gitRoot);
+                } catch (moveErr: any) {
+                    log.warn(`Failed to preserve worktree (removing): ${moveErr.message}`);
+                    gitExec(gitRoot, `worktree remove "${worktreeDir}" --force`);
+                }
+            }
         }
         // Prune any dangling worktree tracking entries (fixes A11 leak-proofing)
         gitExec(gitRoot, 'worktree prune');
+        // Only delete local branch on success (remote branch already handled above)
         gitExec(gitRoot, `branch -D ${branchName}`);
     }
 }

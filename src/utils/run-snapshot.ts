@@ -60,7 +60,7 @@ export function writeStateSnapshot(outputPath: string, state: any): string | nul
 export interface RunManifest {
     /** ISO 8601 timestamp when the manifest was generated. */
     generatedAt: string;
-    /** Run status: 'completed' | 'failed' | 'crashed'. */
+    /** Run status: 'completed' | 'failed' | 'crashed' | 'cancelled' | 'partial' | 'inconclusive'. */
     status: string;
     /** System name from the run input. */
     systemName: string;
@@ -106,16 +106,43 @@ export interface RunManifest {
     };
     /** Total events emitted during this run (from the ring buffer). */
     eventCount: number;
-    /** Requirements traceability summary (when available). */
+    /** Requirements traceability summary (Sub-Plan 10). */
     traceability?: {
         criteria: number;
         verified: number;
         implemented: number;
         missing: number;
+        /** @deprecated Use verifiedPct instead — kept for backward compatibility. */
         coveragePct: number;
+        verifiedPct?: number;
+        implementedPct?: number;
+        deliveryScore?: number;
+        testedFailing?: number;
+        blocked?: number;
         orphanedStories: string[];
         orphanedAssignments: string[];
+        orphanedTasks?: string[];
     };
+    /** Acceptance gate result (Sub-Plan 03). */
+    acceptance?: {
+        status: string;
+        blockers: string[];
+        criteria: Array<{ id: string; required: boolean; passed: boolean; inconclusive: boolean; detail: string }>;
+        unrecoverable: boolean;
+        unrecoverableReason?: string;
+    };
+    /** Verification summary (Sub-Plan 03). */
+    verification?: {
+        gateReportPassed?: boolean;
+        gateReportInconclusive?: boolean;
+        productVerifyPassed?: boolean;
+        unresolvedReferences?: number;
+        integrityFindings?: number;
+    };
+    /** Count of file-change paths NOT present on disk (Sub-Plan 03, PART A11). */
+    phantomFileChanges?: number;
+    /** Count of distinct files actually present on disk at finalize time. */
+    filesDelivered?: number;
 }
 
 /**
@@ -125,8 +152,14 @@ export interface RunManifest {
 export function writeRunManifest(
     outputPath: string,
     state: any,
-    status: 'completed' | 'failed' | 'crashed' | 'cancelled',
-    opts?: { traceability?: RunManifest['traceability'] },
+    status: 'completed' | 'failed' | 'crashed' | 'cancelled' | 'partial' | 'inconclusive',
+    opts?: {
+        traceability?: RunManifest['traceability'];
+        acceptance?: RunManifest['acceptance'];
+        verification?: RunManifest['verification'];
+        phantomFileChanges?: number;
+        filesDelivered?: number;
+    },
 ): string | null {
     try {
         const tokenSummary = tokenTracker.getRunSummary();
@@ -181,6 +214,18 @@ export function writeRunManifest(
 
         if (opts?.traceability) {
             manifest.traceability = opts.traceability;
+        }
+        if (opts?.acceptance) {
+            manifest.acceptance = opts.acceptance;
+        }
+        if (opts?.verification) {
+            manifest.verification = opts.verification;
+        }
+        if (opts?.phantomFileChanges !== undefined) {
+            manifest.phantomFileChanges = opts.phantomFileChanges;
+        }
+        if (opts?.filesDelivered !== undefined) {
+            manifest.filesDelivered = opts.filesDelivered;
         }
 
         const dest = path.join(outputPath, 'run-manifest.json');

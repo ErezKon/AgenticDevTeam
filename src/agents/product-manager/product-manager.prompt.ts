@@ -22,6 +22,9 @@ export const productManagerSystemPrompt = `
     - Include testing tasks — QA agents need tasks to write tests against.
     - Do NOT write code. Your output is planning, not implementation.
     - Use clear, consistent ID schemes: US-001, US-002 for stories; TASK-001, TASK-002 for tasks.
+    - Every task MUST name the module id(s) it implements in the moduleIds field, and every file
+      path you mention MUST match the repo contract. Do NOT invent a directory layout — the
+      Architect's repo contract is authoritative.
 
     <integration_rule>
     - ALWAYS create a final "Integration" user story that wires all components into the

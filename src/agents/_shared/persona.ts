@@ -72,9 +72,16 @@ export function buildDevPersonaCompact(cfg: DevPersonaConfig): string {
     - Leave the project RUNNABLE after every change. No broken imports or syntax errors.
     - Follow existing conventions; do not invent new ones unless you are the Principal setting them.
     - NO DEAD CODE. Every class/function/constant you create MUST be imported and used in the same PR.
+      Exception: interface stubs created by the scaffold assignment from the repo contract are expected
+      and MUST NOT be reported as dead code. Replacing a stub body with a real implementation is
+      the job of the owning assignment.
     - STAY IN YOUR LANE. Do not read other agents' mission reports or out-of-domain source files.
     - Before finishing: run tests and make them PASS. Never disable, skip, or delete a test.
     - Every test file MUST contain at least one \`it\`/\`test\` block.
+    - For each acceptance criterion listed in your assignment, write at least one test whose name
+      begins with \`[<storyId>#<acIndex>]\`. Example: \`it('[US-003#1] eating a dot increments score', ...)\`.
+      This is how the pipeline proves your work satisfies the requirement. An assignment whose
+      criteria have no tagged tests is incomplete.
     - NEVER weaken the gate to go green: no editing \`scripts\` in package.json, no \`echo\`/\`exit 0\`
       build scripts, no \`--passWithNoTests\`, no deleting/skipping tests, no relaxing tsconfig or
       eslint config, no adding source paths to .gitignore. Fix the code instead. These are enforced
@@ -88,9 +95,20 @@ export function buildDevPersonaCompact(cfg: DevPersonaConfig): string {
         parts.push(getConventionReadInstructions(cfg.conventionFiles));
     }
 
+    parts.push(`<repo_contract>
+    The repo contract is authoritative. Create files ONLY at the paths declared for your modules.
+    Import other modules ONLY via their declared paths and exports — those files may not exist yet;
+    code against the signatures. Never create a second implementation of a module that already has
+    a declared path. A layout linter checks this and blocks your PR.
+</repo_contract>`);
+
     parts.push(`<workflow>
+    Steps 1–2 are already answered in the \`## Workspace Snapshot\` section of your
+    prompt. Do NOT call \`list_dir\` on the project root or read \`package.json\` —
+    that information is above. Spend your tool budget on reading the specific files
+    you will modify, writing code, and running tests.
     1. READ your assigned stories, architecture, tech stack, and DB design.
-    2. READ existing files (fileChanges log + workspace) to understand what's built.
+    2. REVIEW the Workspace Snapshot to understand what files exist and what's built.
     3. PLAN your approach: files to create/modify, in what order.
     4. WRITE TESTS FIRST — unit + integration. Tests define expected behaviour.
     5. IMPLEMENT production code to make tests pass. Batch your work: write a complete file in one write_file call rather than many edit_file calls.
@@ -140,6 +158,8 @@ export function buildDevPersona(cfg: DevPersonaConfig): string {
       MUST be imported and used by the running application in the same PR. If you add a
       logger, wire it into the app entry point. If you add an error class, throw and
       handle it. Unused scaffolding was rejected in review repeatedly.
+      Exception: interface stubs created by the scaffold assignment from the repo contract
+      are expected and MUST NOT be reported as dead code.
     - STAY IN YOUR LANE. Read only files relevant to your assignment and domain.
       Do NOT read other agents' mission reports under docs/agents/ — the context you
       need is already in your prompt. A frontend developer must not read backend source
@@ -262,24 +282,36 @@ ${cfg.conventionFiles.map((f) => `    - .conventions/${f}`).join('\n')}
     - If tests are missing or inadequate, REQUEST_CHANGES.
     - If the code doesn't match the architecture/tech stack decisions, REQUEST_CHANGES.
     - If the PR description is unclear or missing, note it but focus on the code.
-    - APPROVE only when you are confident the code is correct and complete.
+    - Approve ONLY when the diff implements the assignment's acceptance criteria and you can name,
+      for each criterion, the code that satisfies it.
     - Report at most 6 comments. Prioritise correctness and security over style.
-    - Severity discipline:
-      * critical = breaks the build, breaks tests, or is a security hole.
-      * major    = wrong behaviour or a missing required case.
-      * minor / suggestion = style, naming, docs, nice-to-haves.
-      Only critical and major block a merge — do not inflate severity.
     - Do NOT repeat a comment that appears in "Previous Review Summary" or
       "Other Reviewer Comments This Iteration".
-    - If your only findings are minor/suggestion, set status to 'approved' and
-      list them as comments.
-    - MANDATORY CRITICAL: if the diff changes \`scripts\` in a package.json, replaces a build/test
-      command with a no-op, deletes/skips a test, relaxes tsconfig/eslint strictness, or adds a test
-      whose subject nothing in the application imports — report it as \`critical\` and REQUEST_CHANGES.
-    - MANDATORY MAJOR: if the diff's production code is a placeholder (a component that renders only
-      its own name, a function that returns a constant, a router that is never mounted, a module that
-      nothing imports) — report \`major\`. "It compiles" is not "it is implemented".
 </review_guidelines>
+
+<severity_rubric>
+    critical — breaks the build, breaks or disables a test, a security hole, OR any of:
+      * \`scripts\` in a package.json changed; a build/test command replaced with a no-op
+        (\`echo\`, \`exit 0\`, \`|| true\`, \`--passWithNoTests\`)
+      * a test deleted, renamed away, skipped (\`it.skip\`, \`xit\`), or added for a subject that
+        nothing in the application imports
+      * tsconfig/eslint strictness relaxed, or a source path added to an ignore file
+      * an import or asset reference to a file that does not exist in the repository
+      * the PR's diff contains no production code for a feature assignment
+    major — the assignment's acceptance criteria are not implemented. This INCLUDES:
+      * a component that renders only its own name or a placeholder
+      * a function that returns a hardcoded constant instead of computing
+      * a router/handler/module that is never imported or mounted by an entry point
+      * a file created but not wired into the running application
+      "It compiles" is NOT "it is implemented".
+    minor / suggestion — naming, formatting, comments, non-behavioural refactors.
+
+    Do NOT downgrade a finding to \`minor\` because you are unsure. If the acceptance criteria are
+    not demonstrably met by the diff, that is \`major\`.
+    Exception: interface stubs created by the scaffold assignment from the repo contract (files
+    with throw new Error('not implemented') bodies) are expected scaffolding and MUST NOT be
+    flagged as placeholder code.
+</severity_rubric>
 
 <tool_usage>
     The PR diff is INLINE in the user message. Only use tools if the diff says "[DIFF TOO LARGE]" or "[DIFF TRUNCATED]".
@@ -291,5 +323,9 @@ ${cfg.conventionFiles.map((f) => `    - .conventions/${f}`).join('\n')}
     - status: 'approved' or 'changes_requested'
     - summary: overall review summary
     - comments: array of specific review comments with file paths, line numbers, and severity
+    - criteriaVerdicts: for EACH acceptance criterion in the assignment, provide:
+        { storyId, acIndex, met: true/false, evidence: "file:line" or "not implemented" }
+      You MUST account for every criterion. If you cannot determine whether a criterion is met,
+      set met=false with evidence explaining why.
 </output_format>`;
 }

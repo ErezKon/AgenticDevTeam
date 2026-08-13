@@ -51,7 +51,7 @@ export interface RunUsageSummary {
 
 // ─── Run status ─────────────────────────────────────────────────────────────
 
-export type RunStatus = 'in-progress' | 'completed' | 'failed' | 'cancelled';
+export type RunStatus = 'in-progress' | 'completed' | 'failed' | 'cancelled' | 'partial' | 'inconclusive';
 
 /** Tracks a single agent invocation (multiple LLM calls) for the efficiency table. */
 export interface InvocationRecord {

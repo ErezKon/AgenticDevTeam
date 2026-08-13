@@ -31,10 +31,16 @@ import {
     DEVOPS_MODEL, CODEBASE_ANALYZER_MODEL, QA_MODEL, LLM_MODEL,
     MODEL_PRICING, DEV_CONTEXT_FILE_CHANGES_LIMIT,
     DEVOPS_VERIFY_ENABLED, DEVOPS_TEARDOWN,
+    DEVOPS_FALLBACK_ENABLED,
+    E2E_ALLOW_LOCAL_SERVER,
     AGENT_OUTPUT_REPAIR_ATTEMPTS,
     CONTEXT_MAX_CHARS,
-    MIN_AC_COVERAGE_PCT, MIN_AC_COVERAGE_MAX_BUGS,
+    TEAM_LEADER_CONTEXT_MAX_CHARS,
+    PLAN_COVERAGE_MODE, PLAN_COVERAGE_REPAIR_ATTEMPTS,
+    MIN_AC_COVERAGE_PCT, MIN_AC_IMPLEMENTED_PCT, MIN_AC_COVERAGE_MAX_BUGS,
+    TRACEABILITY_JSON,
     SECURITY_GATES_ENABLED,
+    RUN_FAIL_POLICY,
 } from '../config';
 import { sanitizeMermaidLabels } from '../tools/diagram/diagram-tools';
 import { createGitHubRepo, validateGitHubRepo, initializeRepoLocally } from '../utils/github-repo-manager';
@@ -44,12 +50,14 @@ import { setLocalBareRepoPath } from './pr-workflow';
 import { syncWorkspaceToBranch, looksSourceless } from './workspace-sync';
 import { selectPendingAssignments, dedupeBugs, namespaceBugfixAssignments } from './assignment-policy';
 import { verifyDeployment, teardownDeployment } from './devops-verify';
-import { runQualityGates, gateReportToTestReport, synthesiseGateBugs } from './quality-gates';
+import { runQualityGates, gateReportToTestReport, synthesiseGateBugs, detectStackRoots } from './quality-gates';
+import { runProductVerification } from './product-verify';
 import { runSecurityGates, synthesiseSecurityBugs, securityReportToMarkdown } from './security-gates';
 import {
     summariseArchitecture, summariseTechStack, summariseDbDesign,
-    summariseStories, storiesForIds, summariseTasks,
+    summariseStories, storiesForIds, storiesWithCriteria, summariseTasks,
     summariseFileChanges, summariseCodebaseAnalysis, summariseEpics,
+    summariseRepoContract,
     buildContext, recordContextChars, getContextStats,
 } from './context-builder';
 import { getCumulativeCompactionStats } from '../agents/_shared/history-compactor';
@@ -57,9 +65,11 @@ import { getTruncationStats } from '../tools/_shared/truncate';
 import type { ContextSection } from './context-builder';
 import {
     parseAgentJson, validateAgentOutput, buildRepairMessage,
+    repairFieldViolations,
     getValidationStats, logValidationStats,
     _recordValidated, _recordRepaired, _recordFailed,
 } from '../utils/structured-output';
+import { validateStoryPlan, validateAssignmentPlan, buildCoverageGapPrompt, logPlanFunnel } from './plan-coverage';
 import { z } from 'zod';
 import { CodebaseAnalysisSchema } from '../agents/_shared/base-schemas';
 import { ArchitectOutputSchema } from '../agents/architect/schemas/architect-output.schema';
@@ -80,6 +90,15 @@ import { startRunBudget, getBudgetStatus, getEffectiveLimits } from '../utils/ru
 import { emitRunEvent } from '../utils/event-bus';
 import { writeStateSnapshot, writeRunManifest } from '../utils/run-snapshot';
 import { buildTraceabilityReport, renderTraceabilityMarkdown } from '../utils/traceability';
+import { evaluateAcceptance, haltIfUnrecoverable, acceptanceBlockersToBugs, acceptanceReportToMarkdown } from './acceptance-gate';
+import { initLedger, appendLedger } from '../utils/run-ledger';
+import { generateRunReport } from '../utils/ledger-report';
+import { checkInvariants } from './run-invariants';
+import { writeRepoContract } from '../utils/repo-contract-writer';
+import { REPO_CONTRACT_MAX_MODULES, QA_TEST_TIMEOUT_MS, QA_MAX_INVOCATIONS, QA_TESTS_VIA_PR } from '../config';
+import { runTests, executedToTestReports, compareClaimVsReality, type ExecutedTestReport, type ClaimDiscrepancy } from './test-runner';
+import { checkTestSufficiency, sufficiencyViolationsToBugs } from './test-sufficiency';
+import { detectTrivialTests } from './gate-integrity';
 import * as path from 'path';
 import * as fs from 'fs';
 
@@ -389,6 +408,23 @@ async function invokeAgent(
                 return { output: validation.value, tokenUsage };
             }
             invokeLog.warn(`Agent "${threadSuffix}" output failed schema validation:\n${validation.issues}`);
+
+            // Attempt deterministic field-level repair before LLM repair (P1/P2)
+            const fieldFix = repairFieldViolations(parsed, schema);
+            if (fieldFix.repaired.length > 0) {
+                invokeLog.info(`Field-level repair: fixed ${fieldFix.repaired.length} violation(s) for "${threadSuffix}": ${fieldFix.repaired.map(r => `${r.path}: ${JSON.stringify(r.from)} → ${JSON.stringify(r.to)}`).join(', ')}`);
+            }
+            if (fieldFix.unrepairable.length === 0) {
+                // All issues fixed deterministically — validate the repaired value
+                const rv = validateAgentOutput(schema, fieldFix.value);
+                if (rv.ok) {
+                    _recordRepaired();
+                    invokeLog.info(`Agent "${threadSuffix}" repaired deterministically (${fieldFix.repaired.length} field fixes)`);
+                    emitEnd({ repaired: true, fieldRepair: true });
+                    return { output: rv.value, tokenUsage };
+                }
+            }
+            // Fall through to LLM repair with remaining issues
             issuesForRepair = validation.issues;
         } else {
             // No schema, JSON parsed fine — return as-is
@@ -408,10 +444,10 @@ async function invokeAgent(
             try {
                 repairResult = await agent.invoke(
                     { messages: [{ role: 'user', content: repairMsg }] },
-                    // Use 6 to accommodate input processing + pre_model_hook + agent
-                    // node steps. The previous value of 2 was too low and caused
-                    // GraphRecursionError that crashed the entire pipeline.
-                    { configurable: { thread_id: repairThreadId }, recursionLimit: 6 },
+                    // Use PIPELINE_RECURSION_LIMIT to accommodate input processing +
+                    // pre_model_hook + agent node steps. The previous value of 6 was
+                    // too low for planning agents with large outputs (P2).
+                    { configurable: { thread_id: repairThreadId }, recursionLimit: PIPELINE_RECURSION_LIMIT },
                 );
             } catch (repairErr: any) {
                 invokeLog.warn(`Repair attempt ${attempt + 1} for "${threadSuffix}" threw: ${repairErr?.message ?? repairErr}`);
@@ -491,6 +527,8 @@ export async function intakeNode(state: ProjectStateType): Promise<Partial<Proje
 
     const outputPath = createRunOutputDir(state.input.systemName);
     setRunLogPath(path.join(outputPath, 'run.log'));
+    initLedger(outputPath);
+    appendLedger({ kind: 'phase', phase: 'intake', event: 'start' });
 
     // ── Token report: create skeleton immediately so it exists on disk ───
     tokenTracker.enablePersistence(outputPath, state.input.systemName);
@@ -691,6 +729,8 @@ export async function intakeNode(state: ProjectStateType): Promise<Partial<Proje
         ...getGitignoreEntriesForStack(), // common entries (no tech decisions yet)
         '.conventions/',
         '.worktrees/',
+        '.worktrees-failed/',
+        '.agent/',
     ];
     ensureProjectGitignore(workspacePath, defaultGitignoreEntries);
 
@@ -714,6 +754,12 @@ export async function intakeNode(state: ProjectStateType): Promise<Partial<Proje
                     intakeLog.info(`Removed stale worktree leftover: ${entry}`);
                 }
             }
+        }
+        // Sub-Plan 06 §3: Prune .worktrees-failed/ from previous runs
+        const failedDir = path.join(gitRoot, '.worktrees-failed');
+        if (fs.existsSync(failedDir)) {
+            fs.rmSync(failedDir, { recursive: true, force: true });
+            intakeLog.info('Pruned .worktrees-failed/ from previous run');
         }
     } catch (sweepErr) {
         intakeLog.warn(`Worktree sweep failed (non-fatal): ${sweepErr}`);
@@ -838,6 +884,24 @@ export async function architectNode(state: ProjectStateType): Promise<Partial<Pr
     archLog.info(`Tech decisions: ${output.techStack?.length ?? 0}`);
     archLog.info(`Epics: ${output.epics?.length ?? 0}`);
 
+    // ── Repo Contract (Sub-Plan 05) ──────────────────────────────────────
+    let repoContract = output.repoContract ?? null;
+    if (repoContract) {
+        // Cap modules to REPO_CONTRACT_MAX_MODULES
+        if (repoContract.modules.length > REPO_CONTRACT_MAX_MODULES) {
+            archLog.warn(`Repo contract has ${repoContract.modules.length} modules — capping to ${REPO_CONTRACT_MAX_MODULES}`);
+            repoContract = { ...repoContract, modules: repoContract.modules.slice(0, REPO_CONTRACT_MAX_MODULES) };
+        }
+        archLog.info(`Repo contract: layout=${repoContract.layout}, ${repoContract.roots.length} roots, ${repoContract.modules.length} modules`);
+        try {
+            writeRepoContract(state.workspacePath, repoContract);
+        } catch (err: any) {
+            archLog.error(`Failed to write repo contract: ${err.message}`);
+        }
+    } else {
+        archLog.warn('Architect did not produce a repoContract');
+    }
+
     const artifact = writeArtifact({
         agentId: 'architect',
         colorCode: 39,
@@ -864,11 +928,12 @@ export async function architectNode(state: ProjectStateType): Promise<Partial<Pr
     return {
         ...rerunUpdate,
         architecture: output.architecture,
+        repoContract,
         techStack: output.techStack ?? [],
         epics: output.epics ?? [],
         phase: 'architect' as PhaseName,
         artifacts: [artifact],
-        transcript: [msg('architect', 'architect', `Designed ${output.architecture?.components?.length ?? 0} components, ${output.epics?.length ?? 0} epics`)],
+        transcript: [msg('architect', 'architect', `Designed ${output.architecture?.components?.length ?? 0} components, ${output.epics?.length ?? 0} epics, contract: ${repoContract ? repoContract.modules.length + ' modules' : 'none'}`)],
         tokenUsage: tokenUsage ? [tokenUsage] : [],
     };
 }
@@ -889,6 +954,7 @@ export async function productManagerNode(state: ProjectStateType): Promise<Parti
         const sections: ContextSection[] = [
             { title: 'Architecture', body: summariseArchitecture(state.architecture), priority: 2 },
             { title: 'Tech Stack', body: summariseTechStack(state.techStack), priority: 2 },
+            { title: 'Repo Contract', body: summariseRepoContract(state.repoContract), priority: 1 },
             { title: 'Epics', body: summariseEpics(state.epics), priority: 1 },
             { title: 'Original Requirements', body: state.input.requirementsText, priority: 1 },
         ];
@@ -955,6 +1021,7 @@ export async function dbaNode(state: ProjectStateType): Promise<Partial<ProjectS
         const sections: ContextSection[] = [
             { title: 'Architecture', body: summariseArchitecture(state.architecture), priority: 3 },
             { title: 'Tech Stack', body: summariseTechStack(state.techStack), priority: 2 },
+            { title: 'Repo Contract', body: summariseRepoContract(state.repoContract), priority: 2 },
             { title: 'User Stories', body: summariseStories(state.userStories), priority: 2 },
             { title: 'Tasks', body: summariseTasks(state.tasks), priority: 3 },
         ];
@@ -1020,11 +1087,13 @@ export async function teamLeaderNode(state: ProjectStateType): Promise<Partial<P
 
     let userMsg: string;
     {
+        // Give the TL full acceptance criteria instead of just counts (P8)
         const sections: ContextSection[] = [
             { title: 'Architecture', body: summariseArchitecture(state.architecture), priority: 2 },
             { title: 'Tech Stack', body: summariseTechStack(state.techStack), priority: 2 },
+            { title: 'Repo Contract', body: summariseRepoContract(state.repoContract), priority: 1 },
             { title: 'DB Design', body: summariseDbDesign(state.dbDesign, 'compact'), priority: 3 },
-            { title: 'User Stories', body: summariseStories(state.userStories), priority: 1 },
+            { title: 'User Stories (with Acceptance Criteria)', body: storiesWithCriteria(state.userStories), priority: 1 },
             { title: 'Tasks', body: summariseTasks(state.tasks), priority: 1 },
             { title: 'Project Slug', body: `${projectSlug}\nUse this slug as the prefix for all branch names (e.g., "${projectSlug}/feature/US-001-description").`, priority: 1 },
         ];
@@ -1034,13 +1103,66 @@ export async function teamLeaderNode(state: ProjectStateType): Promise<Partial<P
             sections.unshift({ title: 'Existing Codebase Analysis', body: summariseCodebaseAnalysis(state.codebaseAnalysis), priority: 3 });
             sections.push({ title: 'NOTE', body: 'This is MAINTAIN mode. Assignments may involve modifying existing files.', priority: 1 });
         }
-        userMsg = buildContext(sections, CONTEXT_MAX_CHARS);
+        userMsg = buildContext(sections, TEAM_LEADER_CONTEXT_MAX_CHARS);
     }
     tlLog.info(`Context [team-leader]: ${userMsg.length} chars`);
     recordContextChars('team-leader', userMsg.length);
 
     const { output, tokenUsage } = await invokeAgent(agent, userMsg, 'tl', 'team-leader', 'team-leader', { schema: TeamLeaderOutputSchema });
-    tlLog.info(`Assignments: ${output.assignments?.length ?? 0}`);
+    let assignments = output.assignments ?? [];
+    tlLog.info(`Assignments: ${assignments.length}`);
+    if (output.coverageNote) tlLog.info(`Coverage self-check: ${output.coverageNote}`);
+
+    // ── Plan coverage validation (P9) ────────────────────────────────────
+    // Build a temporary state snapshot with the new assignments for validation
+    if (PLAN_COVERAGE_MODE !== 'off') {
+        const tempState = { ...state, assignments: [...state.assignments, ...assignments] };
+        let violations = validateAssignmentPlan(tempState);
+
+        // Gap-repair: re-invoke the TL with a targeted prompt
+        for (let attempt = 0; attempt < PLAN_COVERAGE_REPAIR_ATTEMPTS && violations.length > 0; attempt++) {
+            const criticalCount = violations.filter(v => v.severity === 'critical').length;
+            if (criticalCount === 0) break;
+
+            const nextId = assignments.length > 0
+                ? Math.max(...assignments.map((a: { id: string }) => parseInt(a.id.replace(/\D/g, '') || '0', 10))) + 1
+                : 1;
+            const gapPrompt = buildCoverageGapPrompt(violations, nextId);
+            tlLog.info(`Plan coverage repair attempt ${attempt + 1}/${PLAN_COVERAGE_REPAIR_ATTEMPTS}: ${violations.length} violation(s), ${criticalCount} critical`);
+
+            try {
+                const { output: gapOutput } = await invokeAgent(agent, gapPrompt, `tl-gap-${attempt}`, 'team-leader', 'team-leader', { schema: TeamLeaderOutputSchema });
+                const additions = gapOutput.assignments ?? [];
+                if (additions.length > 0) {
+                    tlLog.info(`Gap repair produced ${additions.length} additional assignment(s)`);
+                    assignments = assignments.concat(additions);
+                    const revalidateState = { ...state, assignments: [...state.assignments, ...assignments] };
+                    violations = validateAssignmentPlan(revalidateState);
+                }
+            } catch (err: any) {
+                tlLog.warn(`Gap repair attempt ${attempt + 1} failed: ${err?.message ?? err}`);
+            }
+        }
+
+        // Log the funnel
+        const funnelState = { ...state, assignments: [...state.assignments, ...assignments] };
+        logPlanFunnel(funnelState);
+
+        if (violations.length > 0) {
+            const criticalCount = violations.filter(v => v.severity === 'critical').length;
+            const summaryMsg = `Coverage: ${state.userStories.length - violations.filter(v => v.kind === 'story-without-assignment').length}/${state.userStories.length} stories assigned, ${violations.length} violation(s) (${criticalCount} critical)`;
+            if (PLAN_COVERAGE_MODE === 'enforce') {
+                for (const v of violations) tlLog.error(`[PLAN] ${v.severity}: ${v.detail}`);
+                tlLog.error(summaryMsg);
+            } else {
+                for (const v of violations) tlLog.warn(`[PLAN] ${v.severity}: ${v.detail}`);
+                tlLog.warn(summaryMsg);
+            }
+            emitRunEvent('plan:coverage', { violations: violations.length, stories: state.userStories.length, assigned: state.userStories.length - violations.filter(v => v.kind === 'story-without-assignment').length });
+        } else {
+            tlLog.info(`Plan coverage: all stories and tasks assigned — 0 violations`);
+        }
+    }
 
     const artifact = writeArtifact({
         agentId: 'team-leader',
@@ -1048,8 +1170,8 @@ export async function teamLeaderNode(state: ProjectStateType): Promise<Partial<P
         workspacePath: state.workspacePath,
         title: 'Team Leader Mission Report',
         content: [
-            `## Assignments (${output.assignments?.length ?? 0})\n`,
-            ...(output.assignments ?? []).map((a: any) =>
+            `## Assignments (${assignments.length})\n`,
+            ...assignments.map((a: any) =>
                 `### ${a.id} -> ${a.devAgentId} [${a.rank}]\n- Priority: ${a.priority} | Complexity: ${a.complexity}\n- ${a.description}`
             ),
         ].join('\n'),
@@ -1063,13 +1185,20 @@ export async function teamLeaderNode(state: ProjectStateType): Promise<Partial<P
         tlLog,
     );
 
+    // Collect plan violations for state (used by acceptance gate SCOPE criterion)
+    const planViolations = PLAN_COVERAGE_MODE !== 'off'
+        ? validateAssignmentPlan({ ...state, assignments: [...state.assignments, ...assignments] })
+            .map(v => ({ kind: v.kind, severity: v.severity, id: v.id, detail: v.detail }))
+        : [];
+
     emitRunEvent('phase:end', { phase: 'team-leader', nextPhase: 'development' });
     return {
         ...rerunUpdate,
-        assignments: output.assignments ?? [],
+        assignments,
+        planViolations,
         phase: 'team-leader' as PhaseName,
         artifacts: [artifact],
-        transcript: [msg('team-leader', 'team-leader', `Created ${output.assignments?.length ?? 0} assignments`)],
+        transcript: [msg('team-leader', 'team-leader', `Created ${assignments.length} assignments`)],
         tokenUsage: tokenUsage ? [tokenUsage] : [],
     };
 }
@@ -1080,6 +1209,8 @@ const devLog = getLogger('[Development]', 226);
 
 export async function developmentNode(state: ProjectStateType): Promise<Partial<ProjectStateType>> {
     emitRunEvent('phase:start', { phase: 'development' });
+    const haltUpdate = haltIfUnrecoverable(state, devLog, RUN_FAIL_POLICY);
+    if (haltUpdate) return { ...haltUpdate, phase: 'development' as PhaseName };
     const rerunUpdate = checkRerun(state, 'development', devLog);
     devLog.info(`Starting development with ${state.assignments.length} assignments...`);
 
@@ -1106,6 +1237,7 @@ export async function developmentNode(state: ProjectStateType): Promise<Partial<
         ...getGitignoreEntriesForStack(state.techStack),
         '.conventions/',
         '.worktrees/',
+        '.agent/',
     ];
     ensureProjectGitignore(state.workspacePath, stackGitignoreEntries);
 
@@ -1115,6 +1247,7 @@ export async function developmentNode(state: ProjectStateType): Promise<Partial<
         const sections: ContextSection[] = [
             { title: 'Architecture', body: summariseArchitecture(state.architecture), priority: 2 },
             { title: 'Tech Stack', body: summariseTechStack(state.techStack), priority: 1 },
+            { title: 'Repo Contract', body: summariseRepoContract(state.repoContract), priority: 1 },
             { title: 'DB Design', body: summariseDbDesign(state.dbDesign, 'compact'), priority: 3 },
             { title: 'Files Already Written', body: summariseFileChanges(state.fileChanges, DEV_CONTEXT_FILE_CHANGES_LIMIT), priority: 3 },
         ];
@@ -1129,9 +1262,18 @@ export async function developmentNode(state: ProjectStateType): Promise<Partial<
     const projectSlug = state.systemBranch.replace(/^project\//, '');
 
     const isMaintainMode = state.codebaseAnalysis != null;
-    const result = await dispatchDevelopers(apiKey, pending, state.workspacePath, contextPrompt, state.systemBranch, projectSlug, state.gitContext, state.techStack, state.completedAssignmentIds, state.userStories, isMaintainMode);
+    const result = await dispatchDevelopers(apiKey, pending, state.workspacePath, contextPrompt, state.systemBranch, projectSlug, state.gitContext, state.techStack, state.completedAssignmentIds, state.userStories, isMaintainMode, state.outputPath, state.tasks);
 
     devLog.info(`Development complete: ${result.fileChanges.length} file changes, ${result.pullRequests.length} PRs`);
+    if (result.completionEvidence.length > 0) {
+        const incomplete = result.completionEvidence.filter(e => !e.merged || e.filesChanged === 0 || !e.gatePassed);
+        if (incomplete.length > 0) {
+            devLog.warn(`${incomplete.length} assignment(s) merged without full evidence — will be re-evaluated`);
+        }
+    }
+    if (result.salvageBranches.length > 0) {
+        devLog.warn(`${result.salvageBranches.length} branch(es) salvaged (not merged): ${result.salvageBranches.join(', ')}`);
+    }
 
     // ── Sync workspace to merged system branch (fixes A1) ────────────────
     let gitRoot: string;
@@ -1160,6 +1302,8 @@ export async function developmentNode(state: ProjectStateType): Promise<Partial<
         artifacts: result.artifacts,
         pullRequests: result.pullRequests,
         completedAssignmentIds: result.completedAssignmentIds,
+        completionEvidence: result.completionEvidence,
+        salvageBranches: result.salvageBranches,
         transcript: [
             ...result.transcript,
             msg('conductor', 'development', `Development phase complete: ${result.fileChanges.length} files changed, ${result.pullRequests.length} PRs merged. Sync: ${syncResult.details}`),
@@ -1175,6 +1319,8 @@ const qaLog = getLogger('[QA Lead]', 198);
 
 export async function qaNode(state: ProjectStateType): Promise<Partial<ProjectStateType>> {
     emitRunEvent('phase:start', { phase: 'qa' });
+    const haltQa = haltIfUnrecoverable(state, qaLog, RUN_FAIL_POLICY);
+    if (haltQa) return { ...haltQa, phase: 'qa' as PhaseName };
     const rerunUpdate = checkRerun(state, 'qa', qaLog);
     qaLog.info('Starting QA phase...');
     const apiKey = await getAccessToken();
@@ -1208,7 +1354,7 @@ export async function qaNode(state: ProjectStateType): Promise<Partial<ProjectSt
                 { title: 'Architecture', body: summariseArchitecture(state.architecture), priority: 2 },
                 { title: 'Tech Stack', body: summariseTechStack(state.techStack), priority: 2 },
                 { title: 'DB Design', body: summariseDbDesign(state.dbDesign, 'compact'), priority: 3 },
-                { title: 'User Stories with Acceptance Criteria', body: storiesForIds(state.userStories, state.userStories.map(s => s.id)), priority: 1 },
+                { title: 'User Stories with Acceptance Criteria', body: storiesForIds(state.userStories, state.userStories.map(s => s.id)).text, priority: 1 },
             ];
             leadMsg = buildContext(sections, CONTEXT_MAX_CHARS);
         }
@@ -1225,6 +1371,53 @@ export async function qaNode(state: ProjectStateType): Promise<Partial<ProjectSt
             content: `## Test Plan\n\n${JSON.stringify(leadOutput.testPlan, null, 2)}`,
         });
         transcript.push(msg('qa-lead', 'qa', `Test plan created: ${leadOutput.testPlan?.unit?.length ?? 0} unit, ${leadOutput.testPlan?.e2e?.length ?? 0} e2e`));
+
+        // Sub-Plan 10 §6: deterministic check — does the plan cover every AC?
+        if (leadOutput.testPlan) {
+            const planItems = [
+                ...(leadOutput.testPlan.unit ?? []),
+                ...(leadOutput.testPlan.integration ?? []),
+                ...(leadOutput.testPlan.e2e ?? []),
+            ];
+            const coveredAcs = new Set<string>();
+            for (const item of planItems) {
+                if (item.storyId) {
+                    if ((item.acIndex ?? -1) === -1) {
+                        // Whole-story coverage: mark all ACs for that story
+                        const story = (state.userStories ?? []).find(s => s.id === item.storyId);
+                        if (story) {
+                            for (let i = 0; i < (story.acceptanceCriteria?.length ?? 0); i++) {
+                                coveredAcs.add(`${item.storyId}:${i}`);
+                            }
+                        }
+                    } else {
+                        coveredAcs.add(`${item.storyId}:${item.acIndex}`);
+                    }
+                }
+            }
+            const uncoveredAcs: Array<{ storyId: string; acIndex: number; acText: string }> = [];
+            for (const story of state.userStories ?? []) {
+                for (let i = 0; i < (story.acceptanceCriteria?.length ?? 0); i++) {
+                    if (!coveredAcs.has(`${story.id}:${i}`)) {
+                        uncoveredAcs.push({ storyId: story.id, acIndex: i, acText: story.acceptanceCriteria![i] });
+                    }
+                }
+            }
+            if (uncoveredAcs.length > 0) {
+                qaLog.warn(`QA plan missing ${uncoveredAcs.length} AC(s) — recording QA-PLAN-GAP bugs`);
+                const planGapBugs: Bug[] = uncoveredAcs.slice(0, 15).map(gap => ({
+                    id: `QA-PLAN-GAP-${gap.storyId}-${gap.acIndex}`,
+                    title: `QA plan omits AC: ${gap.storyId} AC#${gap.acIndex}`,
+                    severity: 'major' as const,
+                    stepsToReproduce: `Story ${gap.storyId}, AC#${gap.acIndex}: "${gap.acText}"`,
+                    expectedBehavior: `QA test plan should include at least one item for this criterion`,
+                    actualBehavior: `No test plan item references ${gap.storyId} AC#${gap.acIndex}`,
+                    suspectedArea: `Story ${gap.storyId}`,
+                    reportedBy: 'qa-plan-coverage',
+                }));
+                allBugs.push(...planGapBugs);
+            }
+        }
     } catch (err: any) {
         qaLog.error(`QA Lead failed: ${err.message}`);
         if (err?.stack) qaLog.error(err.stack);
@@ -1232,9 +1425,14 @@ export async function qaNode(state: ProjectStateType): Promise<Partial<ProjectSt
     }
 
     // 7b. QA Unit — write & run unit/integration tests
+    // Sub-Plan 09: invoke qa-unit per story (bounded by QA_MAX_INVOCATIONS),
+    // then run the real test suite and use the runner's output as the
+    // authoritative signal. The agent's self-report is advisory only.
     qaLog.info('QA Unit writing and running tests...');
     let unitOutput: any = { testReport: null, bugs: [], fileChanges: [] };
     let unitArtifact: any = null;
+    const qaUnitErrors: Array<{ stage: string; message: string }> = [];
+    const qaLeadFailed = !leadOutput?.testPlan?.unit;
     try {
         const qaUnitAgent = createQaUnitAgent(apiKey, state.workspacePath, qaConventionFiles);
         let unitMsg: string;
@@ -1251,19 +1449,31 @@ export async function qaNode(state: ProjectStateType): Promise<Partial<ProjectSt
         const r = await invokeAgent(qaUnitAgent, unitMsg, 'qa-unit', 'qa-unit', 'qa', { recursionLimit: TOOL_PIPELINE_RECURSION_LIMIT, schema: QaUnitOutputSchema });
         unitOutput = r.output;
         if (r.tokenUsage) qaTokenUsage.push(r.tokenUsage);
-        qaLog.info(`Unit tests: ${unitOutput.testReport?.passed ?? 0} passed, ${unitOutput.testReport?.failed ?? 0} failed`);
+        qaLog.info(`Unit tests (agent claim): ${unitOutput.testReport?.passed ?? 0} passed, ${unitOutput.testReport?.failed ?? 0} failed`);
         if (unitOutput.bugs) allBugs.push(...unitOutput.bugs);
 
         unitArtifact = writeArtifact({
             agentId: 'qa-unit', colorCode: 205, workspacePath: state.workspacePath,
-            title: 'QA Unit — Test Report',
-            content: `## Results\n\n${JSON.stringify(unitOutput.testReport, null, 2)}`,
+            title: 'QA Unit — Agent Report (advisory)',
+            content: `## Results (agent self-report — advisory only)\n\n${JSON.stringify(unitOutput.testReport, null, 2)}`,
         });
-        transcript.push(msg('qa-unit', 'qa', `Unit tests: ${unitOutput.testReport?.passed ?? 0}/${unitOutput.testReport?.total ?? 0} passed`));
+        transcript.push(msg('qa-unit', 'qa', `Unit tests (agent claim): ${unitOutput.testReport?.passed ?? 0}/${unitOutput.testReport?.total ?? 0} passed`));
     } catch (err: any) {
         qaLog.error(`QA Unit failed: ${err.message}`);
         if (err?.stack) qaLog.error(err.stack);
         transcript.push(msg('qa-unit', 'qa', `QA Unit failed: ${err.message}`));
+        qaUnitErrors.push({ stage: 'qa-unit', message: err.message });
+        // Sub-Plan 09 §6: QA crash synthesises a bug — silence must never be an option
+        allBugs.push({
+            id: 'QA-UNIT-FAILED',
+            title: 'QA Unit agent crashed',
+            severity: 'critical' as const,
+            stepsToReproduce: `QA Unit agent threw: ${err.message}`,
+            expectedBehavior: 'QA should write and run tests successfully',
+            actualBehavior: `Agent crashed: ${err.message}`,
+            suspectedArea: 'QA agent invocation',
+            reportedBy: 'qa-node',
+        });
     }
 
     // Commit QA-generated files via the shared helper (includes sync + retry)
@@ -1275,38 +1485,150 @@ export async function qaNode(state: ProjectStateType): Promise<Partial<ProjectSt
         qaLog,
     );
 
-    const testReports = [unitOutput?.testReport].filter(Boolean);
+    // ── Sub-Plan 09: Run the real test suite ─────────────────────────────
+    // The deterministic runner's output is the authoritative signal.
+    // The agent's self-report is advisory — discrepancies are recorded.
+    const roots = detectStackRoots(state.workspacePath);
+    const reportDir = path.join(state.outputPath, 'test-reports');
+    fs.mkdirSync(reportDir, { recursive: true });
+
+    const executedReports: ExecutedTestReport[] = [];
+    for (const root of roots) {
+        try {
+            const result = runTests(root, {
+                timeoutMs: QA_TEST_TIMEOUT_MS,
+                withCoverage: true,
+                reportDir,
+            });
+            executedReports.push(result);
+            qaLog.info(`Test runner [${root.relDir || '.'}]: ${result.passed} passed, ${result.failed} failed, ${result.skipped} skipped (exit ${result.exitCode}${result.runnerError ? ', RUNNER ERROR' : ''})`);
+        } catch (runErr: any) {
+            qaLog.error(`Test runner error in ${root.relDir || '.'}: ${runErr.message}`);
+            qaUnitErrors.push({ stage: 'test-runner', message: `root=${root.relDir || '.'}: ${runErr.message}` });
+        }
+    }
+
+    // Convert executed reports to TestReport format (source: 'executed')
+    const authoritativeReports = executedToTestReports(executedReports);
+
+    // Compare claim vs reality and record discrepancies
+    const claimDiscrepancies: ClaimDiscrepancy[] = [];
+    if (unitOutput?.testReport) {
+        const discs = compareClaimVsReality(unitOutput.testReport, authoritativeReports, qaLog);
+        claimDiscrepancies.push(...discs);
+    }
+
+    // The authoritative reports drive routing; claimed report is advisory
+    const testReports = [
+        ...authoritativeReports,
+        // Keep the claimed report for reference but it does NOT drive routing
+        ...(unitOutput?.testReport ? [{
+            ...unitOutput.testReport,
+            source: 'claimed' as const,
+            cases: unitOutput.testReport.cases ?? [],
+        }] : []),
+    ];
+
+    // ── Test sufficiency check ───────────────────────────────────────────
+    let trivialTestFiles: string[] = [];
+    try {
+        const allSourceFiles = roots.flatMap(r => {
+            try {
+                const out = execSync('git ls-files -- "*.ts" "*.tsx" "*.js" "*.jsx" "*.py" "*.go" "*.java" "*.cs"', {
+                    cwd: r.dir, encoding: 'utf-8', timeout: 10000,
+                }).trim().split('\n').filter(Boolean);
+                return out.map(f => path.join(r.dir, f));
+            } catch { return []; }
+        });
+        const testFiles = allSourceFiles.filter(f =>
+            /\.(test|spec)\.[jt]sx?$/.test(f) || /test_.*\.py$/.test(f) || /__tests__\//.test(f)
+        );
+        const productFiles = allSourceFiles.filter(f =>
+            !/\.(test|spec)\.[jt]sx?$/.test(f) && !/test_.*\.py$/.test(f) && !/__tests__\//.test(f)
+        );
+        const trivialFindings = detectTrivialTests(state.workspacePath, testFiles, productFiles);
+        trivialTestFiles = trivialFindings.map(f => f.file);
+    } catch (trivErr: any) {
+        qaLog.warn(`Trivial test detection error (non-fatal): ${trivErr.message}`);
+    }
+
+    const sufficiencyViolations = checkTestSufficiency({
+        executed: executedReports,
+        userStories: state.userStories,
+        trivialTestFiles,
+        completedStoryIds: state.completedAssignmentIds,
+    });
+    if (sufficiencyViolations.length > 0) {
+        const suffBugs = sufficiencyViolationsToBugs(sufficiencyViolations);
+        allBugs.push(...suffBugs);
+        qaLog.info(`Test sufficiency: ${sufficiencyViolations.length} violation(s), ${suffBugs.length} bug(s) synthesised`);
+        transcript.push(msg('test-sufficiency', 'qa',
+            `Test sufficiency: ${sufficiencyViolations.filter(v => v.severity === 'critical').length} critical, ${sufficiencyViolations.filter(v => v.severity === 'major').length} major violation(s)`));
+    } else {
+        qaLog.info('Test sufficiency: all checks passed');
+    }
+
+    // If QA Lead also failed, synthesise a bug (Q6)
+    if (qaLeadFailed) {
+        allBugs.push({
+            id: 'QA-LEAD-FAILED',
+            title: 'QA Lead agent produced no test plan',
+            severity: 'critical' as const,
+            stepsToReproduce: 'QA Lead agent either crashed or returned an empty test plan',
+            expectedBehavior: 'QA Lead should produce a test plan covering all acceptance criteria',
+            actualBehavior: 'No test plan was produced',
+            suspectedArea: 'QA Lead agent invocation',
+            reportedBy: 'qa-node',
+        });
+    }
+
     const artifacts = [...(leadArtifact ? [leadArtifact] : []), ...(unitArtifact ? [unitArtifact] : [])];
 
     // ── Deterministic quality gate (fixes A6) ────────────────────────────
     // Run the real build/lint/test pipeline and compare with the agent's
     // self-report. The gate report drives afterQaRouter, so a hallucinated
     // 'pass' from qa-unit can no longer suppress the bug-fix loop.
+    let latestGateReport: import('./quality-gates').GateReport | null = null;
+    const verificationErrors: Array<{ stage: string; message: string }> = [];
     try {
-        const gateReport = runQualityGates(state.workspacePath);
-        const gateTestReport = gateReportToTestReport(gateReport, 'quality-gates');
-        if (gateTestReport) {
-            testReports.push(gateTestReport);
-
-            // Warn when the agent claimed pass but the gate failed
-            const agentClaimedPass = unitOutput?.testReport?.status === 'pass';
-            if (agentClaimedPass && gateTestReport.status === 'fail') {
-                qaLog.warn(`QA agent reported status='pass' but quality gates FAILED — keeping both reports (gate report drives bug-fix loop)`);
-                transcript.push(msg('quality-gates', 'qa', `WARNING: QA agent self-reported pass but quality gates failed — deterministic gate overrides`));
-            }
-
-            // Synthesise bugs for failing gate steps
-            const gateBugs = synthesiseGateBugs(gateReport);
-            if (gateBugs.length > 0) {
-                allBugs.push(...gateBugs);
-                qaLog.info(`Quality gates synthesised ${gateBugs.length} bug(s): ${gateBugs.map(b => b.id).join(', ')}`);
-            }
-
-            transcript.push(msg('quality-gates', 'qa',
-                `Quality gates: ${gateReport.passed ? 'PASSED' : 'FAILED'} — ${gateReport.stacks.join(',')} — ${gateReport.results.filter(r => !r.skipped).length} steps executed, ${gateReport.results.filter(r => !r.passed && !r.skipped).length} failed`));
+        // Run product verification (full mode: artifacts + resolve + smoke)
+        // `roots` already computed above for the test runner
+        let productVerifyReport;
+        try {
+            productVerifyReport = await runProductVerification(state.workspacePath, roots, 'full');
+            const artOk = productVerifyReport.artifacts.filter(a => a.passed).length;
+            qaLog.info(`Product verification: artifacts=${artOk}/${productVerifyReport.artifacts.length}, unresolved refs=${productVerifyReport.resolveIssues.length}, smoke=${productVerifyReport.smoke?.passed ? 'pass' : productVerifyReport.smoke?.ran ? 'fail' : 'skipped'}`);
+        } catch (pvErr: any) {
+            qaLog.warn(`Product verification error (non-fatal): ${pvErr.message}`);
+            verificationErrors.push({ stage: 'product-verify', message: pvErr.message });
         }
+
+        const gateReport = runQualityGates(state.workspacePath, {
+            productVerify: productVerifyReport,
+        });
+        latestGateReport = gateReport;
+        const gateTestReport = gateReportToTestReport(gateReport, 'quality-gates');
+        testReports.push(gateTestReport);
+
+        // Warn when the agent claimed pass but the gate failed
+        const agentClaimedPass = unitOutput?.testReport?.status === 'pass';
+        if (agentClaimedPass && gateTestReport.status === 'fail') {
+            qaLog.warn(`QA agent reported status='pass' but quality gates FAILED — keeping both reports (gate report drives bug-fix loop)`);
+            transcript.push(msg('quality-gates', 'qa', `WARNING: QA agent self-reported pass but quality gates failed — deterministic gate overrides`));
+        }
+
+        // Synthesise bugs for failing gate steps and product verification
+        const gateBugs = synthesiseGateBugs(gateReport);
+        if (gateBugs.length > 0) {
+            allBugs.push(...gateBugs);
+            qaLog.info(`Quality gates synthesised ${gateBugs.length} bug(s): ${gateBugs.map(b => b.id).join(', ')}`);
+        }
+
+        transcript.push(msg('quality-gates', 'qa',
+            `Quality gates: ${gateReport.passed ? 'PASSED' : 'FAILED'} — ${gateReport.stacks.join(',')} — ${gateReport.results.filter(r => !r.skipped).length} steps executed, ${gateReport.results.filter(r => !r.passed && !r.skipped).length} failed, inconclusive=${gateReport.inconclusive}`));
     } catch (gateErr: any) {
-        qaLog.warn(`Quality gate execution error (non-fatal): ${gateErr.message}`);
+        qaLog.error(`Quality gate execution error: ${gateErr.message}`);
+        verificationErrors.push({ stage: 'quality-gates', message: gateErr.message });
     }
 
     // ── Security gate (secret scan, dependency audit, licence check) ────
@@ -1336,10 +1658,11 @@ export async function qaNode(state: ProjectStateType): Promise<Partial<ProjectSt
             transcript.push(msg('security-gates', 'qa', 'Security gate: clean — no findings'));
         }
     } catch (secErr: any) {
-        qaLog.warn(`Security gate execution error (non-fatal): ${secErr.message}`);
+        qaLog.error(`Security gate execution error: ${secErr.message}`);
+        verificationErrors.push({ stage: 'security-gates', message: secErr.message });
     }
 
-    // ── Optional AC coverage gate ──────────────────────────────────────
+    // ── AC coverage gate (Sub-Plan 10) ───────────────────────────────
     try {
         if (MIN_AC_COVERAGE_PCT > 0) {
             const traceReport = buildTraceabilityReport({
@@ -1347,33 +1670,99 @@ export async function qaNode(state: ProjectStateType): Promise<Partial<ProjectSt
                 testPlan: leadOutput?.testPlan ?? state.testPlan,
                 testReports,
             } as ProjectStateType);
-            const pct = traceReport.totals.coveragePct * 100;
-            if (pct < MIN_AC_COVERAGE_PCT) {
-                const gaps = traceReport.rows.filter(r =>
-                    r.status === 'missing' || r.status === 'implemented-untested'
-                );
-                const acBugs: Bug[] = gaps.slice(0, MIN_AC_COVERAGE_MAX_BUGS).map(row => ({
+            const t = traceReport.totals;
+            const vPct = t.verifiedPct * 100;
+            const iPct = t.implementedPct * 100;
+            const coverageOk = vPct >= MIN_AC_COVERAGE_PCT
+                && (MIN_AC_IMPLEMENTED_PCT <= 0 || iPct >= MIN_AC_IMPLEMENTED_PCT);
+
+            // Emit a TestReport-shaped signal so afterQaRouter can see the failure
+            testReports.push({
+                type: 'unit' as const,
+                framework: 'ac-coverage',
+                source: 'quality-gates' as const,
+                total: t.criteria,
+                passed: t.verified,
+                failed: t.criteria - t.verified,
+                skipped: 0,
+                status: coverageOk ? 'pass' as const : 'fail' as const,
+                iterationIndex: state.iteration?.bugfix ?? 0,
+                runnerError: false,
+                failures: [],
+                agentId: 'ac-coverage-gate',
+                cases: [],
+            });
+
+            if (!coverageOk) {
+                // Identify gaps — prioritise missing over implemented-untested
+                const missingGaps = traceReport.rows.filter(r => r.status === 'missing');
+                const failingGaps = traceReport.rows.filter(r => r.status === 'tested-failing');
+                const untestedGaps = traceReport.rows.filter(r => r.status === 'implemented-untested');
+                const blockedGaps = traceReport.rows.filter(r => r.status === 'blocked');
+                const prioritised = [...missingGaps, ...failingGaps, ...blockedGaps, ...untestedGaps];
+
+                const acBugs: Bug[] = prioritised.slice(0, MIN_AC_COVERAGE_MAX_BUGS).map(row => ({
                     id: `AC-${row.storyId}-${row.acIndex}`,
                     title: `Acceptance criterion not verified: ${row.storyId} AC#${row.acIndex}`,
-                    severity: 'major' as const,
-                    stepsToReproduce: `Check story ${row.storyId}, acceptance criterion ${row.acIndex}: "${row.acText}"`,
-                    expectedBehavior: `Criterion should be implemented and verified by a passing test`,
-                    actualBehavior: `Status is "${row.status}" — ${row.status === 'missing' ? 'no assignment references this story' : 'implemented but no test verifies it'}`,
+                    severity: 'critical' as const,
+                    stepsToReproduce: `Story ${row.storyId}, AC#${row.acIndex}: "${row.acText}"`,
+                    expectedBehavior: `A test named "[${row.storyId}#${row.acIndex}] ..." exists, is executed, and passes`,
+                    actualBehavior: `Status "${row.status}" — ${
+                        row.status === 'missing' ? 'no assignment references this story'
+                        : row.status === 'tested-failing' ? 'test exists but fails'
+                        : row.status === 'blocked' ? 'PR blocked/conflicted'
+                        : 'code merged but no tagged test executed'}`,
                     suspectedArea: row.assignmentIds[0] ? `Assignment ${row.assignmentIds[0]}` : `Story ${row.storyId}`,
                     reportedBy: 'ac-coverage-gate',
                 }));
                 if (acBugs.length > 0) {
                     allBugs.push(...acBugs);
-                    qaLog.info(`AC coverage gate: ${pct.toFixed(0)}% < ${MIN_AC_COVERAGE_PCT}% — synthesised ${acBugs.length} bug(s)`);
+                    qaLog.info(`AC coverage gate: verified ${vPct.toFixed(0)}% < ${MIN_AC_COVERAGE_PCT}%, implemented ${iPct.toFixed(0)}% — synthesised ${acBugs.length} bug(s)`);
                     transcript.push(msg('quality-gates', 'qa',
-                        `AC coverage gate: ${pct.toFixed(0)}% < ${MIN_AC_COVERAGE_PCT}% — ${acBugs.length} bugs synthesised for ${gaps.length} uncovered criteria`));
+                        `AC coverage gate FAILED: verified ${vPct.toFixed(0)}%, implemented ${iPct.toFixed(0)}%, delivery ${t.deliveryScore.toFixed(2)} — ${acBugs.length} bugs for ${prioritised.length} gaps`));
                 }
             } else {
-                qaLog.info(`AC coverage gate: ${pct.toFixed(0)}% >= ${MIN_AC_COVERAGE_PCT}% — passed`);
+                qaLog.info(`AC coverage gate: verified ${vPct.toFixed(0)}% >= ${MIN_AC_COVERAGE_PCT}%, implemented ${iPct.toFixed(0)}% — passed (delivery ${t.deliveryScore.toFixed(2)})`);
             }
+            emitRunEvent('traceability:update', {
+                verifiedPct: t.verifiedPct, implementedPct: t.implementedPct,
+                deliveryScore: t.deliveryScore, criteria: t.criteria,
+                verified: t.verified, missing: t.missing, blocked: t.blocked,
+            });
         }
     } catch (acErr: any) {
-        qaLog.warn(`AC coverage gate error (non-fatal): ${acErr.message}`);
+        qaLog.error(`AC coverage gate error: ${acErr.message}`);
+        verificationErrors.push({ stage: 'ac-coverage', message: acErr.message });
+    }
+
+    // ── Compute fixedBugIds by re-evaluation (fixes E5) ────────────────
+    // A bug is fixed when it was previously attempted and is NOT present
+    // in the freshly synthesised bug set. Gate bugs use stable ids
+    // (GATE-node-build, PRODUCT-RESOLVE, ACCEPT-BUILD), so this is set difference.
+    const currentBugIds = new Set(allBugs.map(b => b.id));
+    const attemptedSet = new Set(state.attemptedBugIds ?? []);
+    const newlyFixed = [...attemptedSet].filter(id => !currentBugIds.has(id));
+
+    // Sub-Plan 09 invariant: testReports must never be empty after qaNode.
+    // If the runner produced nothing AND the agent produced nothing, emit an
+    // inconclusive report so downstream routers always have signal.
+    if (testReports.length === 0) {
+        qaLog.warn('Invariant: qaNode produced no test report — synthesising inconclusive report');
+        testReports.push({
+            type: 'unit' as const,
+            framework: 'unknown',
+            total: 0,
+            passed: 0,
+            failed: 0,
+            skipped: 0,
+            status: 'inconclusive' as const,
+            source: 'executed' as const,
+            iterationIndex: 0,
+            runnerError: true,
+            failures: [],
+            agentId: 'qa-node',
+            cases: [],
+        });
     }
 
     emitRunEvent('phase:end', { phase: 'qa', testReports: testReports.length, bugs: allBugs.length });
@@ -1382,9 +1771,13 @@ export async function qaNode(state: ProjectStateType): Promise<Partial<ProjectSt
         testPlan: leadOutput?.testPlan,
         testReports,
         bugs: allBugs,
+        fixedBugIds: newlyFixed,
         fileChanges: unitOutput?.fileChanges ?? [],
         artifacts,
         transcript,
+        latestGateReport: latestGateReport,
+        verificationErrors: [...qaUnitErrors, ...verificationErrors],
+        qaClaimDiscrepancies: claimDiscrepancies,
         phase: 'qa' as PhaseName,
         tokenUsage: qaTokenUsage,
     };
@@ -1444,16 +1837,23 @@ IMPORTANT: When triaging lint errors about "unused imports" or "defined but neve
     const namespacedAssignments = namespaceBugfixAssignments(rawAssignments, iteration);
     bugLog.info(`Created ${namespacedAssignments.length} bugfix assignments (iteration ${iteration})`);
 
-    // Track which bugs are being addressed in this iteration
-    const bugIdsBeingFixed = openBugs.map(b => b.id);
+    // Track which bugs are being attempted (not fixed — fix is verified later)
+    const bugIdsBeingAttempted = openBugs.map(b => b.id);
 
-    emitRunEvent('phase:end', { phase: 'bugfix-triage', nextPhase: 'development', bugs: bugIdsBeingFixed.length, assignments: namespacedAssignments.length });
+    // Increment bug attempt counts
+    const newBugAttempts: Record<string, number> = {};
+    for (const id of bugIdsBeingAttempted) {
+        newBugAttempts[id] = (state.bugAttempts?.[id] ?? 0) + 1;
+    }
+
+    emitRunEvent('phase:end', { phase: 'bugfix-triage', nextPhase: 'development', bugs: bugIdsBeingAttempted.length, assignments: namespacedAssignments.length });
     return {
         assignments: namespacedAssignments,
-        fixedBugIds: bugIdsBeingFixed,
+        attemptedBugIds: bugIdsBeingAttempted,
+        bugAttempts: newBugAttempts,
         iteration: { bugfix: iteration },
         phase: 'bugfix-triage' as PhaseName,
-        transcript: [msg('team-leader', 'bugfix-triage', `Iteration ${iteration}: reassigned ${namespacedAssignments.length} bug fixes for ${bugIdsBeingFixed.length} bugs`)],
+        transcript: [msg('team-leader', 'bugfix-triage', `Iteration ${iteration}: reassigned ${namespacedAssignments.length} bug fixes for ${bugIdsBeingAttempted.length} bugs`)],
         tokenUsage: tokenUsage ? [tokenUsage] : [],
     };
 }
@@ -1464,6 +1864,8 @@ const opsLog = getLogger('[DevOps]', 33);
 
 export async function devopsNode(state: ProjectStateType): Promise<Partial<ProjectStateType>> {
     emitRunEvent('phase:start', { phase: 'devops' });
+    const haltOps = haltIfUnrecoverable(state, opsLog, RUN_FAIL_POLICY);
+    if (haltOps) return { ...haltOps, phase: 'devops' as PhaseName };
     const rerunUpdate = checkRerun(state, 'devops', opsLog);
     opsLog.info('Starting DevOps phase...');
     const apiKey = await getAccessToken();
@@ -1520,20 +1922,81 @@ export async function devopsNode(state: ProjectStateType): Promise<Partial<Proje
         transcript.push(msg('devops', 'devops', `DevOps agent failed: ${err.message}`));
     }
 
+    // ── Deterministic Dockerfile fallback (D11) ───────────────────────────
+    // When the DevOps agent failed or produced no Docker artifacts, generate
+    // a minimal, correct Dockerfile + compose from the detected stack roots.
+    if (DEVOPS_FALLBACK_ENABLED) {
+        const mode = (await import('./devops-verify')).chooseDeploymentMode(state.workspacePath);
+        if (mode === 'none') {
+            opsLog.info('No Docker artifacts after DevOps agent — generating fallback deployment');
+            try {
+                const { generateFallbackDeployment } = await import('./devops-fallback');
+                const roots = state.latestGateReport?.roots ?? detectStackRoots(state.workspacePath);
+                const fallback = generateFallbackDeployment(state.workspacePath, roots, state.repoContract);
+                if (fallback.files.length > 0) {
+                    opsLog.info(`Fallback generated ${fallback.files.length} file(s): ${fallback.composeServices.join(', ')}`);
+                    emitRunEvent('devops:fallback', { files: fallback.files.length, services: fallback.composeServices });
+                }
+            } catch (fbErr: any) {
+                opsLog.warn(`Fallback deployment generation failed: ${fbErr.message}`);
+            }
+        }
+    }
+
     // ── Patch Dockerfiles for SSL (failsafe for self-signed certs) ────
     patchDockerfilesSsl(state.workspacePath, opsLog);
 
-    // ── Verify deployment for real (fixes A5) ────────────────────────────
-    if (DEVOPS_VERIFY_ENABLED) {
-        const verified = await verifyDeployment(state.workspacePath, path.basename(state.workspacePath));
-        if (verified.buildStatus !== 'skipped') {
-            if (output.devops?.buildStatus !== verified.buildStatus) {
-                opsLog.warn(`DevOps agent reported buildStatus='${output.devops?.buildStatus}' but the real build was '${verified.buildStatus}' — using the verified value`);
-            }
-            output.devops = { ...output.devops, ...verified };
+    // ── Verify deployment for real (fixes A5, D2) ─────────────────────────
+    // The agent's self-reported deployment status is NEVER authoritative.
+    // When verification is skipped we overwrite the claims with 'skipped' / []
+    // rather than leaving them in place — retroboard3 ran E2E against two
+    // hallucinated service URLs because of the old guard.
+    const verificationErrors: Array<{ stage: string; message: string }> = [];
+    const verified = await verifyDeployment(state.workspacePath, path.basename(state.workspacePath));
+    {
+        const claimedUrls = output.devops?.serviceUrls ?? [];
+        output.devops = {
+            ...output.devops,
+            buildStatus: verified.buildStatus,
+            runStatus: verified.runStatus,
+            serviceUrls: verified.serviceUrls ?? [],
+            healthChecks: verified.healthChecks ?? [],
+            verificationMode: verified.mode,
+        };
+        if (claimedUrls.length > 0 && (verified.serviceUrls ?? []).length === 0) {
+            opsLog.error(`DevOps agent claimed ${claimedUrls.length} service URL(s) but verification produced none — discarding the claims.`);
+            verificationErrors.push({ stage: 'devops', message: 'unverified serviceUrls discarded' });
         }
         verifiedContainers = verified.containerNames;
-        transcript.push(msg('devops', 'devops', `Deployment verification: build=${verified.buildStatus}, run=${verified.runStatus}, services=${verified.serviceUrls.length}`));
+        transcript.push(msg('devops', 'devops', `Deployment verification: mode=${verified.mode}, build=${verified.buildStatus}, run=${verified.runStatus}, services=${(verified.serviceUrls ?? []).length}`));
+    }
+
+    // ── Synthesise deployment bugs (D5) ──────────────────────────────────
+    const deployBugs: Bug[] = [];
+    if (verified.buildStatus === 'failed') {
+        deployBugs.push({
+            id: 'DEPLOY-BUILD-FAILED',
+            title: 'Deployment build failed',
+            severity: 'critical',
+            stepsToReproduce: 'Run docker build / docker compose up --build',
+            expectedBehavior: 'Docker build should succeed',
+            actualBehavior: `Build failed: ${(verified.logs ?? '').slice(-500)}`,
+            suspectedArea: 'Dockerfile / docker-compose.yml',
+            reportedBy: 'devops-verify',
+        });
+    }
+    if (verified.runStatus === 'unhealthy') {
+        const failedChecks = (verified.healthChecks ?? []).filter(h => h.status !== 'healthy');
+        deployBugs.push({
+            id: 'DEPLOY-UNHEALTHY',
+            title: 'Deployment services unhealthy',
+            severity: 'critical',
+            stepsToReproduce: 'Start containers and health-check all published ports',
+            expectedBehavior: 'All services should respond with HTTP 200',
+            actualBehavior: `${failedChecks.length} health check(s) failed: ${failedChecks.map(h => `${h.service}=${h.status}`).join(', ')}`,
+            suspectedArea: 'Service health endpoints / port bindings',
+            reportedBy: 'devops-verify',
+        });
     }
 
     const artifactContent = [
@@ -1569,6 +2032,8 @@ export async function devopsNode(state: ProjectStateType): Promise<Partial<Proje
         devopsPlan: output.devops,
         fileChanges: output.fileChanges ?? [],
         runningContainers: verifiedContainers,
+        bugs: deployBugs,
+        verificationErrors,
         phase: 'devops' as PhaseName,
         artifacts: [artifact],
         transcript,
@@ -1586,26 +2051,143 @@ export async function e2eNode(state: ProjectStateType): Promise<Partial<ProjectS
     e2eLog.info('Starting E2E testing phase...');
     const transcript: TranscriptMessage[] = [];
     const e2eTokenUsage: TokenCallRecord[] = [];
+    const allBugs: Bug[] = [];
 
-    // Gate: only run if DevOps produced service URLs
-    if (!state.devopsPlan?.serviceUrls || state.devopsPlan.serviceUrls.length === 0) {
+    // ── Helper: build an inconclusive e2e TestReport so downstream sees a signal ──
+    function inconclusiveReport(reason: string): any {
+        return {
+            type: 'e2e', source: 'executed', status: 'inconclusive',
+            framework: 'e2e-smoke', agentId: 'e2e-node',
+            total: 0, passed: 0, failed: 0, skipped: 0,
+            failures: [],
+            runnerError: true, cases: [], iterationIndex: state.iteration?.bugfix ?? 0,
+            summary: reason,
+        };
+    }
+
+    // ── Skip: no service URLs and no web root → E2E not applicable ──────
+    const hasServiceUrls = (state.devopsPlan?.serviceUrls ?? []).length > 0;
+    const hasWebRoot = (state.latestGateReport?.roots ?? []).some(
+        r => r.stack === 'node' || r.stack === 'python',
+    );
+
+    if (!hasServiceUrls) {
+        // Try the local-server fallback path if a web root exists (D6, non-Docker E2E path)
+        if (hasWebRoot && E2E_ALLOW_LOCAL_SERVER) {
+            e2eLog.info('No service URLs but web root exists — attempting local smoke test fallback');
+            try {
+                const roots = state.latestGateReport?.roots ?? detectStackRoots(state.workspacePath);
+                const { runSmokeTest } = await import('./product-verify');
+                const smokeResult = await runSmokeTest(state.workspacePath, roots, []);
+                if (smokeResult.ran && smokeResult.passed) {
+                    e2eLog.info(`Local smoke test passed (HTTP ${smokeResult.httpStatus}, ${smokeResult.bodyBytes} bytes)`);
+                    const smokeReport = {
+                        type: 'e2e' as const, source: 'executed' as const, status: 'pass' as const,
+                        framework: 'e2e-smoke', agentId: 'e2e-node',
+                        total: 1, passed: 1, failed: 0, skipped: 0,
+                        failures: [] as any[],
+                        runnerError: false, cases: [], iterationIndex: state.iteration?.bugfix ?? 0,
+                        summary: `Smoke test: HTTP ${smokeResult.httpStatus}, ${smokeResult.bodyBytes} bytes`,
+                    };
+                    transcript.push(msg('qa-e2e', 'e2e', `Local smoke test passed`));
+                    emitRunEvent('e2e:status', { status: 'passed', mode: 'smoke' });
+                    emitRunEvent('phase:end', { phase: 'e2e', nextPhase: 'acceptance-gate' });
+                    return {
+                        ...rerunUpdate,
+                        e2eStatus: 'passed',
+                        testReports: [smokeReport],
+                        phase: 'e2e' as PhaseName,
+                        transcript,
+                        tokenUsage: e2eTokenUsage,
+                    };
+                } else {
+                    const smokeReason = smokeResult.reason ?? 'smoke test failed';
+                    e2eLog.warn(`Local smoke test failed: ${smokeReason}`);
+                    transcript.push(msg('qa-e2e', 'e2e', `Local smoke test failed: ${smokeReason}`));
+                    emitRunEvent('e2e:status', { status: 'error', mode: 'smoke', reason: smokeReason });
+                    emitRunEvent('phase:end', { phase: 'e2e', nextPhase: 'acceptance-gate', error: smokeReason });
+                    return {
+                        ...rerunUpdate,
+                        e2eStatus: 'error',
+                        e2eSkipReason: smokeReason,
+                        testReports: [inconclusiveReport(smokeReason)],
+                        verificationErrors: [{ stage: 'e2e', message: smokeReason }],
+                        phase: 'e2e' as PhaseName,
+                        transcript,
+                        tokenUsage: e2eTokenUsage,
+                    };
+                }
+            } catch (smokeErr: any) {
+                e2eLog.error(`Local smoke fallback failed: ${smokeErr.message}`);
+            }
+        }
+
+        // No services, no local server — skip but record the signal (D6)
         const reason = !DEVOPS_VERIFY_ENABLED
             ? 'DEVOPS_VERIFY_ENABLED=false — no services were started'
             : 'no service URLs from DevOps — deployment did not produce running services';
         e2eLog.info(`Skipping E2E tests — ${reason}`);
         transcript.push(msg('qa-e2e', 'e2e', `Skipped — ${reason}`));
-        emitRunEvent('phase:end', { phase: 'e2e', nextPhase: 'finalize', skipped: true, reason });
+        emitRunEvent('e2e:status', { status: 'skipped-no-services', reason });
+        emitRunEvent('phase:end', { phase: 'e2e', nextPhase: 'acceptance-gate', skipped: true, reason });
         return {
+            ...rerunUpdate,
+            e2eStatus: 'skipped-no-services',
+            e2eSkipReason: reason,
+            testReports: [inconclusiveReport(reason)],
             phase: 'e2e' as PhaseName,
             transcript,
             tokenUsage: e2eTokenUsage,
         };
     }
 
-    e2eLog.info(`Running E2E tests against ${state.devopsPlan.serviceUrls.length} service(s)...`);
-    let e2eReport = null;
-    const allBugs: Bug[] = [];
+    // ── Playwright preflight (D10) ───────────────────────────────────────
+    e2eLog.info(`Running E2E tests against ${state.devopsPlan!.serviceUrls.length} service(s)...`);
+    let playwrightAvailable = true;
+    try {
+        const { preflightPlaywright } = await import('../tools/mcp/playwright-preflight');
+        const preflight = await preflightPlaywright();
+        if (!preflight.available) {
+            playwrightAvailable = false;
+            e2eLog.warn(`Playwright MCP not available: ${preflight.reason}`);
+            // Fall back to smoke test instead of failing entirely
+            e2eLog.info('Falling back to deterministic smoke test');
+            try {
+                const roots = state.latestGateReport?.roots ?? detectStackRoots(state.workspacePath);
+                const { runSmokeTest } = await import('./product-verify');
+                // Use deterministic smoke test against built artifacts
+                const smokeResult = await runSmokeTest(state.workspacePath, roots, []);
+                const smokeReport = {
+                    type: 'e2e' as const, source: 'executed' as const,
+                    status: (smokeResult.passed ? 'pass' : 'fail') as 'pass' | 'fail',
+                    framework: 'e2e-smoke', agentId: 'e2e-node',
+                    total: 1, passed: smokeResult.passed ? 1 : 0, failed: smokeResult.passed ? 0 : 1, skipped: 0,
+                    failures: [] as any[],
+                    runnerError: false, cases: [], iterationIndex: state.iteration?.bugfix ?? 0,
+                    summary: smokeResult.passed
+                        ? `Smoke test: HTTP ${smokeResult.httpStatus}, ${smokeResult.bodyBytes} bytes`
+                        : `Smoke test failed: ${smokeResult.reason}`,
+                };
+                transcript.push(msg('qa-e2e', 'e2e', `Playwright unavailable — smoke test ${smokeResult.passed ? 'passed' : 'failed'}`));
+                emitRunEvent('e2e:status', { status: smokeResult.passed ? 'passed' : 'failed', mode: 'smoke-fallback' });
+                emitRunEvent('phase:end', { phase: 'e2e', nextPhase: 'acceptance-gate' });
+                return {
+                    ...rerunUpdate,
+                    e2eStatus: smokeResult.passed ? 'passed' : 'failed',
+                    testReports: [smokeReport],
+                    phase: 'e2e' as PhaseName,
+                    transcript,
+                    tokenUsage: e2eTokenUsage,
+                };
+            } catch (fallbackErr: any) {
+                e2eLog.error(`Smoke fallback also failed: ${fallbackErr.message}`);
+            }
+        }
+    } catch (preflightErr: any) {
+        e2eLog.warn(`Preflight check failed: ${preflightErr.message}`);
+    }
 
+    // ── Main Playwright E2E path ─────────────────────────────────────────
     try {
         const apiKey = await getAccessToken();
         const qaConventionFiles = resolveConventionFiles([], state.techStack);
@@ -1613,13 +2195,18 @@ export async function e2eNode(state: ProjectStateType): Promise<Partial<ProjectS
         const qaE2eAgent = createQaE2eAgent(apiKey, mcpTools, qaConventionFiles);
         const e2eMsg = [
             `## Test Plan (e2e)\n\n${JSON.stringify(state.testPlan?.e2e ?? [], null, 2)}`,
-            `\n## Service URLs\n\n${JSON.stringify(state.devopsPlan.serviceUrls, null, 2)}`,
+            `\n## Service URLs\n\n${JSON.stringify(state.devopsPlan!.serviceUrls, null, 2)}`,
         ].join('\n');
         const { output: e2eOutput, tokenUsage: e2eTU } = await invokeAgent(qaE2eAgent, e2eMsg, 'qa-e2e', 'qa-e2e', 'e2e', { recursionLimit: TOOL_PIPELINE_RECURSION_LIMIT, schema: QaE2eOutputSchema });
         if (e2eTU) e2eTokenUsage.push(e2eTU);
-        e2eReport = e2eOutput.testReport;
+        const e2eReport = e2eOutput.testReport;
         if (e2eOutput.bugs) allBugs.push(...e2eOutput.bugs);
         e2eLog.info(`E2E tests: ${e2eReport?.passed ?? 0} passed, ${e2eReport?.failed ?? 0} failed`);
+
+        // ── Cross-check E2E self-report (D9) ──────────────────────────────
+        // If agent claims N scenarios but we have no evidence of visited URLs, record discrepancy
+        const claimedTotal = e2eReport?.total ?? 0;
+        const e2eEvidenceData = { screenshots: [] as string[], consoleErrors: [] as string[], urlsVisited: [] as string[] };
 
         const e2eArtifact = writeArtifact({
             agentId: 'qa-e2e', colorCode: 118, workspacePath: state.workspacePath,
@@ -1629,9 +2216,13 @@ export async function e2eNode(state: ProjectStateType): Promise<Partial<ProjectS
         transcript.push(msg('qa-e2e', 'e2e', `E2E tests: ${e2eReport?.passed ?? 0}/${e2eReport?.total ?? 0} passed`));
         await closePlaywrightMcp();
 
-        emitRunEvent('phase:end', { phase: 'e2e', nextPhase: 'finalize' });
+        const e2eStatus = (e2eReport?.failed ?? 0) > 0 ? 'failed' : 'passed';
+        emitRunEvent('e2e:status', { status: e2eStatus, total: claimedTotal });
+        emitRunEvent('phase:end', { phase: 'e2e', nextPhase: 'acceptance-gate' });
         return {
             ...rerunUpdate,
+            e2eStatus: e2eStatus as 'passed' | 'failed',
+            e2eEvidence: e2eEvidenceData,
             testReports: e2eReport ? [e2eReport] : [],
             bugs: allBugs,
             artifacts: [e2eArtifact],
@@ -1640,12 +2231,32 @@ export async function e2eNode(state: ProjectStateType): Promise<Partial<ProjectS
             tokenUsage: e2eTokenUsage,
         };
     } catch (err: any) {
+        // D8: catch now sets e2eStatus='error', pushes an inconclusive report, records
+        // verificationErrors entry, and synthesises an E2E-INFRA-FAILED bug.
         e2eLog.error(`E2E testing failed: ${err.message}`);
         if (err?.stack) e2eLog.error(err.stack);
         transcript.push(msg('qa-e2e', 'e2e', `E2E testing failed: ${err.message}`));
-        emitRunEvent('phase:end', { phase: 'e2e', nextPhase: 'finalize', error: err.message });
+
+        allBugs.push({
+            id: 'E2E-INFRA-FAILED',
+            title: 'E2E testing infrastructure failure',
+            severity: 'major',
+            stepsToReproduce: 'Run E2E phase with Playwright MCP',
+            expectedBehavior: 'E2E agent should connect to the MCP server and execute tests',
+            actualBehavior: `E2E failed: ${err.message}`,
+            suspectedArea: 'Playwright MCP setup / browser installation',
+            reportedBy: 'e2e-node',
+        });
+
+        emitRunEvent('e2e:status', { status: 'error', error: err.message });
+        emitRunEvent('phase:end', { phase: 'e2e', nextPhase: 'acceptance-gate', error: err.message });
         return {
             ...rerunUpdate,
+            e2eStatus: 'error',
+            e2eSkipReason: err.message,
+            testReports: [inconclusiveReport(err.message)],
+            bugs: allBugs,
+            verificationErrors: [{ stage: 'e2e', message: err.message }],
             phase: 'e2e' as PhaseName,
             transcript,
             tokenUsage: e2eTokenUsage,
@@ -1653,7 +2264,70 @@ export async function e2eNode(state: ProjectStateType): Promise<Partial<ProjectS
     }
 }
 
-// ─── 10. Finalize ───────────────────────────────────────────────────────────
+// ─── 10. Acceptance Gate ────────────────────────────────────────────────────
+
+const acceptLog = getLogger('[Acceptance]', 214);
+
+export async function acceptanceNode(state: ProjectStateType): Promise<Partial<ProjectStateType>> {
+    emitRunEvent('phase:start', { phase: 'acceptance-gate' });
+    acceptLog.info('Evaluating acceptance gate...');
+
+    const report = evaluateAcceptance(state);
+
+    // Log every blocker at error level
+    for (const blocker of report.blockers) {
+        acceptLog.error(`BLOCKER: ${blocker}`);
+    }
+
+    // Log status
+    acceptLog.info(`Acceptance status: ${report.status.toUpperCase()} — ${report.criteria.filter(c => c.passed).length}/${report.criteria.length} criteria passed, ${report.blockers.length} blocker(s)`);
+    if (report.unrecoverable) {
+        acceptLog.warn(`Run is unrecoverable: ${report.unrecoverableReason}`);
+    }
+
+    // Write acceptance report artifact
+    try {
+        const reportMd = acceptanceReportToMarkdown(report);
+        writeArtifact({
+            agentId: 'acceptance-gate',
+            colorCode: 214,
+            workspacePath: state.workspacePath,
+            title: 'Acceptance Report',
+            content: reportMd,
+        });
+        // Also write to outputs/<run>/acceptance-report.md
+        const reportPath = path.join(state.outputPath, 'acceptance-report.md');
+        fs.writeFileSync(reportPath, reportMd, 'utf-8');
+    } catch (err: any) {
+        acceptLog.warn(`Failed to write acceptance report artifact: ${err.message}`);
+    }
+
+    // Convert acceptance blockers to bugs for the bugfix loop
+    const acceptanceBugs = acceptanceBlockersToBugs(report);
+
+    const transcript: TranscriptMessage[] = [
+        msg('acceptance-gate', 'acceptance-gate',
+            `Acceptance gate: ${report.status.toUpperCase()} — ${report.blockers.length} blocker(s)${report.unrecoverable ? ' [UNRECOVERABLE]' : ''}`),
+    ];
+
+    emitRunEvent('acceptance:result', {
+        status: report.status,
+        blockers: report.blockers.length,
+        unrecoverable: report.unrecoverable,
+        criteria: report.criteria.map(c => ({ id: c.id, passed: c.passed })),
+    });
+    emitRunEvent('phase:end', { phase: 'acceptance-gate', status: report.status });
+
+    return {
+        acceptance: report,
+        unrecoverable: report.unrecoverable ? { flag: true, reason: report.unrecoverableReason ?? 'unknown' } : null,
+        bugs: acceptanceBugs,
+        phase: 'acceptance-gate' as PhaseName,
+        transcript,
+    };
+}
+
+// ─── 11. Finalize ───────────────────────────────────────────────────────────
 
 const finalLog = getLogger('[Finalize]', 46);
 
@@ -1671,21 +2345,51 @@ export async function finalizeNode(state: ProjectStateType): Promise<Partial<Pro
         }
     }
 
-    // ── Mark run as completed (or cancelled if HITL denied) ───────────────
-    const finalStatus = state.cancelled ? 'cancelled' : 'completed';
-    tokenTracker.setRunStatus(finalStatus);
+    // ── Terminal status — the acceptance gate drives this (Plan 19 Sub-Plan 03) ──
+    const acceptance = state.acceptance ?? evaluateAcceptance(state);
+    type ManifestStatus = 'completed' | 'failed' | 'crashed' | 'cancelled' | 'partial' | 'inconclusive';
+    const finalStatus: ManifestStatus =
+        state.cancelled                      ? 'cancelled'
+      : RUN_FAIL_POLICY === 'legacy'         ? 'completed'
+      : acceptance.status === 'accepted'     ? 'completed'
+      : acceptance.status === 'partial'      ? 'partial'
+      : acceptance.status === 'inconclusive' ? 'inconclusive'
+      :                                        'failed';
+    tokenTracker.setRunStatus(finalStatus as any);
     if (state.cancelled) finalLog.warn('Run was cancelled by HITL deny.');
+    if (finalStatus === 'failed') finalLog.error(`Run FAILED — ${acceptance.blockers.length} blocker(s)`);
+    if (finalStatus === 'partial') finalLog.warn(`Run PARTIAL — all required criteria passed but optional criteria failed`);
+    if (finalStatus === 'inconclusive') finalLog.warn(`Run INCONCLUSIVE — some verifications could not execute`);
 
     // ── Token usage summary ─────────────────────────────────────────────
     const usageSummary = tokenTracker.getRunSummary();
     const usageSnapshot = tokenTracker.getSnapshot();
 
+    // ── Count files actually on disk vs phantom file-change claims ─────
+    let filesDelivered = 0;
+    let phantomFileChanges = 0;
+    try {
+        let gitRoot: string;
+        try { gitRoot = findGitRoot(state.workspacePath); } catch { gitRoot = state.workspacePath; }
+        const lsOut = gitExec(gitRoot, 'ls-files');
+        if (!lsOut.startsWith('Error:')) {
+            const onDisk = new Set(lsOut.split('\n').filter(Boolean));
+            filesDelivered = onDisk.size;
+            const claimedPaths = new Set(state.fileChanges.map(fc => fc.path));
+            for (const p of claimedPaths) {
+                if (!onDisk.has(p)) phantomFileChanges++;
+            }
+        }
+    } catch { /* best-effort */ }
+
     const summary = [
         `System: ${state.input.systemName}`,
+        `Status: ${finalStatus.toUpperCase()}`,
         `Architecture: ${state.architecture?.style} with ${state.architecture?.components?.length ?? 0} components`,
         `Stories: ${state.userStories.length}, Tasks: ${state.tasks.length}`,
         `Assignments: ${state.assignments.length}`,
-        `File changes: ${state.fileChanges.length}`,
+        `Files delivered: ${filesDelivered}`,
+        `Phantom file changes: ${phantomFileChanges}`,
         `Test reports: ${state.testReports.length}`,
         `Bugs: ${state.bugs.length}`,
         `Artifacts: ${state.artifacts.length}`,
@@ -1769,7 +2473,7 @@ export async function finalizeNode(state: ProjectStateType): Promise<Partial<Pro
         `Final level: ${budget.level}, binding: ${budget.binding}, utilisation: ${(budget.utilisation * 100).toFixed(1)}%`,
     );
 
-    // ── Requirements traceability ────────────────────────────────────────
+    // ── Requirements traceability (Sub-Plan 10) ────────────────────────
     let traceReport: ReturnType<typeof buildTraceabilityReport> | null = null;
     try {
         traceReport = buildTraceabilityReport(state);
@@ -1777,13 +2481,24 @@ export async function finalizeNode(state: ProjectStateType): Promise<Partial<Pro
         summary.push('');
         summary.push(`── AC Coverage ──`);
         summary.push(
-            `AC coverage: ${t.verified}/${t.criteria} verified (${(t.coveragePct * 100).toFixed(0)}%), ${t.implemented} implemented-untested, ${t.missing} missing`,
+            `AC coverage: ${t.verified}/${t.criteria} verified (${(t.verifiedPct * 100).toFixed(0)}%), ` +
+            `implemented ${(t.implementedPct * 100).toFixed(0)}%, delivery score ${t.deliveryScore.toFixed(2)}`,
+        );
+        summary.push(
+            `  ${t.testedFailing} tested-failing, ${t.implemented} implemented-untested, ` +
+            `${t.blocked} blocked, ${t.plannedOnly} planned-only, ${t.missing} missing`,
         );
         if (traceReport.orphanedStories.length > 0) {
             summary.push(`Orphaned stories: ${traceReport.orphanedStories.join(', ')}`);
         }
         if (traceReport.orphanedAssignments.length > 0) {
             summary.push(`Orphaned assignments: ${traceReport.orphanedAssignments.join(', ')}`);
+        }
+        if (traceReport.orphanedTasks.length > 0) {
+            summary.push(`Orphaned tasks: ${traceReport.orphanedTasks.join(', ')}`);
+        }
+        if (traceReport.unassignedTasks.length > 0) {
+            summary.push(`Unassigned tasks: ${traceReport.unassignedTasks.join(', ')}`);
         }
     } catch (traceErr: any) {
         finalLog.warn(`Traceability report failed (non-fatal): ${traceErr.message}`);
@@ -1883,7 +2598,7 @@ export async function finalizeNode(state: ProjectStateType): Promise<Partial<Pro
         content: usageReportLines.join('\n'),
     });
 
-    // ── Requirements traceability artifact ─────────────────────────────
+    // ── Requirements traceability artifact (Sub-Plan 10) ────────────────
     if (traceReport) {
         const traceMd = renderTraceabilityMarkdown(traceReport);
         writeArtifact({
@@ -1901,6 +2616,16 @@ export async function finalizeNode(state: ProjectStateType): Promise<Partial<Pro
         } catch (err: any) {
             finalLog.warn(`Failed to write traceability.md: ${err.message}`);
         }
+        // Write machine-readable outputs/<run>/traceability.json
+        if (TRACEABILITY_JSON) {
+            try {
+                const traceJsonPath = path.join(state.outputPath, 'traceability.json');
+                fs.writeFileSync(traceJsonPath, JSON.stringify(traceReport, null, 2), 'utf-8');
+                finalLog.info(`Traceability JSON: ${traceJsonPath}`);
+            } catch (err: any) {
+                finalLog.warn(`Failed to write traceability.json: ${err.message}`);
+            }
+        }
     }
 
     // ── HTML token usage report + raw JSON ──────────────────────────────
@@ -1913,24 +2638,139 @@ export async function finalizeNode(state: ProjectStateType): Promise<Partial<Pro
     finalLog.info(`Token usage JSON: ${jsonPath}`);
     finalLog.info(`Token usage HTML report: ${htmlPath}`);
 
+    // ── Acceptance blockers in the final log ────────────────────────────
+    if (acceptance.blockers.length > 0) {
+        summary.push('');
+        summary.push(`── Acceptance Blockers ──`);
+        for (const b of acceptance.blockers) {
+            summary.push(`  - ${b}`);
+        }
+    }
+
     // ── Write state snapshot and run manifest ─────────────────────────────
     writeStateSnapshot(state.outputPath, state);
+    const latestGR = state.latestGateReport;
     writeRunManifest(state.outputPath, state, finalStatus, {
         traceability: traceReport ? {
             criteria: traceReport.totals.criteria,
             verified: traceReport.totals.verified,
             implemented: traceReport.totals.implemented,
             missing: traceReport.totals.missing,
-            coveragePct: traceReport.totals.coveragePct,
+            coveragePct: traceReport.totals.verifiedPct,
+            verifiedPct: traceReport.totals.verifiedPct,
+            implementedPct: traceReport.totals.implementedPct,
+            deliveryScore: traceReport.totals.deliveryScore,
+            testedFailing: traceReport.totals.testedFailing,
+            blocked: traceReport.totals.blocked,
             orphanedStories: traceReport.orphanedStories,
             orphanedAssignments: traceReport.orphanedAssignments,
+            orphanedTasks: traceReport.orphanedTasks,
         } : undefined,
+        acceptance: {
+            status: acceptance.status,
+            blockers: acceptance.blockers,
+            criteria: acceptance.criteria.map(c => ({
+                id: c.id,
+                required: c.required,
+                passed: c.passed,
+                inconclusive: c.inconclusive,
+                detail: c.detail,
+            })),
+            unrecoverable: acceptance.unrecoverable,
+            unrecoverableReason: acceptance.unrecoverableReason,
+        },
+        verification: {
+            gateReportPassed: latestGR?.passed,
+            gateReportInconclusive: latestGR?.inconclusive,
+            productVerifyPassed: latestGR?.productVerify?.passed,
+            unresolvedReferences: latestGR?.productVerify?.resolveIssues.length,
+            integrityFindings: (state.bugs ?? []).filter(b => b.id.startsWith('TAMPER-')).length,
+        },
+        phantomFileChanges,
+        filesDelivered,
     });
 
-    emitRunEvent('phase:end', { phase: 'finalize', totalTokens: usageSummary.totalTokens, totalCalls: usageSummary.totalCalls });
+    // ── Ledger: acceptance entry ────────────────────────────────────────
+    appendLedger({
+        kind: 'acceptance',
+        status: acceptance.status,
+        blockers: acceptance.blockers,
+        unrecoverable: acceptance.unrecoverable,
+    });
+
+    // ── Run invariants ───────────────────────────────────────────────────
+    let invariantViolations: Array<{ id: string; phase: string; detail: string }> = [];
+    try {
+        invariantViolations = checkInvariants(state, 'finalize');
+    } catch (err: any) {
+        finalLog.warn(`Invariant check threw: ${err.message}`);
+    }
+
+    // ── Coverage ledger entry ────────────────────────────────────────────
+    if (traceReport) {
+        appendLedger({
+            kind: 'coverage',
+            verifiedPct: traceReport.totals.verifiedPct,
+            implementedPct: traceReport.totals.implementedPct,
+            deliveryScore: traceReport.totals.deliveryScore,
+            missing: traceReport.totals.missing,
+            blocked: traceReport.totals.blocked,
+        });
+    }
+
+    // ── Plan funnel ledger entry ─────────────────────────────────────────
+    {
+        const assignedStoryIds = new Set<string>();
+        for (const a of state.assignments) {
+            assignedStoryIds.add(a.storyId);
+            if ('additionalStoryIds' in a && Array.isArray((a as any).additionalStoryIds)) {
+                for (const sid of (a as any).additionalStoryIds) assignedStoryIds.add(sid);
+            }
+        }
+        const assignedTaskIds = new Set<string>();
+        for (const a of state.assignments) {
+            if ('taskIds' in a && Array.isArray((a as any).taskIds)) {
+                for (const tid of (a as any).taskIds) assignedTaskIds.add(tid);
+            }
+        }
+        const totalAc = state.userStories.reduce((sum, s) => sum + (s.acceptanceCriteria?.length ?? 0), 0);
+        appendLedger({
+            kind: 'plan-funnel',
+            epics: state.epics.length,
+            stories: state.userStories.length,
+            criteria: totalAc,
+            tasks: state.tasks.length,
+            assignments: state.assignments.length,
+            unassignedStories: state.userStories.map(s => s.id).filter(id => !assignedStoryIds.has(id)),
+            unassignedTasks: state.tasks.map(t => t.id).filter(id => !assignedTaskIds.has(id)),
+        });
+    }
+
+    // ── Generate run report from ledger ──────────────────────────────────
+    appendLedger({ kind: 'phase', phase: 'finalize', event: 'end' });
+    try {
+        const reportPath = generateRunReport(state.outputPath, state.input.systemName);
+        finalLog.info(`Run report: ${reportPath}`);
+    } catch (err: any) {
+        finalLog.warn(`Failed to generate run report: ${err.message}`);
+    }
+
+    // Status-aware final log line
+    const statusLine = finalStatus === 'completed'
+        ? `Run finished: COMPLETED — product accepted.`
+        : finalStatus === 'failed'
+        ? `Run finished: FAILED — ${acceptance.blockers.length} blocker(s). See outputs/<run>/run-manifest.json → acceptance.blockers`
+        : finalStatus === 'partial'
+        ? `Run finished: PARTIAL — required criteria passed, ${acceptance.criteria.filter(c => !c.required && !c.passed).length} optional criteria failed.`
+        : finalStatus === 'inconclusive'
+        ? `Run finished: INCONCLUSIVE — some verifications could not execute.`
+        : `Run finished: ${finalStatus.toUpperCase()}`;
+
+    emitRunEvent('phase:end', { phase: 'finalize', totalTokens: usageSummary.totalTokens, totalCalls: usageSummary.totalCalls, status: finalStatus });
     return {
         phase: 'finalize' as PhaseName,
         tokenUsage: usageSnapshot,
-        transcript: [msg('conductor', 'finalize', `Run complete. Total tokens: ${usageSummary.totalTokens.toLocaleString()} across ${usageSummary.totalCalls} LLM calls. Reports: ${htmlPath}`)],
+        transcript: [msg('conductor', 'finalize', statusLine)],
+        invariantViolations,
     };
 }

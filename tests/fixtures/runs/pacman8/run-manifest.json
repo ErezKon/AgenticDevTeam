@@ -1,0 +1,72 @@
+{
+  "generatedAt": "2026-08-10T20:20:21.334Z",
+  "status": "completed",
+  "systemName": "Pacman8",
+  "runType": "greenfield",
+  "finalPhase": "e2e",
+  "tokenUsage": {
+    "totalCalls": 1421,
+    "totalTokens": 5416745,
+    "totalInputTokens": 5165110,
+    "totalOutputTokens": 251635
+  },
+  "budget": {
+    "level": "ok",
+    "binding": "none",
+    "utilisation": 0,
+    "usedTokens": 5416745,
+    "estCostUsd": 34.010279999999995,
+    "elapsedMs": 4903240
+  },
+  "counts": {
+    "epics": 10,
+    "userStories": 20,
+    "tasks": 26,
+    "assignments": 10,
+    "fileChanges": 43,
+    "testReports": 8,
+    "bugs": 12,
+    "pullRequests": 5,
+    "artifacts": 18
+  },
+  "files": {
+    "stateJson": "state.json",
+    "runLog": "run.log",
+    "tokenReportHtml": "***REDACTED***",
+    "tokenReportJson": "***REDACTED***",
+    "traceabilityMd": "traceability.md"
+  },
+  "eventCount": 500,
+  "traceability": {
+    "criteria": 45,
+    "verified": 0,
+    "implemented": 2,
+    "missing": 41,
+    "coveragePct": 0,
+    "orphanedStories": [
+      "US-002",
+      "US-003",
+      "US-004",
+      "US-005",
+      "US-006",
+      "US-007",
+      "US-008",
+      "US-009",
+      "US-010",
+      "US-011",
+      "US-012",
+      "US-013",
+      "US-014",
+      "US-015",
+      "US-016",
+      "US-017",
+      "US-018",
+      "US-999"
+    ],
+    "orphanedAssignments": [
+      "BUGFIX-1-ASSIGN-008",
+      "BUGFIX-1-ASSIGN-009",
+      "BUGFIX-1-ASSIGN-010"
+    ]
+  }
+}

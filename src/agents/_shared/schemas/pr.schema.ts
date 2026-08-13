@@ -36,7 +36,7 @@ export const PullRequestSchema = z.object({
     authorAgentId: z.string().describe('Developer agent who created the PR'),
     reviewerAgentIds: z.array(z.string()).describe('Assigned reviewer agent IDs'),
     reviews: z.array(PRReviewSchema).describe('Review history'),
-    status: z.enum(['open', 'approved', 'merged', 'closed', 'escalated_open']),
+    status: z.enum(['open', 'approved', 'merged', 'closed', 'escalated_open', 'blocked']),
     assignmentIds: z.array(z.string()).describe('Assignment IDs covered by this PR'),
     taskType: z.enum(['feature', 'bug', 'fix', 'refactor', 'chore']).describe('Type of work'),
     currentState: z.string().optional().describe('For bug/fix/refactor: description of current state before changes'),

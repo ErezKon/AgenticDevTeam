@@ -22,7 +22,7 @@ jest.mock('../src/agents/qa/qa.agents', () => ({
             messages: [{ role: 'assistant', content: JSON.stringify({
                 testPlan: {
                     scope: 'Full test coverage for calculator',
-                    unit: [{ target: 'Calculator', description: 'test-1', framework: 'jest' }],
+                    unit: [{ target: 'Calculator', description: 'test-1', framework: 'jest', storyId: 'US-001', acIndex: 0 }],
                     integration: [],
                     e2e: [],
                     coverageTargets: { unit: 80, integration: 60, e2e: 40 },
@@ -81,8 +81,10 @@ jest.mock('../src/conductor/devops-verify', () => ({
         healthChecks: [],
         containerNames: [],
         logs: '',
+        mode: 'none',
     }),
     teardownDeployment: jest.fn().mockResolvedValue(undefined),
+    chooseDeploymentMode: jest.fn().mockReturnValue('none'),
 }));
 
 // Mock retryWithBackoff to just call the function directly (no retries in tests)
@@ -171,6 +173,24 @@ function makeMinimalState(overrides: Partial<ProjectStateType> = {}): ProjectSta
         transcript: [],
         tokenUsage: [],
         configBaseline: null,
+        acceptance: null,
+        latestGateReport: null,
+        unrecoverable: null,
+        verificationErrors: [],
+        dispatchRounds: [],
+        attemptedBugIds: [],
+        bugAttempts: {},
+        outputIntegrity: [],
+        planViolations: [],
+        repoContract: null,
+        completionEvidence: [],
+        salvageBranches: [],
+        phantomFileChanges: [],
+        qaClaimDiscrepancies: [],
+        e2eStatus: 'not-run' as const,
+        e2eSkipReason: null,
+        e2eEvidence: null,
+        invariantViolations: [],
         ...overrides,
     };
 }
@@ -205,8 +225,8 @@ describe('QA Node Resilience', () => {
         // devopsNode must NOT throw — it should catch the error gracefully
         const result = await devopsNode(state);
 
-        // Must still transition to e2e (then e2e → finalize) so the token report is written
-        expect(result.phase).toBe('e2e');
+        // Must still return (not throw) — the graph routes devops → e2e → finalize
+        expect(result.phase).toBe('devops');
 
         // Should have a transcript entry about the failure
         expect(result.transcript).toBeDefined();
@@ -216,10 +236,13 @@ describe('QA Node Resilience', () => {
         expect(failureEntry).toBeDefined();
         expect(failureEntry!.message).toContain('Recursion limit');
 
-        // Should return safe defaults for devopsPlan
+        // Should return safe defaults for devopsPlan.
+        // Sub-Plan 11: agent claims are always overwritten by verification.
+        // The mock returns buildStatus: 'skipped' (no Docker), so the agent's
+        // 'failed' is correctly replaced with the verified 'skipped'.
         expect(result.devopsPlan).toBeDefined();
-        expect(result.devopsPlan!.buildStatus).toBe('failed');
-        expect(result.devopsPlan!.runStatus).toBe('failed');
+        expect(result.devopsPlan!.buildStatus).toBe('skipped');
+        expect(result.devopsPlan!.runStatus).toBe('skipped');
     });
 
     it('qaNode should still produce test reports and artifacts from QA Lead even when QA Unit fails', async () => {
@@ -229,7 +252,7 @@ describe('QA Node Resilience', () => {
 
         // Test plan from QA Lead should still be set
         expect(result.testPlan).toBeDefined();
-        expect(result.testPlan!.unit).toEqual([{ target: 'Calculator', description: 'test-1', framework: 'jest' }]);
+        expect(result.testPlan!.unit).toEqual([{ target: 'Calculator', description: 'test-1', framework: 'jest', storyId: 'US-001', acIndex: 0 }]);
 
         // Bugs array should exist (empty since QA Unit failed before producing any)
         expect(result.bugs).toBeDefined();

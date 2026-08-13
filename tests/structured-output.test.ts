@@ -293,16 +293,14 @@ describe('buildRepairMessage', () => {
         expect(msg).toContain(previousRaw);
     });
 
-    test('clips previousRaw to 4000 chars', () => {
+    test('middle-clips previousRaw over 16k chars', () => {
         const issues = '- status: Required';
-        const bigRaw = 'x'.repeat(6000);
+        const bigRaw = 'x'.repeat(20000);
         const msg = buildRepairMessage(issues, 'original request', bigRaw);
         expect(msg).toContain('Your previous (invalid) JSON:');
-        expect(msg).toContain('2000 chars truncated');
-        // Should contain first 4000 chars
-        expect(msg).toContain('x'.repeat(4000));
-        // Should NOT contain all 6000
-        expect(msg).not.toContain('x'.repeat(6000));
+        expect(msg).toContain('omitted');
+        // Should NOT contain the full 20000-char run
+        expect(msg).not.toContain('x'.repeat(20000));
     });
 
     test('does not add previousRaw section when not supplied', () => {

@@ -9,7 +9,7 @@ import type { StructuredToolInterface } from '@langchain/core/tools';
 import { z } from 'zod';
 import type { BaseMessage } from '@langchain/core/messages';
 import { RunnableLambda } from '@langchain/core/runnables';
-import { LLM_BASE_URL, LLM_MODEL, RESPONSE_SCHEMA_COMPACT, RESPONSE_SCHEMA_STRIP_ALL_DESCRIPTIONS, HISTORY_COMPACTION_ENABLED, LLM_JSON_MODE } from '../../config';
+import { LLM_BASE_URL, LLM_MODEL, RESPONSE_SCHEMA_COMPACT, RESPONSE_SCHEMA_STRIP_ALL_DESCRIPTIONS, HISTORY_COMPACTION_ENABLED, LLM_JSON_MODE, LLM_MAX_OUTPUT_TOKENS, LLM_REQUEST_TIMEOUT_MS } from '../../config';
 import { getAccessToken } from '../../utils/oauth-auth.util';
 import { throttledFetch } from '../../utils/llm-throttle';
 import { cassetteFetch, LLM_CASSETTE_MODE } from '../../utils/llm-cassette';
@@ -33,12 +33,17 @@ export interface AgentConfig {
     temperature?: number;
     /** Model override (default from config.LLM_MODEL). */
     model?: string;
-    /** Timeout in ms per LLM call (default 120000). */
+    /** Timeout in ms per LLM call (default LLM_REQUEST_TIMEOUT_MS). */
     timeout?: number;
     /** Pipeline phase for token tracking (e.g. "architect", "development"). */
     phase?: string;
     /** Max total tool calls before the loop guard poisons all tools (default 22, dev agents should use higher). */
     maxToolCalls?: number;
+    /** Max output tokens for this agent (overrides LLM_MAX_OUTPUT_TOKENS). */
+    maxOutputTokens?: number;
+    /** If true, .describe() strings are preserved in the JSON Schema injected into the prompt.
+     *  Planning agents need these for semantic guidance (P6). */
+    keepSchemaDescriptions?: boolean;
 }
 
 /**
@@ -76,7 +81,8 @@ export function buildAgent(apiKey: string, cfg: AgentConfig) {
         // multiplied request volume (5 x 6 = 30 HTTP calls per logical call) and
         // sustained the 429 storm seen in runs 5 & 6.
         maxRetries: 0,
-        timeout: cfg.timeout ?? 120000,
+        maxTokens: cfg.maxOutputTokens ?? LLM_MAX_OUTPUT_TOKENS,
+        timeout: cfg.timeout ?? LLM_REQUEST_TIMEOUT_MS,
         openAIApiKey: apiKey,
         apiKey: apiKey,
         configuration: {
@@ -97,11 +103,11 @@ export function buildAgent(apiKey: string, cfg: AgentConfig) {
     if (cfg.responseFormat) {
         const rawSchema = z.toJSONSchema(cfg.responseFormat);
         let jsonSchema: string;
-        if (RESPONSE_SCHEMA_STRIP_ALL_DESCRIPTIONS) {
+        if (RESPONSE_SCHEMA_STRIP_ALL_DESCRIPTIONS && !cfg.keepSchemaDescriptions) {
             // Strip ALL descriptions and noise for maximum token savings
             const compacted = stripAllSchemaDescriptions(rawSchema);
             jsonSchema = JSON.stringify(compacted);
-        } else if (RESPONSE_SCHEMA_COMPACT) {
+        } else if (RESPONSE_SCHEMA_COMPACT && !cfg.keepSchemaDescriptions) {
             // Strip deep description fields and emit compact JSON to save tokens
             const compacted = stripDeepDescriptions(rawSchema, 0);
             jsonSchema = JSON.stringify(compacted);

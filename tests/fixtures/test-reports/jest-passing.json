@@ -1,0 +1,136 @@
+{
+  "numTotalTests": 16,
+  "numPassedTests": 12,
+  "numFailedTests": 3,
+  "numPendingTests": 1,
+  "success": false,
+  "testResults": [
+    {
+      "testFilePath": "/tmp/project/src/__tests__/game.test.ts",
+      "testResults": [
+        {
+          "ancestorTitles": ["Game Engine"],
+          "title": "[US-001#0] initializes with default state",
+          "status": "passed",
+          "duration": 12,
+          "failureMessages": []
+        },
+        {
+          "ancestorTitles": ["Game Engine"],
+          "title": "[US-001#1] moves player in valid direction",
+          "status": "passed",
+          "duration": 8,
+          "failureMessages": []
+        },
+        {
+          "ancestorTitles": ["Game Engine"],
+          "title": "[US-002#0] renders the maze",
+          "status": "passed",
+          "duration": 15,
+          "failureMessages": []
+        },
+        {
+          "ancestorTitles": ["Game Engine"],
+          "title": "[US-003#1] eating a dot removes it and increments the score",
+          "status": "passed",
+          "duration": 5,
+          "failureMessages": []
+        },
+        {
+          "ancestorTitles": ["Game Engine"],
+          "title": "[US-003#-1] score tracking works end-to-end",
+          "status": "passed",
+          "duration": 22,
+          "failureMessages": []
+        },
+        {
+          "ancestorTitles": ["Game Engine"],
+          "title": "untagged test for internal logic",
+          "status": "passed",
+          "duration": 3,
+          "failureMessages": []
+        }
+      ]
+    },
+    {
+      "testFilePath": "/tmp/project/src/__tests__/input.test.ts",
+      "testResults": [
+        {
+          "ancestorTitles": ["Input Handler"],
+          "title": "[US-001#2] handles keyboard input",
+          "status": "passed",
+          "duration": 6,
+          "failureMessages": []
+        },
+        {
+          "ancestorTitles": ["Input Handler"],
+          "title": "[US-001#2] debounces rapid input",
+          "status": "passed",
+          "duration": 4,
+          "failureMessages": []
+        },
+        {
+          "ancestorTitles": ["Input Handler"],
+          "title": "[US-004#0] handles touch input on mobile",
+          "status": "failed",
+          "duration": 18,
+          "failureMessages": ["Error: Touch events not supported in test environment\n    at Object.<anonymous> (src/__tests__/input.test.ts:45:5)"]
+        },
+        {
+          "ancestorTitles": ["Input Handler"],
+          "title": "handles edge case input",
+          "status": "passed",
+          "duration": 2,
+          "failureMessages": []
+        }
+      ]
+    },
+    {
+      "testFilePath": "/tmp/project/src/__tests__/renderer.test.ts",
+      "testResults": [
+        {
+          "ancestorTitles": ["Renderer"],
+          "title": "[US-002#1] renders sprites correctly",
+          "status": "passed",
+          "duration": 10,
+          "failureMessages": []
+        },
+        {
+          "ancestorTitles": ["Renderer"],
+          "title": "[US-002#2] clears canvas on each frame",
+          "status": "passed",
+          "duration": 7,
+          "failureMessages": []
+        },
+        {
+          "ancestorTitles": ["Renderer"],
+          "title": "[US-005#0] displays game over screen",
+          "status": "failed",
+          "duration": 14,
+          "failureMessages": ["Expected: 'Game Over'\nReceived: undefined"]
+        },
+        {
+          "ancestorTitles": ["Renderer"],
+          "title": "[US-005#1] shows final score on game over",
+          "status": "failed",
+          "duration": 11,
+          "failureMessages": ["AssertionError: expected null not to be null"]
+        },
+        {
+          "ancestorTitles": ["Renderer"],
+          "title": "[US-002#-1] renderer initializes without errors",
+          "status": "pending",
+          "duration": null,
+          "failureMessages": []
+        },
+        {
+          "ancestorTitles": ["Renderer"],
+          "title": "[US-002#3] supports animation frames",
+          "status": "passed",
+          "duration": 9,
+          "failureMessages": []
+        }
+      ]
+    }
+  ]
+}

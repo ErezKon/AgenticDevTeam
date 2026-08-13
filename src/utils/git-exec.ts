@@ -41,6 +41,39 @@ export function gitExec(workspacePath: string, args: string): string {
 }
 
 /**
+ * Run a git command and return structured output including stderr.
+ *
+ * Unlike `gitExec`, this variant returns an object with stdout, stderr,
+ * and exit code so callers can produce diagnostic error messages instead
+ * of the opaque `"Error: "` string observed in pacman8.
+ */
+export function gitExecVerbose(
+    workspacePath: string,
+    args: string,
+): { ok: boolean; stdout: string; stderr: string; code: number } {
+    try {
+        const stdout = execSync(`git ${args}`, {
+            cwd: workspacePath, encoding: 'utf-8',
+            timeout: 30_000, maxBuffer: 1024 * 1024 * 5,
+            env: {
+                ...process.env,
+                GIT_TERMINAL_PROMPT: '0', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null',
+                GIT_AUTHOR_NAME: GIT_USER_NAME, GIT_AUTHOR_EMAIL: GIT_USER_EMAIL,
+                GIT_COMMITTER_NAME: GIT_USER_NAME, GIT_COMMITTER_EMAIL: GIT_USER_EMAIL,
+            },
+        }).trim();
+        return { ok: true, stdout, stderr: '', code: 0 };
+    } catch (err: any) {
+        return {
+            ok: false,
+            stdout: err.stdout?.toString().trim() ?? '',
+            stderr: err.stderr?.toString().trim() ?? err.message,
+            code: err.status ?? 1,
+        };
+    }
+}
+
+/**
  * Push the current HEAD to `refs/heads/<branchName>` on the remote,
  * authenticating via the token in `gitContext` (falls back to env vars).
  *

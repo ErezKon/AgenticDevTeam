@@ -18,6 +18,10 @@ function makeTestReport(status: 'pass' | 'fail', overrides: Record<string, any> 
         failed: status === 'pass' ? 0 : 1,
         skipped: 0,
         status,
+        source: 'quality-gates' as const,
+        iterationIndex: 0,
+        runnerError: false,
+        cases: [],
         failures: status === 'fail' ? [{ testName: 'test-1', error: 'assertion failed' }] : [],
         agentId: 'qa-unit',
         ...overrides,
@@ -66,6 +70,24 @@ function makeMinimalState(overrides: Partial<ProjectStateType> = {}): ProjectSta
         transcript: [],
         tokenUsage: [],
         configBaseline: null,
+        acceptance: null,
+        latestGateReport: null,
+        unrecoverable: null,
+        verificationErrors: [],
+        dispatchRounds: [],
+        attemptedBugIds: [],
+        bugAttempts: {},
+        outputIntegrity: [],
+        planViolations: [],
+        repoContract: null,
+        completionEvidence: [],
+        salvageBranches: [],
+        phantomFileChanges: [],
+        qaClaimDiscrepancies: [],
+        e2eStatus: 'not-run' as const,
+        e2eSkipReason: null,
+        e2eEvidence: null,
+        invariantViolations: [],
         ...overrides,
     };
 }
@@ -77,7 +99,7 @@ describe('afterE2eRouter', () => {
         jest.resetModules();
     });
 
-    it('returns "finalize" when E2E_BUGFIX_ENABLED=false (default) regardless of failures', () => {
+    it('returns "acceptance" when E2E_BUGFIX_ENABLED=false (default) regardless of failures', () => {
         jest.mock('../src/config', () => ({
             ...jest.requireActual('../src/config'),
             E2E_BUGFIX_ENABLED: false,
@@ -90,7 +112,7 @@ describe('afterE2eRouter', () => {
             iteration: { bugfix: 0 },
         });
 
-        expect(afterE2eRouter(state)).toBe('finalize');
+        expect(afterE2eRouter(state)).toBe('acceptance-gate');
     });
 
     it('returns "bugfix-triage" when E2E_BUGFIX_ENABLED=true with failures and iterations remaining', () => {
@@ -102,14 +124,14 @@ describe('afterE2eRouter', () => {
 
         const { afterE2eRouter } = require('../src/conductor/graph');
         const state = makeMinimalState({
-            testReports: [makeTestReport('fail', { type: 'e2e', agentId: 'qa-e2e' })],
+            testReports: [makeTestReport('fail', { type: 'e2e', agentId: 'qa-e2e', source: 'executed', iterationIndex: 1 })],
             iteration: { bugfix: 1 },
         });
 
         expect(afterE2eRouter(state)).toBe('bugfix-triage');
     });
 
-    it('returns "finalize" when E2E_BUGFIX_ENABLED=true but max iterations reached', () => {
+    it('returns "acceptance" when E2E_BUGFIX_ENABLED=true but max iterations reached', () => {
         jest.mock('../src/config', () => ({
             ...jest.requireActual('../src/config'),
             E2E_BUGFIX_ENABLED: true,
@@ -122,10 +144,10 @@ describe('afterE2eRouter', () => {
             iteration: { bugfix: 3 },
         });
 
-        expect(afterE2eRouter(state)).toBe('finalize');
+        expect(afterE2eRouter(state)).toBe('acceptance-gate');
     });
 
-    it('returns "finalize" when E2E_BUGFIX_ENABLED=true but no failures', () => {
+    it('returns "acceptance-gate" when E2E_BUGFIX_ENABLED=true but no failures', () => {
         jest.mock('../src/config', () => ({
             ...jest.requireActual('../src/config'),
             E2E_BUGFIX_ENABLED: true,
@@ -138,10 +160,10 @@ describe('afterE2eRouter', () => {
             iteration: { bugfix: 0 },
         });
 
-        expect(afterE2eRouter(state)).toBe('finalize');
+        expect(afterE2eRouter(state)).toBe('acceptance-gate');
     });
 
-    it('returns "finalize" when E2E_BUGFIX_ENABLED=true but no test reports', () => {
+    it('returns "acceptance-gate" when E2E_BUGFIX_ENABLED=true but no test reports', () => {
         jest.mock('../src/config', () => ({
             ...jest.requireActual('../src/config'),
             E2E_BUGFIX_ENABLED: true,
@@ -154,7 +176,7 @@ describe('afterE2eRouter', () => {
             iteration: { bugfix: 0 },
         });
 
-        expect(afterE2eRouter(state)).toBe('finalize');
+        expect(afterE2eRouter(state)).toBe('acceptance-gate');
     });
 });
 
@@ -195,10 +217,27 @@ describe('afterQaRouter', () => {
         expect(afterQaRouter(state)).toBe('devops');
     });
 
-    it('returns "devops" when max iterations reached even with failures', () => {
+    it('routes to "acceptance-gate" when max iterations reached with failures and RUN_FAIL_POLICY=halt', () => {
         jest.mock('../src/config', () => ({
             ...jest.requireActual('../src/config'),
             MAX_BUGFIX_ITERATIONS: 3,
+            RUN_FAIL_POLICY: 'halt',
+        }));
+
+        const { afterQaRouter } = require('../src/conductor/graph');
+        const state = makeMinimalState({
+            testReports: [makeTestReport('fail')],
+            iteration: { bugfix: 3 },
+        });
+
+        expect(afterQaRouter(state)).toBe('acceptance-gate');
+    });
+
+    it('routes to "devops" when max iterations reached with failures and RUN_FAIL_POLICY=finalize', () => {
+        jest.mock('../src/config', () => ({
+            ...jest.requireActual('../src/config'),
+            MAX_BUGFIX_ITERATIONS: 3,
+            RUN_FAIL_POLICY: 'finalize',
         }));
 
         const { afterQaRouter } = require('../src/conductor/graph');
@@ -208,6 +247,23 @@ describe('afterQaRouter', () => {
         });
 
         expect(afterQaRouter(state)).toBe('devops');
+    });
+
+    it('routes to "finalize" when unrecoverable and RUN_FAIL_POLICY=halt', () => {
+        jest.mock('../src/config', () => ({
+            ...jest.requireActual('../src/config'),
+            MAX_BUGFIX_ITERATIONS: 3,
+            RUN_FAIL_POLICY: 'halt',
+        }));
+
+        const { afterQaRouter } = require('../src/conductor/graph');
+        const state = makeMinimalState({
+            testReports: [makeTestReport('fail')],
+            iteration: { bugfix: 0 },
+            unrecoverable: { flag: true, reason: 'test' },
+        });
+
+        expect(afterQaRouter(state)).toBe('finalize');
     });
 });
 
@@ -245,5 +301,94 @@ describe('afterIntakeRouter', () => {
         const state = makeMinimalState();
 
         expect(afterIntakeRouter(state)).toBe('architect');
+    });
+});
+
+// ─── afterAcceptanceRouter tests ────────────────────────────────────────────
+
+describe('afterAcceptanceRouter', () => {
+    afterEach(() => {
+        jest.resetModules();
+    });
+
+    it('returns "finalize" when acceptance status is "accepted"', () => {
+        jest.mock('../src/config', () => ({
+            ...jest.requireActual('../src/config'),
+            MAX_BUGFIX_ITERATIONS: 3,
+        }));
+
+        const { afterAcceptanceRouter } = require('../src/conductor/graph');
+        const state = makeMinimalState({
+            acceptance: {
+                status: 'accepted',
+                criteria: [],
+                blockers: [],
+                unrecoverable: false,
+            },
+            iteration: { bugfix: 0 },
+        });
+
+        expect(afterAcceptanceRouter(state)).toBe('finalize');
+    });
+
+    it('returns "bugfix-triage" when acceptance status is "rejected" and iterations remain', () => {
+        jest.mock('../src/config', () => ({
+            ...jest.requireActual('../src/config'),
+            MAX_BUGFIX_ITERATIONS: 3,
+        }));
+
+        const { afterAcceptanceRouter } = require('../src/conductor/graph');
+        const state = makeMinimalState({
+            acceptance: {
+                status: 'rejected',
+                criteria: [],
+                blockers: ['BUILD: build failed'],
+                unrecoverable: false,
+            },
+            iteration: { bugfix: 0 },
+        });
+
+        expect(afterAcceptanceRouter(state)).toBe('bugfix-triage');
+    });
+
+    it('returns "finalize" when acceptance status is "rejected" but unrecoverable', () => {
+        jest.mock('../src/config', () => ({
+            ...jest.requireActual('../src/config'),
+            MAX_BUGFIX_ITERATIONS: 3,
+        }));
+
+        const { afterAcceptanceRouter } = require('../src/conductor/graph');
+        const state = makeMinimalState({
+            acceptance: {
+                status: 'rejected',
+                criteria: [],
+                blockers: ['BUILD: build failed'],
+                unrecoverable: true,
+                unrecoverableReason: 'zero progress',
+            },
+            iteration: { bugfix: 0 },
+        });
+
+        expect(afterAcceptanceRouter(state)).toBe('finalize');
+    });
+
+    it('returns "finalize" when acceptance status is "rejected" and max iterations reached', () => {
+        jest.mock('../src/config', () => ({
+            ...jest.requireActual('../src/config'),
+            MAX_BUGFIX_ITERATIONS: 3,
+        }));
+
+        const { afterAcceptanceRouter } = require('../src/conductor/graph');
+        const state = makeMinimalState({
+            acceptance: {
+                status: 'rejected',
+                criteria: [],
+                blockers: ['BUILD: build failed'],
+                unrecoverable: false,
+            },
+            iteration: { bugfix: 3 },
+        });
+
+        expect(afterAcceptanceRouter(state)).toBe('finalize');
     });
 });

@@ -72,7 +72,7 @@ src/
     security-gates.ts              # Secret scan + dependency audit + licence check
     workspace-sync.ts              # Git sync after squash merges
     assignment-policy.ts           # Prevent re-dispatch of completed assignments
-    review-policy.ts               # Blocking severity + no-progress detection
+    review-policy.ts               # Fail-closed review: ReviewOutcome, decideMerge, escalation, quorum (Sub-Plan 07)
     devops-verify.ts               # Real Docker build/run/health-check
     file-checkpointer.ts           # Persistent checkpoints for crash recovery
 
@@ -200,7 +200,7 @@ intake -> [codebase-analyzer] -> architect -> product-manager -> dba -> team-lea
 
 - `[codebase-analyzer]` only runs in maintain mode.
 - `[bugfix-triage -> development]*` loops up to `MAX_BUGFIX_ITERATIONS` (default 3).
-- E2E bugfix looping is disabled by default (`E2E_BUGFIX_ENABLED=false`).
+- E2E bugfix looping is enabled by default (`E2E_BUGFIX_ENABLED=true`; was `false` pre-Plan-19-11).
 
 ### Phase Details
 
@@ -213,10 +213,10 @@ intake -> [codebase-analyzer] -> architect -> product-manager -> dba -> team-lea
 | 4 | **DBA** | `dbaNode` | Design database entities, relationships, indexes, migration scripts, ERD diagram |
 | 5 | **Team Leader** | `teamLeaderNode` | Assign tasks to developers with rank-based reviewer selection, branch naming, dependencies |
 | 6 | **Development** | `developmentNode` | Fan-out assignments to dev agents via `dispatchDevelopers` with topological sorting and concurrency control. Each branch goes through the full PR workflow |
-| 7 | **QA** | `qaNode` | QA Lead creates test plan -> QA Unit writes & runs tests -> Quality gates (deterministic build/lint/test) -> Security gates (secrets, deps, licences) -> AC coverage gate |
+| 7 | **QA** | `qaNode` | QA Lead creates test plan -> QA Unit writes tests -> **Real test runner** parses runner output (authoritative signal; agent self-report is advisory) -> Test sufficiency gate (min counts, coverage floor, per-story coverage) -> Quality gates (deterministic build/lint/test) -> Security gates (secrets, deps, licences) -> AC coverage gate. QA crash synthesises a bug; testReports is never empty after qaNode. |
 | 8 | **Bug-fix Triage** | `bugfixTriageNode` | Team Leader re-assigns critical/major bugs; namespaced IDs prevent collision |
-| 9 | **DevOps** | `devopsNode` | Generate Dockerfiles, compose, K8s manifests; optionally build/run/health-check via `devops-verify` |
-| 9b | **E2E** | `e2eNode` | Playwright MCP browser tests against running services (only if DevOps produced service URLs) |
+| 9 | **DevOps** | `devopsNode` | Generate Dockerfiles, compose, K8s manifests; fallback Dockerfile generator when agent fails (`DEVOPS_FALLBACK_ENABLED`); always overwrite agent claims with `verifyDeployment` result; synthesise `DEPLOY-BUILD-FAILED`/`DEPLOY-UNHEALTHY` bugs |
+| 9b | **E2E** | `e2eNode` | Playwright MCP browser tests with preflight check. `e2eStatus` state channel: `passed`/`failed`/`skipped-no-services`/`error`. Falls back to `runSmokeTest` when Playwright unavailable or no Docker services but a web root exists (`E2E_ALLOW_LOCAL_SERVER`). Catch path synthesises `E2E-INFRA-FAILED` bug. |
 | 10 | **Finalize** | `finalizeNode` | Tear down containers, write summary, token report (HTML + JSON), traceability matrix, state snapshot, run manifest |
 
 ### Conditional Routing (graph.ts)
@@ -224,7 +224,7 @@ intake -> [codebase-analyzer] -> architect -> product-manager -> dba -> team-lea
 - **afterIntakeRouter**: `maintain` -> `codebase-analyzer`, `greenfield` -> `architect`
 - **rerunRouter**: Each HITL phase can loop back to itself when user selects "enhance"
 - **afterQaRouter**: Test failures + iterations remaining -> `bugfix-triage`, else -> `devops`
-- **afterE2eRouter**: E2E failures + `E2E_BUGFIX_ENABLED` + iterations remaining -> `bugfix-triage`, else -> `finalize`
+- **afterE2eRouter**: E2E failures (type=e2e, source=executed, current iteration) + `E2E_BUGFIX_ENABLED` + iterations remaining -> `bugfix-triage`, else -> `acceptance-gate`
 - **cancel routing**: Any phase can route to `finalize` when `state.cancelled === true`
 
 ---
@@ -315,16 +315,39 @@ The `ProjectState` in `src/conductor/state.ts` is a LangGraph `Annotation.Root` 
 The development phase uses a sophisticated PR workflow for each branch:
 
 1. **Worktree creation** -- `git worktree add .worktrees/<branch>` for parallel isolation
-2. **Dev agent invocation** -- Agent writes code with TDD (tests first), commits with conventional format
+2. **Dev agent invocation** -- Agent writes code with TDD (tests first), commits with conventional format.
+   Every `invokeDevAgent` call wrapped in `try/finally` with `commitWorktree()` to preserve partial work.
 3. **Quality gates** -- Deterministic build/lint/test verification
-4. **Quality gate repair** -- If gates fail, re-invoke dev agent with error output (up to `PR_TEST_REPAIR_ATTEMPTS`)
+4. **Quality gate repair** -- If gates fail, re-invoke dev agent with error output (up to `PR_TEST_REPAIR_ATTEMPTS`).
+   Repair wrapped in `try/finally` with `commitWorktree()`.
 5. **Security gate** (optional) -- Secret scan before PR
-6. **PR creation** -- Via Octokit or curl fallback
-7. **Review loop** -- Sequential per-reviewer; each reviewer sees code after previous fixes
+6. **PR creation** -- Checks for existing open PR first (`findExistingPR`), then creates via Octokit or curl.
+   422 "already exists" errors reuse the existing PR instead of deadlocking. Auth errors (`classifyPrFailure`)
+   are fatal and halt the run immediately.
+7. **Review loop** -- Sequential per-reviewer; each reviewer sees code after previous fixes.
+   Fix agents wrapped in `try/finally` with `commitWorktree()`.
 8. **Fix cycle** -- Dev agent fixes review comments; no-progress detection after 2 unchanged iterations
-9. **Escalation** -- Unresolved CRITICALs escalate to higher-rank dev agent
-10. **Merge** -- Rebase onto base branch, squash merge, delete remote branch
-11. **Worktree cleanup** -- Always in `finally` block
+9. **Escalation** -- Unresolved CRITICALs escalate to higher-rank dev agent. `selectEscalationCandidate()`
+   guarantees a candidate via cross-domain fallback (Sub-Plan 07). Wrapped in `try/finally`.
+10. **Evidence-based merge decision (Sub-Plan 07)** -- `decideMerge()` evaluates gate report, integrity
+    findings, layout violations, blocking review comments, file change count, and quorum before allowing
+    merge. Policy modes: `strict` (default, all evidence required), `permissive` (hard blockers only),
+    `legacy` (pre-Plan-19 unconditional merge). Blocked PRs get status `'blocked'` and a `pr:blocked` event.
+11. **Merge ladder** -- `git merge origin/<base> --no-edit` (not rebase). On conflict: auto-resolve lockfiles
+    and `package.json` via `resolveKnownConflicts()`; hand remaining conflicts to dev agent for
+    `MERGE_CONFLICT_FIX_ATTEMPTS`; if still unresolved, salvage branch and report `pr:conflict`.
+12. **Evidence-based completion** -- After merge, compute `CompletionEvidence` (real file changes,
+    declared modules present, gate passed). Assignments that merge without evidence go back to pending.
+13. **Worktree disposal** -- On success: remove worktree + delete remote branch. On failure: move worktree
+    to `.worktrees-failed/` for salvage, export `git format-patch` to `<outputPath>/salvage/`, do NOT
+    delete remote branch. Cap retained failed worktrees at `WORKTREE_SALVAGE_MAX`.
+
+### Scaffold Barrier (dispatcher.ts)
+
+- `injectScaffoldDependencies()` ensures every non-scaffold assignment depends on all scaffold assignments
+- Scaffold branches run first (sequentially); `syncWorkspaceToBranch()` called after each merge
+- `findOverlappingBranches()` detects branches with shared `moduleIds` and serialises them
+- `CONFIG_OWNERSHIP_SCAFFOLD_ONLY` prevents feature branches from modifying root config files
 
 ### Git Branching Strategy
 
@@ -337,14 +360,36 @@ The development phase uses a sophisticated PR workflow for each branch:
 
 ## Key Subsystems
 
-### Tool Loop Guard (`tool-loop-guard.ts`)
+### Tool Loop Guard (`tool-loop-guard.ts`) — Sub-Plan 08
 
-Prevents agents from infinite tool-call loops:
+Prevents agents from infinite tool-call loops with per-tool scoping and split budgets:
 - Tracks total invocations per `toolName::args` key
-- **Read-only tools** (read_file, list_dir, search_code, git tools) cache results; duplicates return `[CACHED]`
+- **Read-only tools** (read_file, list_dir, search_code, git tools) cache results; duplicates return `[CACHED]` (free — no budget consumed)
 - **Mutating tools** (write_file, edit_file, etc.) clear all caches (workspace changed)
-- 3rd identical call "poisons" ALL tools with a JSON error message
-- Total ceiling: `maxToolCalls` (default 22, configurable per agent rank)
+- 3rd identical call blocks ONLY that specific `(tool, args)` — other tools keep working
+- **Split budgets**: separate read/write/shell ceilings per rank (principal: 30/25/10, senior: 25/20/8, junior: 20/15/8)
+- **Progress bonus**: agents that produce real writes get `LOOP_GUARD_PROGRESS_BONUS` (10) extra read calls
+- **Hard ceiling**: `LOOP_GUARD_HARD_CEILING` (80) absolute stop across all categories
+- **Terminal guidance**: on exhaustion, injects "return your JSON now, do not claim files you did not write"
+- **Legacy mode**: numeric `maxTotalCalls` parameter still works for non-dev agents
+
+### Workspace Snapshot (`workspace-snapshot.ts`) — Sub-Plan 08
+
+Pre-computed answers injected into dev agent prompts to eliminate reconnaissance waste:
+- `git ls-files` tree grouped by directory (capped at `SNAPSHOT_MAX_FILES`, default 400)
+- Verbatim `scripts` block from every `package.json` (root + workspace members)
+- Test framework detection (runner, directories, command)
+- Dependency list (names only, no versions)
+- Budget: `SNAPSHOT_MAX_CHARS` (default 8000)
+- Expected effect: eliminates 6–10 of every ~30 tool calls per invocation
+
+### File Change Reconciliation (`file-change-reconciliation.ts`) — Sub-Plan 08
+
+Reconciles agent-claimed fileChanges against the worktree to detect phantoms:
+- `git diff --name-only` + `git ls-files --others` gives ground truth
+- Claimed files not on disk → `phantomFileChanges` (dropped, logged, appended to state)
+- Files on disk not claimed → added as `(unreported by agent)`
+- Enabled by `RECONCILE_FILE_CHANGES` (default: true)
 
 ### LLM Throttle (`llm-throttle.ts`)
 
@@ -353,6 +398,14 @@ Process-wide rate-limit protection:
 - **Request spacing**: `LLM_MIN_REQUEST_INTERVAL_MS` (default 400ms), adaptive increase on 429
 - **Global cooldown**: Exponential backoff on 429 (5s base, 90s max, +/-25% jitter)
 - **Adaptive decay**: After 20 consecutive successes, interval decreases
+
+### Retry (`retry.ts`) — Sub-Plan 08
+
+Extended retry-with-backoff for transient failures:
+- **Rate-limit errors**: 429, "Rate limit", "Request limit", "Token limit"
+- **Transient errors** (new): ECONNRESET, ECONNREFUSED, ETIMEDOUT, socket hang up, Connection error, HTTP 5xx
+- **Non-retryable**: 4xx (other than 429) — 401 Unauthorized, 404 Not Found, etc.
+- Exponential backoff + ±30% jitter, max 120s delay
 
 ### LLM Cassettes (`llm-cassette.ts`)
 
@@ -411,6 +464,28 @@ Three checks that verify the generated product actually works:
 - Wired into PR workflow (artifacts+resolve only) and QA node (full mode with smoke)
 - Synthesises `PRODUCT-ARTIFACTS-*`, `PRODUCT-RESOLVE`, and `PRODUCT-SMOKE` bugs
 
+### QA Real Execution (`test-runner.ts`, `test-sufficiency.ts`) — Sub-Plan 09
+
+QA reports are now derived from **real test-runner output**, not LLM self-reports.
+
+- **`test-runner.ts`**: Executes each stack root's test suite with machine-readable output flags
+  (Jest `--json`, JUnit XML, Go `-json`, etc.), parses the results into `ExecutedTestReport` objects.
+  Distinguishes `runnerError` (config issue / missing dep) from real test failures.
+- **`executedToTestReports()`**: Converts runner output into `TestReport` with `source: 'executed'`.
+  The agent's self-report gets `source: 'claimed'` and is advisory only — it does not drive routing.
+- **`compareClaimVsReality()`**: Detects discrepancies between agent claims and runner results;
+  logged and recorded as `qaClaimDiscrepancies` on state.
+- **`test-sufficiency.ts`**: `checkTestSufficiency()` enforces 6 rules: at-least-one-root-tested,
+  no-runner-errors, min-total-tests, per-story-coverage, coverage-floor, no-all-trivial-tests.
+  Violations become `Bug`s with stable ids `QA-<kind>[-<storyId>]`.
+- **Tag convention**: Every test name must begin with `[<storyId>#<acIndex>]` for traceability.
+  `parseTraceTag()` extracts this from runner output into `ExecutedTestCase.storyId`/`acIndex`.
+- **Schema changes**: `TestReportSchema` now has `source` (`executed`/`claimed`/`quality-gates`),
+  `iterationIndex`, `runnerError`, `coverage`, and required `cases` array with required
+  `storyId`/`acIndex`. Refine rejects `{ total: 0, status: 'pass' }`.
+- **QA crash handling**: QA Unit or QA Lead crash synthesises a `QA-UNIT-FAILED` / `QA-LEAD-FAILED`
+  bug. `testReports` is never empty after `qaNode` (invariant assertion).
+
 ### Gate Integrity (`gate-integrity.ts`) — Sub-Plan 02
 
 Prevents agents from gaming quality gates instead of fixing code. Three layers:
@@ -433,6 +508,123 @@ Prevents agents from gaming quality gates instead of fixing code. Three layers:
 Key env vars: `GATE_INTEGRITY_MODE` (off/warn/enforce), `FS_CONFIG_PROTECTION` (off/warn/deny),
 `REJECT_TRIVIAL_TESTS` (true/false).
 
+### Acceptance Gate (`acceptance-gate.ts`) — Sub-Plan 03
+
+Single deterministic function that evaluates whether the product is acceptable.
+
+- **`evaluateAcceptance(state)`** — checks 10 criteria: BUILD, ARTIFACTS, RESOLVE, TESTS, SMOKE,
+  INTEGRITY, SCOPE, AC_COVERAGE, DEPLOY, E2E. Required criteria (BUILD, ARTIFACTS, RESOLVE, TESTS,
+  SMOKE, INTEGRITY, SCOPE) must all pass for `'accepted'`; otherwise `'rejected'`, `'partial'`
+  (all required pass but optional fail), or `'inconclusive'` (some required criteria could not execute).
+- **`detectUnrecoverable(state)`** — detects when no further pipeline work can change the outcome:
+  N consecutive zero-progress dispatch rounds, merge-conflict blocked branches, sourceless workspaces,
+  or bugs attempted 2+ times that remain unresolved.
+- **`haltIfUnrecoverable()`** — checked in developmentNode, qaNode, devopsNode to skip early under
+  `RUN_FAIL_POLICY='halt'`.
+- **`acceptanceBlockersToBugs()`** — converts failed required criteria into `ACCEPT-*` bugs for the
+  bugfix loop.
+
+The acceptance gate runs as a new graph node (`acceptance-gate`) between E2E and finalize. The
+`afterAcceptanceRouter` routes back to bugfix-triage while iterations remain and the product is not
+accepted (and not unrecoverable).
+
+Key env vars: `RUN_FAIL_POLICY` (halt/finalize/legacy), `ACCEPT_MIN_TESTS`, `ACCEPT_REQUIRE_SMOKE`,
+`UNRECOVERABLE_ZERO_ROUNDS`.
+
+### Requirements Traceability & AC Coverage (`traceability.ts`, `nodes.ts`) — Sub-Plan 10
+
+Chains epics → stories → acceptance criteria → tasks → assignments → PRs → tests into a
+full traceability matrix so "did we build and verify what was asked?" is answerable.
+
+**Graded AC Status** — Each acceptance criterion is classified into one of 6 states:
+
+| `AcStatus` | Meaning |
+|------------|---------|
+| `verified` | PR merged **and** a passing test with `source: 'executed'` covers the AC |
+| `tested-failing` | PR merged, tagged test exists but fails |
+| `implemented-untested` | PR merged, no tagged test executed |
+| `planned-only` | Assignment exists, PR not merged |
+| `blocked` | Assignment exists, PR blocked/conflicted/open after run |
+| `missing` | No assignment references this story/AC at all |
+
+**Coverage Metrics** — `CoverageTotals` carries three metrics instead of the old single `coveragePct`:
+
+| Metric | Formula |
+|--------|---------|
+| `verifiedPct` | `verified / criteria` — the strict bar |
+| `implementedPct` | `(verified + implemented) / criteria` — "the code exists" |
+| `deliveryScore` | `(verified × 1.0 + implemented × 0.5 + testedFailing × 0.25) / criteria` — weighted composite |
+
+**Key rules:**
+- Only `source: 'executed'` test reports count toward coverage — `claimed` reports are excluded.
+- `hasMerged` requires `status === 'merged'` (not `'approved'`).
+- No in-place mutation of `story.acceptanceCriteria` — a local copy is used.
+- Developer persona requires `[storyId#acIndex]` test naming (e.g. `it('[US-003#1] eating a dot increments score', ...)`).
+
+**AC Coverage Gate** (in `qaNode`):
+- Enabled when `MIN_AC_COVERAGE_PCT > 0` (default 70%). The `AC_COVERAGE` acceptance criterion
+  becomes **required** when this threshold is set.
+- Emits a `TestReport` signal with `framework: 'ac-coverage'` and `source: 'quality-gates'`
+  so `afterQaRouter` sees failures and routes to the bugfix loop.
+- On failure, synthesises bugs with `severity: 'critical'`, prioritising **missing** over
+  **tested-failing** over **blocked** over **implemented-untested** (gap-first ordering).
+  Bug IDs follow the pattern `AC-<storyId>-<acIndex>`.
+- Max bugs per gate run: `MIN_AC_COVERAGE_MAX_BUGS` (default 25).
+
+**QA Plan Gap Detection** (in `qaNode`):
+- After the QA Lead produces a test plan, the conductor checks whether every acceptance
+  criterion has at least one test plan item. Uncovered criteria generate `QA-PLAN-GAP` bugs
+  with stable IDs `QA-PLAN-GAP-<storyId>-<acIndex>` (capped at 15 per run).
+
+**Traceability Report** (in `finalizeNode`):
+- `TraceabilityReport` includes: `rows`, `totals`, `orphanedStories`, `orphanedAssignments`,
+  `orphanedTasks`, `unassignedTasks`, `blockedDeliveries`, `claimedVsExecuted`.
+- Output: `outputs/<run>/traceability.md` (human-readable) **and** `outputs/<run>/traceability.json`
+  (machine-readable, controlled by `TRACEABILITY_JSON`, default true).
+
+**Key env vars**: `MIN_AC_COVERAGE_PCT` (70), `MIN_AC_IMPLEMENTED_PCT` (90),
+`MIN_AC_COVERAGE_MAX_BUGS` (25), `TRACEABILITY_JSON` (true).
+
+### DevOps & E2E Hardening — Sub-Plan 11
+
+**DevOps verification** (`devops-verify.ts`, `devops-fallback.ts`, `nodes.ts`):
+- Agent's self-reported `buildStatus`/`runStatus`/`serviceUrls` are **always** overwritten by
+  `verifyDeployment` — even when Docker is unavailable (returns `skipped`, not the agent's claims).
+  Prevents the retroboard3 bug where hallucinated service URLs reached E2E.
+- Health-gates the `runStatus`: `docker compose ps` checks service state; HTTP health checks
+  must all pass for `'running'`; failures produce `'unhealthy'` and a `DEPLOY-UNHEALTHY` bug.
+- Deterministic Dockerfile fallback (`DEVOPS_FALLBACK_ENABLED`, default `true`): when the DevOps
+  agent fails or produces no Docker artifacts, `generateFallbackDeployment` creates Dockerfiles
+  and `docker-compose.yml` from detected stack roots. Templates for SPA (nginx), Node server,
+  Python, Go. This unblocks E2E for frontend-only projects.
+
+**E2E state tracking** (`state.ts`):
+- `e2eStatus`: `'not-run'` | `'passed'` | `'failed'` | `'skipped-no-services'` | `'skipped-disabled'` | `'error'`
+- `e2eSkipReason`: human-readable reason when skipped/error.
+- `e2eEvidence`: `{ screenshots, consoleErrors, urlsVisited }`.
+- Every exit path of `e2eNode` sets `e2eStatus`. The acceptance gate's E2E criterion reads this
+  field, not the test reports array.
+
+**Playwright preflight** (`playwright-preflight.ts`):
+- Runs once per process (cached). Checks `npx playwright --version`, auto-installs chromium
+  if `PLAYWRIGHT_AUTO_INSTALL=true`, retries MCP connection `PLAYWRIGHT_MCP_CONNECT_RETRIES` times.
+- On failure: falls back to `runSmokeTest` (deterministic HTTP check from Sub-Plan 01).
+
+**Non-Docker E2E path**: When no service URLs exist but a web root is detected
+(`E2E_ALLOW_LOCAL_SERVER=true`), `e2eNode` runs `runSmokeTest` against the built artifacts.
+A 200 response is `'passed'`; failure is `'error'`.
+
+**E2E catch path**: Synthesises `E2E-INFRA-FAILED` bug (major), pushes an `inconclusive` e2e
+TestReport, and records a `verificationErrors` entry. No silent swallowing.
+
+**afterE2eRouter**: Filters to `type === 'e2e' && source === 'executed'` at the current
+`iterationIndex`. `E2E_BUGFIX_ENABLED` default flipped to `true`.
+
+**Key env vars**: `E2E_BUGFIX_ENABLED` (true), `E2E_ALLOW_LOCAL_SERVER` (true),
+`ACCEPT_REQUIRE_E2E` (false), `PLAYWRIGHT_MCP_STARTUP_TIMEOUT_MS` (60000),
+`PLAYWRIGHT_MCP_CONNECT_RETRIES` (2), `PLAYWRIGHT_AUTO_INSTALL` (true),
+`DEVOPS_FALLBACK_ENABLED` (true).
+
 ### Security Gates (`security-gates.ts`)
 
 Three checks combined:
@@ -441,13 +633,53 @@ Three checks combined:
 - **Licence check**: SPDX deny-list for npm packages
 - Never logs matched values (redaction discipline)
 
+### Plan Coverage (`plan-coverage.ts`) -- Sub-Plan 04
+
+Validates that no stories or tasks are silently dropped between planning phases:
+- `validateStoryPlan(state)` -- epics -> stories -> tasks (after PM)
+- `validateAssignmentPlan(state)` -- stories/tasks -> assignments (after TL)
+- `buildCoverageGapPrompt(violations, nextId)` -- targeted gap prompt for the TL
+- Controlled by `PLAN_COVERAGE_MODE` (off/warn/enforce), `PLAN_COVERAGE_REPAIR_ATTEMPTS`
+- The Team Leader now receives full acceptance criteria (`storiesWithCriteria`), has a larger
+  context budget (`TEAM_LEADER_CONTEXT_MAX_CHARS`), and must fill `taskIds`/`additionalStoryIds`
+  on every assignment. After the TL produces assignments, the conductor validates coverage and
+  re-invokes the TL with a gap prompt if stories/tasks are missing.
+
+### Architecture Contract (`repo-contract.schema.ts`, `repo-contract-writer.ts`, `layout-lint.ts`) — Sub-Plan 05
+
+A machine-checkable repo layout and module contract produced by the Architect:
+
+- **Schema** (`RepoContractSchema`): `layout` (single-root / npm-workspaces / multi-stack),
+  `roots[]` (dir, kind, stack, entryPoints, sourceDirs, testDirs, scripts, buildOutputDir),
+  `modules[]` (id, path, componentName, exports with signatures, dependsOn),
+  `namingConvention`, `sharedTypes`, `frozenPaths`.
+- **State channel**: `repoContract: RepoContract | null` (replace reducer).
+- **Writer** (`repo-contract-writer.ts`): `writeRepoContract` writes `.agent/repo-contract.json`
+  (machine-read, gitignored) + `docs/ARCHITECTURE-CONTRACT.md` (human-readable, committed).
+  `readRepoContract` reads it back. `renderContractForPrompt` produces a budgeted prompt section.
+  `deriveContractFromAnalysis` infers a contract from an existing codebase (maintain mode).
+- **Layout Linter** (`layout-lint.ts`): `lintLayout(workspace, contract, opts?)` checks 10
+  violation kinds: `file-outside-source-dirs`, `unknown-root`, `duplicate-module`,
+  `module-path-mismatch`, `missing-declared-export`, `entrypoint-missing`,
+  `entrypoint-does-not-compose`, `test-outside-test-dirs`, `cross-root-relative-import`,
+  `naming-violation`. Reuses `buildImportGraph` from gate-integrity.
+- **Architect**: `tools: []` (JSON mode active), prompt includes `<repo_contract>` section,
+  output includes `repoContract` field. `architectNode` caps modules at `REPO_CONTRACT_MAX_MODULES`.
+- **All agents** receive the contract in their context (priority 1). Developer persona includes
+  `<repo_contract>` block. Reviewers have a stub carve-out for scaffold stubs.
+- **Env vars**: `REPO_CONTRACT_MODE` (off/warn/enforce), `REPO_CONTRACT_MAX_MODULES` (60),
+  `CONTRACT_STUB_SCAFFOLD` (true), `CONTRACT_PROMPT_MAX_CHARS` (6000).
+
 ### Structured Output (`structured-output.ts`)
 
 Robust JSON extraction from LLM responses:
 1. Direct `JSON.parse`
 2. Code fence extraction (```json ... ```)
 3. Balanced braces extraction
-4. Zod validation with repair loop (re-invoke agent with issue summary)
+4. `jsonrepair` for truncated/malformed JSON (sets `wasTruncated` flag)
+5. `detectTruncation()` for structural completeness check
+6. `repairFieldViolations()` -- deterministic field-level repair (enum near-miss, scalar/array coercion, type coercion) before LLM repair
+7. Zod validation with repair loop (re-invoke agent with issue summary, 16k middle-clip budget)
 
 ---
 
@@ -497,7 +729,8 @@ Separate tokens: `GITHUB_PROJECT_TOKEN` / `GITHUB_PROJECT_OWNER` (fall back to `
 - `run-manifest.json` -- Comprehensive run summary with counts, budget, traceability
 - `token-usage.json` -- Raw token consumption data
 - `token-usage-report.html` -- Interactive HTML report with Chart.js charts
-- `traceability.md` -- Requirements traceability matrix
+- `traceability.md` -- Requirements traceability matrix (human-readable)
+- `traceability.json` -- Requirements traceability matrix (machine-readable, if `TRACEABILITY_JSON=true`)
 - `codebase-analysis.md` -- (Maintain mode) Snapshot of codebase analysis
 - `checkpoints.json` -- (If `CHECKPOINT_PERSIST=true`) LangGraph checkpoints
 
@@ -650,11 +883,49 @@ When referenced in code comments, these plans are cited as "fixes A1", "fixes A2
 
 1. **`env.ts` must be imported first** -- Before any module that reads `process.env`. Uses `override: true` so `.env` wins over shell vars.
 2. **Append vs Replace reducers** -- Arrays use append (data accumulates); scalars/objects use replace (last write wins). Returning `[]` for an append field adds nothing, not clears it.
-3. **Agent recursion limits differ by type** -- Pipeline agents: 15, tool-using pipeline agents: 60, dev agents: 50, reviewers: 26.
-4. **Max tool calls differ by rank** -- Principal: 40, Senior: 35, Junior: 30, Reviewer: 8.
+3. **Agent recursion limits differ by type** -- Pipeline agents: 15, tool-using pipeline agents: 120, dev agents: 140, reviewers: 40. (Sub-Plan 08: raised from 15/60/58/26 because the loop guard is now the binding constraint.)
+4. **Tool budgets are split by category (Sub-Plan 08)** -- Read/write/shell separate budgets per rank: principal 30/25/10, senior 25/20/8, junior 20/15/8. Reviewer: 14 total. Progress bonus grants 10 extra reads when writing. Hard ceiling: 80.
 5. **`git_diff` was removed from reviewer tools** -- It showed empty results for committed code and caused llama-3-3-70b-instruct to loop. Use `git_merge_base_diff` instead.
 6. **`emitMermaidTool` removed from dev agents** -- Caused infinite loops. Only the Architect has it.
 7. **Worktree cleanup is critical** -- Stale worktrees break subsequent runs. Intake prunes them.
 8. **SSL workaround** -- `NODE_TLS_REJECT_UNAUTHORIZED=0` is set globally for corporate environments with self-signed certs.
 9. **Dockerfiles are patched for SSL** -- `patchDockerfilesSsl()` injects `npm config set strict-ssl false` before npm commands.
 10. **`GITHUB_MODE=local`** creates a bare repo under the run output directory and patches `origin` to point there.
+11. **Protected config files are refused for repair agents** (`CONFIG_OWNERSHIP_SCAFFOLD_ONLY`) — feature branches cannot modify shared root config files; only the scaffold branch may.
+12. **Only `source: 'executed'` test reports count toward coverage and routing** — agent self-reported (`claimed`) test results are advisory only and do not drive pipeline decisions.
+13. **`completed` now means accepted by the acceptance gate** — never a false positive. The `finalStatus` is one of `completed`, `failed`, `partial`, or `inconclusive`, determined by the deterministic acceptance gate.
+14. **`.agent/` is gitignored in generated projects** — the `repo-contract.json` and other machine-generated files live there and must not be committed.
+
+---
+
+## Failure modes observed in production runs
+
+Two autonomous greenfield runs (`pacman8` and `retroboard3`) revealed systemic pipeline failures.
+See `Plans/19-autonomous-run-remediation/00-INDEX.md` for the full post-mortem.
+
+Key failure classes (all fixed by Plan 19 sub-plans 01-12):
+
+1. **No product verification.** Quality gates ran `npm run build --if-present` — a missing script
+   meant exit 0 → "pass". The gate never checked build artifacts, imports, or rendering. (SP-01)
+2. **Gate gaming.** An agent replaced `package.json` scripts with `echo Build successful` during a
+   gate repair. No tamper detection existed. (SP-02)
+3. **Always-completed status.** `finalStatus = cancelled ? 'cancelled' : 'completed'` — the only
+   failure path was cancellation. (SP-03)
+4. **Silent scope loss.** 18 of 20 stories were dropped between PM and TL due to a scalar
+   `storyId` field, lossy repair (4000 char clip), and a prompt encouraging merging. (SP-04)
+5. **No architecture contract.** Agents built two incompatible directory structures in the same
+   run (root `src/` vs `packages/*/src/`). (SP-05)
+6. **PR work loss.** Scaffold and feature branches dispatched from the same commit caused
+   permanent conflicts. Worktree cleanup deleted uncommitted code. (SP-06)
+7. **Reviewer overruled.** 9 of 14 PRs force-merged despite `changes_requested`. Six separate
+   fail-open paths in the review code defaulted to `approved`. (SP-07)
+8. **Poisoning death spiral.** 289 tool-poisoning events, 193 respawns with zero carried state.
+   Agents burned budgets on reconnaissance and never got to write code. (SP-08)
+9. **QA never ran a test.** `total: 0, status: 'pass'` was explicitly authorised by the prompt.
+   QA crashing was indistinguishable from QA passing. (SP-09)
+10. **Coverage metric pinned at 0%.** Required fields were optional, the metric was computed and
+    discarded, and the gate was dead code. (SP-10)
+11. **Unverified deployment claims.** The DevOps agent's self-reported URLs survived into state
+    even when `verifyDeployment` returned `skipped`. (SP-11)
+12. **No observability.** Both runs saturated the 500-event buffer. Diagnosing required reading
+    a 2.1 MB log line by line. (SP-12)

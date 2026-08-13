@@ -37,6 +37,7 @@ export interface OctokitLike {
         create: (params: { owner: string; repo: string; title: string; body: string; head: string; base: string }) => Promise<{ data: { number: number; html_url: string; node_id: string } }>;
         merge: (params: { owner: string; repo: string; pull_number: number; merge_method?: string }) => Promise<{ data: { merged: boolean; sha: string } }>;
         get: (params: { owner: string; repo: string; pull_number: number }) => Promise<{ data: { number: number; state: string; merged: boolean; title: string; html_url: string } }>;
+        list: (params: { owner: string; repo: string; head?: string; state?: string }) => Promise<{ data: Array<{ number: number; html_url: string; node_id: string; state: string; title: string }> }>;
     };
     issues: {
         createComment: (params: { owner: string; repo: string; issue_number: number; body: string }) => Promise<{ data: { id: number } }>;
@@ -214,6 +215,27 @@ export function createLocalGitHub(bareRepoPath: string): OctokitLike {
                         html_url: `local://pr/${pr.number}`,
                     },
                 };
+            },
+
+            async list({ head, state: filterState }) {
+                const results: Array<{ number: number; html_url: string; node_id: string; state: string; title: string }> = [];
+                for (const pr of prs.values()) {
+                    // head filter: GitHub format is "owner:branchName", but we
+                    // also match bare branch names for convenience.
+                    if (head) {
+                        const headBranch = head.includes(':') ? head.split(':').pop()! : head;
+                        if (pr.head !== headBranch) continue;
+                    }
+                    if (filterState && pr.state !== filterState) continue;
+                    results.push({
+                        number: pr.number,
+                        html_url: `local://pr/${pr.number}`,
+                        node_id: `local-pr-${pr.number}`,
+                        state: pr.state,
+                        title: pr.title,
+                    });
+                }
+                return { data: results };
             },
         },
 

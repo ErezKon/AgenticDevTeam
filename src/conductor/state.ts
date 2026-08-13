@@ -29,7 +29,12 @@ import type {
     TokenCallRecord,
     GitContext,
 } from '../agents/_shared/base-schemas';
+import type { RepoContract } from '../agents/_shared/schemas/repo-contract.schema';
+// TechDecision is already imported above via base-schemas — mergeByLayerReducer uses it.
 import type { ConfigBaseline } from './gate-integrity';
+import type { AcceptanceReport, DispatchRound } from './acceptance-gate';
+import type { GateReport } from './quality-gates';
+import type { CompletionEvidence } from './assignment-policy';
 
 // ─── Reducers ───────────────────────────────────────────────────────────────
 
@@ -41,6 +46,34 @@ function appendReducer<T>(existing: T[], incoming: T[]): T[] {
 /** Replace reducer (last-write wins). */
 function replaceReducer<T>(existing: T, incoming: T): T {
     return incoming;
+}
+
+/** Replace elements with the same `id`, append new ones. Prevents HITL re-runs from duplicating a plan. */
+function mergeByIdReducer<T extends { id: string }>(existing: T[], incoming: T[]): T[] {
+    const map = new Map<string, T>();
+    for (const item of existing) map.set(item.id, item);
+    for (const item of incoming) map.set(item.id, item);
+    return [...map.values()];
+}
+
+/** Merge reducer for tech stack (keyed on layer+technology, no `id`). */
+function mergeByLayerReducer(existing: TechDecision[], incoming: TechDecision[]): TechDecision[] {
+    const map = new Map<string, TechDecision>();
+    for (const item of existing) map.set(`${item.layer}:${item.choice}`, item);
+    for (const item of incoming) map.set(`${item.layer}:${item.choice}`, item);
+    return [...map.values()];
+}
+
+/** Merge reducer for bug attempt counts — takes the max of each key. */
+function bugAttemptsReducer(
+    existing: Record<string, number>,
+    incoming: Record<string, number>,
+): Record<string, number> {
+    const merged = { ...existing };
+    for (const [key, count] of Object.entries(incoming)) {
+        merged[key] = Math.max(merged[key] ?? 0, count);
+    }
+    return merged;
 }
 
 // ─── State Definition ───────────────────────────────────────────────────────
@@ -90,12 +123,19 @@ export const ProjectState = Annotation.Root({
         reducer: replaceReducer,
         default: () => null,
     }),
+
+    // ── Repo Contract (Sub-Plan 05) ──────────────────────────────────────
+    repoContract: Annotation<RepoContract | null>({
+        reducer: replaceReducer,
+        default: () => null,
+    }),
+
     epics: Annotation<Epic[]>({
-        reducer: appendReducer,
+        reducer: mergeByIdReducer,
         default: () => [],
     }),
     techStack: Annotation<TechDecision[]>({
-        reducer: appendReducer,
+        reducer: mergeByLayerReducer,
         default: () => [],
     }),
 
@@ -107,11 +147,11 @@ export const ProjectState = Annotation.Root({
 
     // ── Product Manager outputs ──────────────────────────────────────────
     userStories: Annotation<UserStory[]>({
-        reducer: appendReducer,
+        reducer: mergeByIdReducer,
         default: () => [],
     }),
     tasks: Annotation<Task[]>({
-        reducer: appendReducer,
+        reducer: mergeByIdReducer,
         default: () => [],
     }),
 
@@ -237,6 +277,122 @@ export const ProjectState = Annotation.Root({
     configBaseline: Annotation<ConfigBaseline | null>({
         reducer: replaceReducer,
         default: () => null,
+    }),
+
+    // ── Acceptance gate (Sub-Plan 03) ────────────────────────────────────
+
+    /** Latest acceptance gate result (replace reducer — always the freshest). */
+    acceptance: Annotation<AcceptanceReport | null>({
+        reducer: replaceReducer,
+        default: () => null,
+    }),
+
+    /** Latest quality gate report (replace reducer — unambiguous "current" signal). */
+    latestGateReport: Annotation<GateReport | null>({
+        reducer: replaceReducer,
+        default: () => null,
+    }),
+
+    /** True when no further pipeline work can change the outcome. */
+    unrecoverable: Annotation<{ flag: boolean; reason: string } | null>({
+        reducer: replaceReducer,
+        default: () => null,
+    }),
+
+    /** Verification stage crashes — so acceptance gate marks criteria inconclusive, not green. */
+    verificationErrors: Annotation<Array<{ stage: string; message: string }>>({
+        reducer: appendReducer,
+        default: () => [],
+    }),
+
+    /** Per-dispatch-round progress counters (append reducer). */
+    dispatchRounds: Annotation<DispatchRound[]>({
+        reducer: appendReducer,
+        default: () => [],
+    }),
+
+    /** Bug ids that triage has sent to development (informational — actual fix verified later). */
+    attemptedBugIds: Annotation<string[]>({
+        reducer: appendReducer,
+        default: () => [],
+    }),
+
+    /** Per-bug attempt count: how many times triage has dispatched a fix for each bug id. */
+    bugAttempts: Annotation<Record<string, number>>({
+        reducer: bugAttemptsReducer,
+        default: () => ({}),
+    }),
+
+    // ── Planning integrity (Sub-Plan 04) ─────────────────────────────────
+
+    /** Output integrity issues from agent invocations (truncation, lossy repair, invalid schema). */
+    outputIntegrity: Annotation<Array<{ agent: string; phase: PhaseName; issue: 'truncated' | 'repair-lossy' | 'schema-invalid'; detail: string }>>({
+        reducer: appendReducer,
+        default: () => [],
+    }),
+
+    /** Planning coverage violations detected between PM and TL phases. */
+    planViolations: Annotation<Array<{ kind: string; severity: string; id: string; detail: string }>>({
+        reducer: appendReducer,
+        default: () => [],
+    }),
+
+    // ── PR Workflow / Work Preservation (Sub-Plan 06) ─────────────────────
+
+    /** Evidence that each assignment was completed with real file changes. */
+    completionEvidence: Annotation<CompletionEvidence[]>({
+        reducer: appendReducer,
+        default: () => [],
+    }),
+
+    /** Branches salvaged (failed to merge but patches exported). */
+    salvageBranches: Annotation<string[]>({
+        reducer: appendReducer,
+        default: () => [],
+    }),
+
+    // ── Agent Budgets & File Reconciliation (Sub-Plan 08) ─────────────────
+
+    /** Phantom file changes: claimed by agents but not found on disk. */
+    phantomFileChanges: Annotation<FileChange[]>({
+        reducer: appendReducer,
+        default: () => [],
+    }),
+
+    // ── QA Real Execution (Sub-Plan 09) ──────────────────────────────────
+
+    /** Discrepancies between QA agent's self-report and the real runner output. */
+    qaClaimDiscrepancies: Annotation<Array<{ field: string; claimed: number | string; actual: number | string }>>({
+        reducer: appendReducer,
+        default: () => [],
+    }),
+
+    // ── DevOps & E2E Hardening (Sub-Plan 11) ──────────────────────────────
+
+    /** Terminal E2E outcome. 'not-run' is the initial value and must never be conflated with 'passed'. */
+    e2eStatus: Annotation<'not-run' | 'passed' | 'failed' | 'skipped-no-services' | 'skipped-disabled' | 'error'>({
+        reducer: replaceReducer,
+        default: () => 'not-run',
+    }),
+
+    /** Human-readable reason when E2E is skipped or errors out. */
+    e2eSkipReason: Annotation<string | null>({
+        reducer: replaceReducer,
+        default: () => null,
+    }),
+
+    /** E2E evidence from Playwright or smoke test: screenshots, console errors, visited URLs. */
+    e2eEvidence: Annotation<{ screenshots: string[]; consoleErrors: string[]; urlsVisited: string[] } | null>({
+        reducer: replaceReducer,
+        default: () => null,
+    }),
+
+    // ── Observability (Sub-Plan 12) ──────────────────────────────────────
+
+    /** Run invariant violations detected at phase boundaries. */
+    invariantViolations: Annotation<Array<{ id: string; phase: string; detail: string }>>({
+        reducer: appendReducer,
+        default: () => [],
     }),
 });
 

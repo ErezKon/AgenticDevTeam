@@ -1,8 +1,9 @@
 /**
- * Shared retry-with-backoff helper for rate-limited LLM calls.
+ * Shared retry-with-backoff helper for rate-limited and transient LLM calls.
  *
- * Catches 429 / "Rate limit" / "Request limit" / "Token limit" errors and
- * retries with exponential backoff (configurable via env vars).
+ * Sub-Plan 08 §6: extended to handle transient network/stream failures
+ * (ECONNRESET, socket hang up, Connection error, HTTP 5xx) in addition
+ * to 429 rate-limit errors.  Only 4xx (other than 429) are non-retryable.
  */
 import { getLogger } from './logger';
 
@@ -20,7 +21,14 @@ const DEFAULT_INITIAL_BACKOFF_MS =
 const MAX_DELAY_MS =
     parseInt(process.env.LLM_RETRY_MAX_MS ?? '120000', 10);
 
-function isRateLimitError(err: any): boolean {
+/** Transient error patterns that warrant a retry (network/stream failures). */
+const TRANSIENT_PATTERNS = [
+    'ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EPIPE',
+    'socket hang up', 'Connection error', 'terminated', 'premature close',
+    'network error', 'fetch failed',
+];
+
+export function isRateLimitError(err: any): boolean {
     return (
         err?.status === 429
         || err?.message?.includes('429')
@@ -31,7 +39,29 @@ function isRateLimitError(err: any): boolean {
 }
 
 /**
- * Retry an async function with exponential backoff + jitter on rate-limit errors.
+ * Check whether an error is a transient network/stream failure
+ * that should be retried.
+ */
+export function isTransientError(err: any): boolean {
+    const status = err?.status ?? err?.statusCode;
+    // HTTP 5xx are server errors — always retryable
+    if (typeof status === 'number' && status >= 500 && status < 600) return true;
+    // Non-429 4xx are client errors — never retryable
+    if (typeof status === 'number' && status >= 400 && status < 500 && status !== 429) return false;
+
+    const msg = String(err?.message ?? err ?? '');
+    return TRANSIENT_PATTERNS.some(pattern => msg.includes(pattern));
+}
+
+/**
+ * Returns true if the error is retryable (rate-limit OR transient).
+ */
+export function isRetryableError(err: any): boolean {
+    return isRateLimitError(err) || isTransientError(err);
+}
+
+/**
+ * Retry an async function with exponential backoff + jitter on retryable errors.
  *
  * Jitter prevents the "thundering herd" problem where multiple agents
  * hit rate limits simultaneously and retry at identical intervals,
@@ -52,13 +82,15 @@ export async function retryWithBackoff<T>(
         try {
             return await fn();
         } catch (err: any) {
-            if (isRateLimitError(err) && attempt < attempts) {
+            if (isRetryableError(err) && attempt < attempts) {
+                const isTransient = !isRateLimitError(err) && isTransientError(err);
                 const baseDelay = Math.min(initialMs * Math.pow(2, attempt - 1), MAX_DELAY_MS);
                 // Add +/-30% random jitter to stagger concurrent retries
                 const jitter = baseDelay * (0.7 + Math.random() * 0.6);
                 const delay = Math.round(Math.min(jitter, MAX_DELAY_MS));
                 log.warn(
-                    `${label}: rate-limited (attempt ${attempt}/${attempts}), retrying in ${(delay / 1000).toFixed(1)}s...`,
+                    `${label}: ${isTransient ? 'transient error' : 'rate-limited'} (attempt ${attempt}/${attempts}), ` +
+                    `retrying in ${(delay / 1000).toFixed(1)}s... [${err?.message?.slice(0, 100) ?? 'unknown'}]`,
                 );
                 await new Promise(r => setTimeout(r, delay));
                 continue;

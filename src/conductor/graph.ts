@@ -2,12 +2,12 @@
  * Conductor Graph — the LangGraph state machine that orchestrates
  * all agents through the pipeline phases.
  *
- * Phases: intake → architect → PM → DBA → TL → development → QA → bugfix? → devops → e2e → finalize
+ * Phases: intake → architect → PM → DBA → TL → development → QA → bugfix? → devops → e2e → acceptance → finalize
  */
 import { StateGraph, END, MemorySaver } from '@langchain/langgraph';
 import type { BaseCheckpointSaver } from '@langchain/langgraph';
 import { ProjectState } from './state';
-import { RUN_MODE, E2E_BUGFIX_ENABLED, CHECKPOINT_PERSIST } from '../config';
+import { RUN_MODE, E2E_BUGFIX_ENABLED, RUN_FAIL_POLICY, CHECKPOINT_PERSIST } from '../config';
 import { FileCheckpointer } from './file-checkpointer';
 import { getEffectiveLimits } from '../utils/run-budget';
 import {
@@ -22,6 +22,7 @@ import {
     bugfixTriageNode,
     devopsNode,
     e2eNode,
+    acceptanceNode,
     finalizeNode,
 } from './nodes';
 import type { ProjectStateType } from './state';
@@ -54,30 +55,70 @@ export interface ConductorOptions {
 
 // ─── Conditional edges ──────────────────────────────────────────────────────
 
+/**
+ * Filter test reports to the current bugfix iteration. Uses the whole
+ * array when no iteration tracking exists (backward-compat).
+ */
+function currentIterationFailures(state: ProjectStateType): Array<{ status: string }> {
+    // The latestGateReport (replace reducer) is always current.
+    // For test reports (append reducer), we consider all since there's no
+    // iterationIndex yet — the latestGateReport is the authoritative signal.
+    if (state.latestGateReport) {
+        const gr = state.latestGateReport;
+        if (!gr.passed) return [{ status: 'fail' }];
+        // Also check non-gate test reports
+        const recentFails = (state.testReports ?? []).filter(r => r.status === 'fail');
+        return recentFails;
+    }
+    return (state.testReports ?? []).filter(r => r.status === 'fail');
+}
+
 export function afterQaRouter(state: ProjectStateType): string {
     if (state.cancelled) return 'finalize';
-    const hasFailures = (state.testReports ?? []).some(r => r.status === 'fail');
-    if (hasFailures && (state.iteration?.bugfix ?? 0) < getEffectiveLimits().maxBugfixIterations) {
+    if (state.unrecoverable?.flag) return RUN_FAIL_POLICY === 'halt' ? 'finalize' : 'acceptance-gate';
+    const current = currentIterationFailures(state);
+    if (current.length > 0 && (state.iteration?.bugfix ?? 0) < getEffectiveLimits().maxBugfixIterations) {
         return 'bugfix-triage';
     }
+    // Budget spent with failures still present: under 'halt' go straight to acceptance as a failure;
+    // otherwise continue to devops so the run still produces deployment artifacts.
+    if (current.length > 0 && RUN_FAIL_POLICY === 'halt') return 'acceptance-gate';
     return 'devops';
 }
 
 /**
- * After E2E, route to bugfix-triage only when ALL of:
- * - E2E_BUGFIX_ENABLED is true (default false — keeps today's cost profile)
- * - an E2E report has status === 'fail'
- * - bugfix iterations remaining
- *
- * Otherwise route to finalize.
+ * After E2E, route to acceptance (never directly to finalize).
+ * Fixes E8: filter to e2e-type reports only, honour iterationIndex.
+ * Fixes D7: E2E_BUGFIX_ENABLED default flipped to true.
  */
 export function afterE2eRouter(state: ProjectStateType): string {
     if (state.cancelled) return 'finalize';
     if (E2E_BUGFIX_ENABLED) {
-        const hasE2eFailures = (state.testReports ?? []).some(r => r.status === 'fail');
-        if (hasE2eFailures && (state.iteration?.bugfix ?? 0) < getEffectiveLimits().maxBugfixIterations) {
+        const currentIteration = state.iteration?.bugfix ?? 0;
+        // Filter to e2e-type reports with source='executed' at the current iteration
+        const hasE2eFailures = (state.testReports ?? []).some(r =>
+            r.type === 'e2e'
+            && r.source === 'executed'
+            && r.status === 'fail'
+            && (r.iterationIndex === undefined || r.iterationIndex === currentIteration),
+        );
+        if (hasE2eFailures && currentIteration < getEffectiveLimits().maxBugfixIterations) {
             return 'bugfix-triage';
         }
+    }
+    return 'acceptance-gate';
+}
+
+/**
+ * After acceptance gate: route to bugfix-triage while budget remains
+ * and the product is not accepted (and not unrecoverable), or to finalize.
+ */
+export function afterAcceptanceRouter(state: ProjectStateType): string {
+    if (state.cancelled) return 'finalize';
+    const a = state.acceptance;
+    if (a && a.status !== 'accepted' && !a.unrecoverable
+        && (state.iteration?.bugfix ?? 0) < getEffectiveLimits().maxBugfixIterations) {
+        return 'bugfix-triage';
     }
     return 'finalize';
 }
@@ -144,6 +185,7 @@ export function buildConductorGraph(opts: ConductorOptions = {}) {
         .addNode('bugfix-triage', bugfixTriageNode)
         .addNode('devops', devopsNode)
         .addNode('e2e', e2eNode)
+        .addNode('acceptance-gate', acceptanceNode)
         .addNode('finalize', finalizeNode)
 
         // Linear edges for the main pipeline
@@ -187,7 +229,7 @@ export function buildConductorGraph(opts: ConductorOptions = {}) {
             'finalize': 'finalize',
         })
 
-        // Conditional: after QA, either bugfix or devops (includes cancel + rerun)
+        // Conditional: after QA, either bugfix, devops, or acceptance (includes cancel + rerun)
         .addConditionalEdges('qa', (state: ProjectStateType) => {
             if (state.cancelled) return 'finalize';
             if (state.pendingRerun === 'qa') return 'qa';
@@ -196,6 +238,7 @@ export function buildConductorGraph(opts: ConductorOptions = {}) {
             'qa': 'qa',
             'bugfix-triage': 'bugfix-triage',
             'devops': 'devops',
+            'acceptance-gate': 'acceptance-gate',
             'finalize': 'finalize',
         })
 
@@ -209,13 +252,20 @@ export function buildConductorGraph(opts: ConductorOptions = {}) {
             'finalize': 'finalize',
         })
 
-        // After E2E: either bugfix (if enabled and failures) or finalize (includes cancel + rerun)
+        // After E2E: either bugfix (if enabled and failures) or acceptance (includes cancel + rerun)
         .addConditionalEdges('e2e', (state: ProjectStateType) => {
             if (state.cancelled) return 'finalize';
             if (state.pendingRerun === 'e2e') return 'e2e';
             return afterE2eRouter(state);
         }, {
             'e2e': 'e2e',
+            'bugfix-triage': 'bugfix-triage',
+            'acceptance-gate': 'acceptance-gate',
+            'finalize': 'finalize',
+        })
+
+        // After acceptance gate: either bugfix-triage (if budget remains and not accepted) or finalize
+        .addConditionalEdges('acceptance-gate', afterAcceptanceRouter, {
             'bugfix-triage': 'bugfix-triage',
             'finalize': 'finalize',
         })

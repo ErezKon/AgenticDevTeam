@@ -1,15 +1,15 @@
 /**
  * Tool loop guard — detects and stops agents stuck in tool-call loops.
  *
- * Extracted from agent-factory.ts for testability and separation of concerns.
- *
- * Changes vs. the original implementation:
- * - Counts TOTAL identical (tool, args) invocations, not just consecutive ones.
- *   Run 6 showed `list_dir . -> list_dir tests -> list_dir src -> list_dir .` —
- *   a non-consecutive repeat that the old guard missed entirely.
- * - Caches results of read-only tools so a duplicate call returns instantly
- *   without re-executing the underlying tool.
- * - Surfaces budget (totalCalls/MAX_TOTAL_CALLS) in warn and poison messages.
+ * Sub-Plan 08 rewrite:
+ * - NEVER poison unrelated tools.  A repeated `list_dir` blocks only `list_dir`,
+ *   not `write_file`.
+ * - Separate read / write / shell ceilings so reconnaissance loops cannot
+ *   prevent an agent from writing code.
+ * - Progress bonus: agents that are producing real writes get extra budget.
+ * - Cached responses are FREE — they do not consume any budget counter.
+ * - Budget exhaustion injects a terminal guidance message instead of
+ *   silently poisoning everything.
  */
 import type { StructuredToolInterface } from '@langchain/core/tools';
 import { tool } from '@langchain/core/tools';
@@ -19,38 +19,76 @@ const guardLog = getLogger('[loop-guard]', 226);
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
-/** Total identical (tool, args) invocations allowed before warning. */
-const MAX_REPEATED_TOOL_CALLS = 2;   // 1st call runs, 2nd call warns
+/** Total identical (tool, args) invocations allowed before blocking THAT tool. */
+const MAX_REPEATED_TOOL_CALLS = 2;   // 1st call runs, 2nd returns cached/warns
 
-/** Extra identical attempts tolerated after the warning before poisoning. */
+/** Extra identical attempts tolerated after the warning before blocking. */
 const LOOP_TOLERANCE = 1;
 
-/** Default ceiling for total tool calls across all tools. */
-const DEFAULT_MAX_TOTAL_CALLS = 22;
+// ─── Tool classification ────────────────────────────────────────────────────
 
-/**
- * Tool names that mutate the workspace (file writes, edits).
- *
- * When any of these tools is called, the per-call repeat counts AND result
- * cache are cleared for all tools. This prevents false loop-detection on
- * tools like `run_command` that are legitimately re-invoked after
- * the agent has made code changes between calls.
- */
+/** Tool names that mutate the workspace (file writes, edits). */
 const MUTATING_TOOL_NAMES = new Set([
     'write_file', 'edit_file', 'create_file', 'delete_file',
 ]);
 
-/**
- * Read-only tools whose results can be served from cache within one agent run.
- * On the first call the result is stored; on a duplicate call the cached result
- * is returned with a prefix note instead of re-executing the tool.
- */
+/** Read-only tools whose results can be served from cache. */
 const CACHEABLE_TOOL_NAMES = new Set([
     'read_file', 'list_dir', 'search_code',
     'git_diff_file', 'git_diff_stat', 'git_merge_base_diff', 'git_log', 'git_status',
 ]);
 
+/** Shell execution tools. */
+const SHELL_TOOL_NAMES = new Set(['run_command']);
+
+type ToolCategory = 'read' | 'write' | 'shell';
+
+function classifyTool(name: string): ToolCategory {
+    if (MUTATING_TOOL_NAMES.has(name)) return 'write';
+    if (SHELL_TOOL_NAMES.has(name)) return 'shell';
+    return 'read';
+}
+
+// ─── Per-rank budget defaults ───────────────────────────────────────────────
+
+export interface ToolBudgets {
+    reads: number;
+    writes: number;
+    shell: number;
+}
+
+const DEFAULT_BUDGETS: Record<string, ToolBudgets> = {
+    principal: { reads: 30, writes: 25, shell: 10 },
+    senior:    { reads: 25, writes: 20, shell: 8 },
+    junior:    { reads: 20, writes: 15, shell: 8 },
+    default:   { reads: 25, writes: 20, shell: 8 },
+};
+
+/**
+ * Resolve per-rank budgets, with optional JSON override from config.
+ */
+export function resolveToolBudgets(rank: string, jsonOverride?: string): ToolBudgets {
+    if (jsonOverride) {
+        try {
+            const parsed = JSON.parse(jsonOverride);
+            if (parsed[rank]) return parsed[rank];
+        } catch { /* use defaults */ }
+    }
+    return DEFAULT_BUDGETS[rank] ?? DEFAULT_BUDGETS.default;
+}
+
 // ─── Guard implementation ───────────────────────────────────────────────────
+
+export interface LoopGuardOptions {
+    /** Per-category budgets (reads / writes / shell). */
+    budgets?: ToolBudgets;
+    /** Legacy total-calls ceiling (used when budgets is not provided). */
+    maxTotalCalls?: number;
+    /** Progress bonus calls when agent has produced writes. */
+    progressBonus?: number;
+    /** Absolute hard ceiling for all calls combined. */
+    hardCeiling?: number;
+}
 
 /**
  * Result of wrapping tools with a loop-detection guard.
@@ -58,137 +96,213 @@ const CACHEABLE_TOOL_NAMES = new Set([
 export interface LoopGuardResult {
     /** Guarded tools with loop-detection wrappers. */
     tools: StructuredToolInterface[];
-    /** Returns true once the guard has poisoned all tools (total ceiling or repeated-call poison). */
+    /** Returns true once the guard has exhausted all budgets or hit the hard ceiling. */
     isCeilingReached: () => boolean;
 }
 
 /**
  * Wrap tools with a loop-detection guard.
  *
- * Tracks each (tool, args) pair's total invocation count. If the same tool is
- * called with identical arguments more than MAX_REPEATED_TOOL_CALLS times
- * (total, not just consecutive), it returns a cached result (for read-only
- * tools) or an error message asking the model to stop. If the model still
- * keeps calling after LOOP_TOLERANCE more attempts, the guard "poisons" all
- * tools — every subsequent call to ANY tool returns an instant error without
- * executing the underlying tool.
- *
- * Note: We cannot use `throw` to terminate the agent because LangGraph's
- * ToolNode catches all errors and converts them to error ToolMessages,
- * which the model then ignores and retries. The poisoned-flag approach
- * ensures no further tool side-effects occur. Combined with the per-type
- * recursion limits (PIPELINE_RECURSION_LIMIT, DEV_RECURSION_LIMIT,
- * REVIEWER_RECURSION_LIMIT), this keeps token waste to a minimum.
+ * Key changes from the pre-Sub-Plan-08 implementation:
+ * 1. Repeated identical calls block ONLY the offending tool, not all tools.
+ * 2. Read/write/shell budgets are separate — exhausting reads cannot block writes.
+ * 3. Cached responses are free — they do not increment any budget counter.
+ * 4. Progress bonus: recent successful writes grant extra read budget.
+ * 5. Terminal guidance message when budget is exhausted.
  */
 export function withLoopGuard(
     tools: StructuredToolInterface[],
     agentId: string,
-    maxTotalCalls?: number,
+    opts?: number | LoopGuardOptions,
 ): LoopGuardResult {
     if (tools.length === 0) return { tools, isCeilingReached: () => false };
 
-    // Total identical (tool, args) invocation counts: key = `toolName::argSig`
-    const callCounts = new Map<string, number>();
-    // Cache of results for read-only tools: key = `toolName::argSig`
-    const resultCache = new Map<string, string>();
-    // Once poisoned, ALL tool calls return an instant error string
-    let poisoned = false;
-    // Counter for total tool calls across ALL tools (detects cross-tool loops).
-    let totalCalls = 0;
-    const MAX_TOTAL_CALLS = maxTotalCalls ?? DEFAULT_MAX_TOTAL_CALLS;
+    // Parse options: legacy number = maxTotalCalls, object = full options
+    const options: LoopGuardOptions = typeof opts === 'number'
+        ? { maxTotalCalls: opts }
+        : (opts ?? {});
 
-    const POISON_MSG = JSON.stringify({
-        error: `TERMINATED: Agent "${agentId}" is stuck in a tool loop. ` +
-            'ALL tools are disabled and will return this error. ' +
-            'You MUST stop calling tools immediately. ' +
-            'Produce your final JSON response with whatever information you have gathered so far. ' +
-            'If you have no information, return a minimal valid JSON object matching the response schema.',
+    const budgets = options.budgets ?? null;
+    const progressBonus = options.progressBonus ?? 10;
+    const hardCeiling = options.hardCeiling ?? 80;
+
+    // ── Per-category counters ────────────────────────────────────────────
+    let readCalls = 0;
+    let writeCalls = 0;
+    let shellCalls = 0;
+    let totalCalls = 0;
+
+    // Legacy mode: if no budgets, use maxTotalCalls as a flat ceiling
+    const legacyMaxCalls = budgets ? null : (options.maxTotalCalls ?? 22);
+
+    // Max budget per category (mutable — progress bonus can extend reads)
+    let maxReads = budgets?.reads ?? Infinity;
+    let maxWrites = budgets?.writes ?? Infinity;
+    let maxShell = budgets?.shell ?? Infinity;
+
+    // ── Loop detection state ─────────────────────────────────────────────
+    const callCounts = new Map<string, number>();
+    const resultCache = new Map<string, string>();
+    const blockedKeys = new Set<string>();   // per-(tool,args) blocks
+    let allExhausted = false;
+    let recentWriteCount = 0;       // writes in the last N calls (progress tracking)
+    let bonusGranted = 0;           // total bonus already granted
+
+    function isExhausted(): boolean {
+        if (allExhausted) return true;
+        if (totalCalls >= hardCeiling) return true;
+        if (legacyMaxCalls !== null && totalCalls >= legacyMaxCalls) return true;
+        // All categories exhausted (only when budgets are set)
+        if (budgets && readCalls >= maxReads && writeCalls >= maxWrites && shellCalls >= maxShell) return true;
+        return false;
+    }
+
+    // ── Terminal guidance message ────────────────────────────────────────
+    const EXHAUSTED_MSG = JSON.stringify({
+        error: `BUDGET EXHAUSTED: Agent "${agentId}" has used all available tool calls. ` +
+            'Return your JSON output now, listing exactly the files you actually wrote. ' +
+            'Do not claim files you did not write. ' +
+            'Produce your final JSON response matching the response schema.',
     });
 
     const wrappedTools = tools.map((originalTool) => {
         const wrappedFn = async (args: Record<string, any>) => {
             const toolName = originalTool.name;
-
-            // Fast path: if already poisoned, return error immediately for ANY tool
-            if (poisoned) {
-                return POISON_MSG;
-            }
-
-            totalCalls++;
-            // Safety net: if total tool calls across all tools exceed ceiling, poison
-            if (totalCalls > MAX_TOTAL_CALLS) {
-                guardLog.error(
-                    `${agentId}: exceeded ${MAX_TOTAL_CALLS} total tool calls (${totalCalls}/${MAX_TOTAL_CALLS}) — poisoning all tools`,
-                );
-                poisoned = true;
-                return POISON_MSG;
-            }
-
+            const category = classifyTool(toolName);
             const argSig = JSON.stringify(args);
             const key = `${toolName}::${argSig}`;
 
-            // If a mutating tool was invoked, the workspace has changed,
-            // so re-running read/command tools with the same args is valid.
-            // Clear per-call repeat counts AND result cache to prevent false positives.
+            // Fast path: if all budgets exhausted, return terminal guidance
+            if (isExhausted()) {
+                if (!allExhausted) {
+                    guardLog.error(`${agentId}: all tool budgets exhausted (total=${totalCalls}) — returning terminal guidance`);
+                    allExhausted = true;
+                }
+                return EXHAUSTED_MSG;
+            }
+
+            // ── Per-(tool,args) block check ──────────────────────────────
+            if (blockedKeys.has(key)) {
+                // This specific (tool,args) is blocked — but other tools still work
+                return JSON.stringify({
+                    error: `[BLOCKED] You already called ${toolName}('${argSig.slice(0, 80)}') ${MAX_REPEATED_TOOL_CALLS + LOOP_TOLERANCE} times. ` +
+                        'The answer is in your prompt\'s Workspace Snapshot or earlier results. ' +
+                        'Use a DIFFERENT tool or produce your final JSON response.',
+                });
+            }
+
+            // ── Mutation clears read caches ──────────────────────────────
             if (MUTATING_TOOL_NAMES.has(toolName)) {
-                // Keep this call's own count: repeating the *identical* mutation
-                // (same file, same content) is still a loop, and clearing it
-                // would make such a loop undetectable.
                 const ownCount = callCounts.get(key) ?? 0;
                 callCounts.clear();
                 resultCache.clear();
                 if (ownCount > 0) callCounts.set(key, ownCount);
+                // Track progress
+                recentWriteCount++;
             }
 
-            // If run_command was invoked, files may have changed (npm install, etc.).
-            // Clear result cache but NOT callCounts — run_command loops are still detected.
-            if (toolName === 'run_command') {
+            if (SHELL_TOOL_NAMES.has(toolName)) {
                 resultCache.clear();
             }
 
-            // Increment the count for this (tool, args) pair BEFORE checking
-            // thresholds so the count includes the current invocation.
-            // With MAX_REPEATED_TOOL_CALLS = 2: 1st call → count=1 (runs),
-            // 2nd call → count=2 (warns/caches), 3rd call → count=3 (poisons).
+            // ── Repeat detection ─────────────────────────────────────────
             const prev = callCounts.get(key) ?? 0;
             const count = prev + 1;
             callCounts.set(key, count);
 
-            // Poisoning threshold: too many identical calls (total, not consecutive)
+            // Block threshold: block THIS (tool,args) only
             if (count >= MAX_REPEATED_TOOL_CALLS + LOOP_TOLERANCE) {
-                guardLog.error(
-                    `${agentId}: tool "${toolName}" called ${count} times with identical args (total) ` +
-                    `(${totalCalls}/${MAX_TOTAL_CALLS} total calls) — poisoning all tools`,
+                guardLog.warn(
+                    `${agentId}: tool "${toolName}" called ${count} times with identical args — blocking this call only`,
                 );
-                poisoned = true;
-                return POISON_MSG;
+                blockedKeys.add(key);
+                return JSON.stringify({
+                    error: `[BLOCKED] You already called ${toolName}('${argSig.slice(0, 80)}') ${count} times. ` +
+                        'The answer is in your prompt\'s Workspace Snapshot or earlier results. ' +
+                        'Use a DIFFERENT tool or produce your final JSON response.',
+                });
             }
 
-            // Warning threshold: return cached result or error, do not re-execute
+            // Warning threshold: return cached result (FREE — no budget consumed)
             if (count >= MAX_REPEATED_TOOL_CALLS) {
                 const cached = resultCache.get(key);
 
                 if (cached !== undefined) {
                     guardLog.warn(
-                        `${agentId}: tool "${toolName}" called ${count} times with identical args (total) ` +
-                        `(${totalCalls}/${MAX_TOTAL_CALLS} total calls) — returning cached result`,
+                        `${agentId}: tool "${toolName}" called ${count} times with identical args — returning cached result (free)`,
                     );
+                    // Cached responses are FREE — do not increment any counter
                     return `[CACHED — identical to your earlier call. Do not call this again.]\n${cached}`;
                 }
 
                 guardLog.warn(
-                    `${agentId}: tool "${toolName}" called ${count} times with identical args (total) ` +
-                    `(${totalCalls}/${MAX_TOTAL_CALLS} total calls) — breaking loop`,
+                    `${agentId}: tool "${toolName}" called ${count} times with identical args — breaking loop`,
                 );
+                // Non-cacheable repeat — still don't count against budget
                 return JSON.stringify({
                     error: `Tool "${toolName}" has been called ${count} times with the same arguments. ` +
-                        'This indicates a loop. STOP calling tools and produce your final JSON response now. ' +
-                        `Use the information you already have. Do NOT call any more tools. ` +
-                        `You have ${MAX_TOTAL_CALLS - totalCalls} tool calls left.`,
+                        'This indicates a loop. Use the information you already have.',
                 });
             }
 
-            // Execute the tool
+            // ── Budget check (per-category) ──────────────────────────────
+            if (budgets) {
+                // Progress bonus: if agent has written files recently, extend read budget
+                if (recentWriteCount > 0 && bonusGranted < progressBonus) {
+                    const bonus = Math.min(progressBonus - bonusGranted, progressBonus);
+                    maxReads += bonus;
+                    bonusGranted += bonus;
+                    recentWriteCount = 0;
+                    guardLog.info(
+                        `${agentId}: progress detected (writes) — granting ${bonus} bonus read calls (total reads budget: ${maxReads})`,
+                    );
+                }
+
+                const categoryExhausted =
+                    (category === 'read' && readCalls >= maxReads) ||
+                    (category === 'write' && writeCalls >= maxWrites) ||
+                    (category === 'shell' && shellCalls >= maxShell);
+
+                if (categoryExhausted) {
+                    guardLog.warn(
+                        `${agentId}: ${category} budget exhausted (reads=${readCalls}/${maxReads}, writes=${writeCalls}/${maxWrites}, shell=${shellCalls}/${maxShell})`,
+                    );
+                    // Check if ALL categories are now exhausted
+                    if (readCalls >= maxReads && writeCalls >= maxWrites && shellCalls >= maxShell) {
+                        allExhausted = true;
+                        return EXHAUSTED_MSG;
+                    }
+                    return JSON.stringify({
+                        error: `Your ${category} tool budget is exhausted (${category === 'read' ? readCalls : category === 'write' ? writeCalls : shellCalls} calls used). ` +
+                            `You can still use ${category === 'read' ? 'write and shell' : category === 'write' ? 'read and shell' : 'read and write'} tools. ` +
+                            'If your work is complete, return your JSON output now.',
+                    });
+                }
+            }
+
+            // ── Legacy flat ceiling ──────────────────────────────────────
+            totalCalls++;
+            if (legacyMaxCalls !== null && totalCalls > legacyMaxCalls) {
+                guardLog.error(
+                    `${agentId}: exceeded ${legacyMaxCalls} total tool calls (${totalCalls}/${legacyMaxCalls})`,
+                );
+                allExhausted = true;
+                return EXHAUSTED_MSG;
+            }
+
+            // Hard ceiling
+            if (totalCalls >= hardCeiling) {
+                guardLog.error(`${agentId}: hit hard ceiling of ${hardCeiling} total calls`);
+                allExhausted = true;
+                return EXHAUSTED_MSG;
+            }
+
+            // ── Increment category counter ───────────────────────────────
+            if (category === 'read') readCalls++;
+            else if (category === 'write') writeCalls++;
+            else shellCalls++;
+
+            // ── Execute the tool ─────────────────────────────────────────
             const result = await originalTool.invoke(args);
 
             // Cache the result for read-only tools
@@ -209,6 +323,6 @@ export function withLoopGuard(
 
     return {
         tools: wrappedTools,
-        isCeilingReached: () => poisoned,
+        isCeilingReached: () => isExhausted(),
     };
 }

@@ -69,9 +69,9 @@ const fixtureStories: UserStory[] = [
 ];
 
 const fixtureTasks: Task[] = [
-    { id: 'TASK-001', storyId: 'US-001', title: 'Create registration API', description: 'POST /api/auth/register endpoint', layer: 'backend', suggestedTech: 'NestJS' },
-    { id: 'TASK-002', storyId: 'US-001', title: 'Registration form', description: 'React registration form', layer: 'frontend', suggestedTech: 'React' },
-    { id: 'TASK-003', storyId: 'US-002', title: 'Login endpoint', description: 'POST /api/auth/login', layer: 'backend', suggestedTech: 'NestJS' },
+    { id: 'TASK-001', storyId: 'US-001', title: 'Create registration API', description: 'POST /api/auth/register endpoint', layer: 'backend', suggestedTech: 'NestJS', moduleIds: [] },
+    { id: 'TASK-002', storyId: 'US-001', title: 'Registration form', description: 'React registration form', layer: 'frontend', suggestedTech: 'React', moduleIds: [] },
+    { id: 'TASK-003', storyId: 'US-002', title: 'Login endpoint', description: 'POST /api/auth/login', layer: 'backend', suggestedTech: 'NestJS', moduleIds: [] },
 ];
 
 const fixtureFileChanges: FileChange[] = Array.from({ length: 80 }, (_, i) => ({
@@ -205,31 +205,34 @@ describe('summariseStories', () => {
 
 describe('storiesForIds', () => {
     it('returns only the requested stories with acceptance criteria', () => {
-        const result = storiesForIds(fixtureStories, ['US-001', 'US-003']);
-        expect(result).toContain('US-001');
-        expect(result).toContain('Email required');
-        expect(result).toContain('Password min 8 chars');
-        expect(result).toContain('US-003');
-        expect(result).toContain('Table view');
+        const { text, missing } = storiesForIds(fixtureStories, ['US-001', 'US-003']);
+        expect(text).toContain('US-001');
+        expect(text).toContain('Email required');
+        expect(text).toContain('Password min 8 chars');
+        expect(text).toContain('US-003');
+        expect(text).toContain('Table view');
         // US-002 should NOT be present
-        expect(result).not.toContain('US-002');
-        expect(result).not.toContain('JWT token');
+        expect(text).not.toContain('US-002');
+        expect(text).not.toContain('JWT token');
+        expect(missing).toEqual([]);
     });
 
     it('ignores unknown ids gracefully', () => {
-        const result = storiesForIds(fixtureStories, ['US-001', 'US-999']);
-        expect(result).toContain('US-001');
-        expect(result).not.toContain('US-999');
+        const { text, missing } = storiesForIds(fixtureStories, ['US-001', 'US-999']);
+        expect(text).toContain('US-001');
+        expect(text).not.toContain('US-999');
+        expect(missing).toEqual(['US-999']);
     });
 
     it('returns fallback when no ids match', () => {
-        const result = storiesForIds(fixtureStories, ['US-999']);
-        expect(result).toBe('(no matching stories)');
+        const { text, missing } = storiesForIds(fixtureStories, ['US-999']);
+        expect(text).toBe('(no matching stories)');
+        expect(missing).toEqual(['US-999']);
     });
 
     it('returns fallback for empty inputs', () => {
-        expect(storiesForIds([], ['US-001'])).toBe('(no stories)');
-        expect(storiesForIds(fixtureStories, [])).toBe('(no stories)');
+        expect(storiesForIds([], ['US-001']).text).toBe('(no stories)');
+        expect(storiesForIds(fixtureStories, []).text).toBe('(no stories)');
     });
 });
 

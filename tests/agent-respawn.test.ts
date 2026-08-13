@@ -128,8 +128,8 @@ describe('Agent Respawn', () => {
             const handoff = buildHandoff(messages, 1);
 
             expect(handoff.commandsRun).toHaveLength(2);
-            expect(handoff.commandsRun[0]).toEqual({ command: 'npm install', exitCode: 0 });
-            expect(handoff.commandsRun[1]).toEqual({ command: 'npm test', exitCode: 1 });
+            expect(handoff.commandsRun[0]).toMatchObject({ command: 'npm install', exitCode: 0 });
+            expect(handoff.commandsRun[1]).toMatchObject({ command: 'npm test', exitCode: 1 });
         });
 
         it('never includes file content in the handoff', () => {
@@ -249,7 +249,7 @@ describe('Agent Respawn', () => {
 
             const rendered = renderHandoff(handoff);
 
-            expect(rendered).toContain('Previous Attempt (generation 1)');
+            expect(rendered).toContain('Handoff from generation 1');
             expect(rendered).toContain('src/Board.tsx');
             expect(rendered).toContain('src/Board.test.tsx');
             expect(rendered).toContain('npm test');

@@ -23,12 +23,13 @@ const baseCfg = {
 // ─── buildDevPersonaCompact ──────────────────────────────────────────────────
 
 describe('buildDevPersonaCompact', () => {
-    test('compact persona is under 3000 chars without conventions', () => {
+    test('compact persona is under 4100 chars without conventions', () => {
         const persona = buildDevPersonaCompact(baseCfg);
-        expect(persona.length).toBeLessThan(3000);
+        // Sub-Plan 10 added the [storyId#acIndex] test naming convention (~250 chars).
+        expect(persona.length).toBeLessThan(4100);
     });
 
-    test('compact persona is under 3500 chars with conventions', () => {
+    test('compact persona is under 5100 chars with conventions', () => {
         const persona = buildDevPersonaCompact({
             ...baseCfg,
             conventionFiles: ['Universal.md', 'React.md'],
@@ -36,7 +37,8 @@ describe('buildDevPersonaCompact', () => {
         // The conventions digest (extracted headings/rules) adds content, but
         // the total should still be well under the ~7000 of the old persona.
         // Sub-Plan 02 added anti-gaming rules (~400 chars), raising this ceiling.
-        expect(persona.length).toBeLessThan(4000);
+        // Sub-Plan 10 added the [storyId#acIndex] test naming convention (~250 chars).
+        expect(persona.length).toBeLessThan(5100);
     });
 
     test('retains NO DEAD CODE rule', () => {
@@ -102,7 +104,7 @@ describe('buildDevPersonaCompact', () => {
         for (const rank of ['principal', 'senior', 'junior'] as const) {
             const persona = buildDevPersonaCompact({ ...baseCfg, rank });
             expect(persona.length).toBeGreaterThan(500);
-            expect(persona.length).toBeLessThan(3000);
+            expect(persona.length).toBeLessThan(4100);
         }
     });
 });
@@ -115,7 +117,7 @@ describe('buildDevPersona with PERSONA_COMPACT=true', () => {
         // Compact persona does NOT have <git_workflow> or <tdd_rules>
         expect(persona).not.toContain('<git_workflow>');
         expect(persona).not.toContain('<tdd_rules>');
-        expect(persona.length).toBeLessThan(3000);
+        expect(persona.length).toBeLessThan(4100);
     });
 });
 

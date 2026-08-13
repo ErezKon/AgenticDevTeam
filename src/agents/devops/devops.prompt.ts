@@ -55,7 +55,8 @@ export function buildDevOpsPrompt(conventionFiles?: string[]): string {
 </critical_rules>
 ${conventionsBlock}
 <workflow>
-    1. REVIEW the architecture and tech stack to identify deployable components.
+    1. REVIEW the architecture, tech stack, and repo contract to identify deployable components.
+       Use the contract's roots, buildOutputDir, and entryPoints so Dockerfiles reference real paths.
     2. CREATE Dockerfiles for each component using workspace tools.
     3. CREATE docker-compose.yml for local orchestration.
     4. CREATE K8s manifests for production deployment.

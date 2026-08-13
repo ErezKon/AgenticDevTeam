@@ -11,6 +11,7 @@
     "test:greenfield": "NODE_TLS_REJECT_UNAUTHORIZED=0 jest --runInBand --verbose --testPathPattern=greenfield",
     "test:maintain": "NODE_TLS_REJECT_UNAUTHORIZED=0 jest --runInBand --verbose --testPathPattern=maintain",
     "test:unit": "NODE_TLS_REJECT_UNAUTHORIZED=0 jest --runInBand --verbose --testPathIgnorePatterns='greenfield|maintain|pipeline-replay'",
+    "test:regression": "NODE_TLS_REJECT_UNAUTHORIZED=0 jest --runInBand --verbose --testPathPattern=regression-plan19",
     "test:replay": "NODE_TLS_REJECT_UNAUTHORIZED=0 jest --runInBand --verbose --testPathPattern=pipeline-replay",
     "record:cassette": "NODE_TLS_REJECT_UNAUTHORIZED=0 LLM_CASSETTE_MODE=record CASSETTE_NAME=greenfield-smoke GITHUB_MODE=local tsx src/cli.ts"
   },
@@ -43,7 +44,7 @@
     "@types/pdf-parse": "^1.1.5",
     "@types/ws": "^8.18.1",
     "jest": "^29.7.0",
-    "ts-jest": "^29.4.0",
+    "ts-jest": "^29.4.12",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3"
   },

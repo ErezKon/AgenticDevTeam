@@ -46,12 +46,12 @@ describe('isBlockingReview', () => {
         expect(isBlockingReview(comments)).toBe(true);
     });
 
-    it('returns false when severity is missing (defaults to info)', () => {
+    it('returns true when severity is missing (Sub-Plan 07: unknown = blocking)', () => {
         const comments = [
             { severity: undefined },
             {},
         ];
-        expect(isBlockingReview(comments)).toBe(false);
+        expect(isBlockingReview(comments)).toBe(true);
     });
 
     it('returns false for an empty comments array', () => {
