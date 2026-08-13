@@ -1,123 +1,122 @@
 # QA Lead — Test Plan
 
 **Agent**: qa-lead  
-**Generated**: 2026-08-07T22:59:44.314Z
+**Generated**: 2026-08-13T07:37:15.026Z
 
 ---
 
 ## Test Plan
 
 {
-  "scope": "No explicit user stories or acceptance criteria were provided. The test plan is derived from the functional requirements of the calculator SPA, covering parsing, evaluation, UI interaction, error handling, and critical user journeys.",
+  "scope": "All acceptance criteria are covered by the test plan.",
   "unit": [
     {
-      "target": "src/engine/tokenizer.ts - tokenize function",
-      "description": "Tokenizes input strings into numbers, operators, parentheses, handling decimals and negatives.",
+      "target": "src/engine/CalculatorEngine.ts",
+      "description": "[US-002#0] evaluate returns correct numeric result for valid expressions",
       "framework": "Jest",
-      "storyId": "CALC-ENG",
-      "acIndex": 0
+      "storyId": "US-002",
+      "acIndex": 0,
+      "moduleId": "CalculatorEngine"
     },
     {
-      "target": "src/engine/parser.ts - parseExpression function",
-      "description": "Parses valid arithmetic expressions with correct operator precedence and parentheses.",
+      "target": "src/engine/CalculatorEngine.ts",
+      "description": "[US-002#1] evaluate returns error on division by zero",
       "framework": "Jest",
-      "storyId": "CALC-ENG",
-      "acIndex": 1
+      "storyId": "US-002",
+      "acIndex": 1,
+      "moduleId": "CalculatorEngine"
     },
     {
-      "target": "src/engine/evaluator.ts - evaluateAST function",
-      "description": "Evaluates the abstract syntax tree produced by the parser and returns the correct numeric result.",
+      "target": "src/utils/validation.ts",
+      "description": "[US-003#0] isValidExpression correctly validates syntactically correct and malformed expressions",
       "framework": "Jest",
-      "storyId": "CALC-ENG",
-      "acIndex": 2
+      "storyId": "US-003",
+      "acIndex": 0,
+      "moduleId": "ValidationUtils"
     },
     {
-      "target": "src/engine/errors.ts",
-      "description": "Throws descriptive errors for syntax errors, unmatched parentheses, and division by zero.",
+      "target": "src/components/Display.tsx",
+      "description": "[US-001#0] Display component shows current expression and result or error message",
       "framework": "Jest",
-      "storyId": "CALC-ENG",
-      "acIndex": 3
+      "storyId": "US-001",
+      "acIndex": 0,
+      "moduleId": "Display"
     },
     {
-      "target": "src/engine/utils.ts - isValidNumber helper",
-      "description": "Validates numeric tokens, ensuring proper handling of leading zeros and decimal points.",
+      "target": "src/components/Button.tsx",
+      "description": "[US-001#1] Button component renders with ARIA label and updates expression on click",
       "framework": "Jest",
-      "storyId": "CALC-ENG",
-      "acIndex": 4
+      "storyId": "US-001",
+      "acIndex": 1,
+      "moduleId": "Button"
     }
   ],
   "integration": [
     {
-      "target": "src/components/Calculator.tsx - expression submission",
-      "description": "UI captures user input, passes the raw expression to the Calculator Engine, and displays the numeric result.",
-      "framework": "Jest with React Testing Library",
-      "storyId": "CALC-UI",
-      "acIndex": 0
+      "target": "src/components/Calculator.tsx",
+      "description": "[US-001#1] UI renders all required buttons with correct ARIA labels and updates expression state on click",
+      "framework": "Jest",
+      "storyId": "US-001",
+      "acIndex": 1,
+      "moduleId": "Calculator"
     },
     {
-      "target": "src/components/Calculator.tsx - error display",
-      "description": "When the engine throws an error, the UI renders a clear validation message without breaking the layout.",
-      "framework": "Jest with React Testing Library",
-      "storyId": "CALC-UI",
-      "acIndex": 1
+      "target": "src/components/Calculator.tsx",
+      "description": "[US-003#1] UI displays user-friendly error message when invalid expression is submitted",
+      "framework": "Jest",
+      "storyId": "US-003",
+      "acIndex": 1,
+      "moduleId": "Calculator"
     },
     {
-      "target": "src/components/Calculator.tsx - keyboard support",
-      "description": "Pressing Enter triggers evaluation; arrow keys navigate within the input field without losing focus.",
-      "framework": "Jest with React Testing Library",
-      "storyId": "CALC-UI",
-      "acIndex": 2
+      "target": ".github/workflows/ci.yml",
+      "description": "[US-004#0] GitHub Actions workflow runs Jest test suite on push and fails on test failures",
+      "framework": "Jest",
+      "storyId": "US-004",
+      "acIndex": 0,
+      "moduleId": "CI"
     },
     {
-      "target": "src/components/Calculator.tsx - sanitization",
-      "description": "Any engine output is escaped before being rendered to prevent XSS.",
-      "framework": "Jest with React Testing Library",
-      "storyId": "CALC-SEC",
-      "acIndex": 0
+      "target": "vite.config.ts",
+      "description": "[US-005#0] After Vite build, index.html loads SPA without console errors",
+      "framework": "Jest",
+      "storyId": "US-005",
+      "acIndex": 0,
+      "moduleId": "Build"
     }
   ],
   "e2e": [
     {
-      "scenario": "User enters a simple valid expression and sees correct result",
-      "description": "Type '2+3*4' into the calculator, press Enter, and verify that the displayed result is '14'.",
+      "scenario": "[US-001#2] Keyboard navigation: Tab through buttons and activate with Enter updates expression instantly",
+      "description": "E2E test verifies keyboard navigation and activation updates expression correctly.",
       "criticalPath": true,
-      "storyId": "CALC-E2E",
-      "acIndex": 0
+      "storyId": "US-001",
+      "acIndex": 2,
+      "moduleId": "CalculatorApp"
     },
     {
-      "scenario": "User enters expression with parentheses and decimals",
-      "description": "Type '(1.5+2.5)*2', press Enter, and verify that the displayed result is '8'.",
+      "scenario": "[US-004#1] Netlify deployment: after successful build, deployed site loads without errors",
+      "description": "E2E test ensures Netlify deployed site loads without errors after build.",
       "criticalPath": true,
-      "storyId": "CALC-E2E",
-      "acIndex": 1
+      "storyId": "US-004",
+      "acIndex": 1,
+      "moduleId": "Deployment"
     },
     {
-      "scenario": "User enters negative numbers",
-      "description": "Type '-5+3', press Enter, and verify that the displayed result is '-2'.",
+      "scenario": "[US-005#0] SPA loads without console errors after deployment",
+      "description": "E2E test checks SPA loads cleanly without console errors post-deployment.",
       "criticalPath": true,
-      "storyId": "CALC-E2E",
-      "acIndex": 2
+      "storyId": "US-005",
+      "acIndex": 0,
+      "moduleId": "CalculatorApp"
     },
     {
-      "scenario": "User triggers division by zero error",
-      "description": "Type '10/0', press Enter, and verify that a user‑friendly error message like 'Division by zero' is shown.",
+      "scenario": "[US-005#1] End-to-end calculation: user enters full expression via clicks and keyboard, presses '=', sees correct result",
+      "description": "E2E test performs full calculation flow and verifies correct result.",
       "criticalPath": true,
-      "storyId": "CALC-E2E",
-      "acIndex": 3
-    },
-    {
-      "scenario": "User enters a malformed expression",
-      "description": "Type '5++2', press Enter, and verify that a syntax error message is displayed.",
-      "criticalPath": true,
-      "storyId": "CALC-E2E",
-      "acIndex": 4
-    },
-    {
-      "scenario": "Responsive layout on different viewports",
-      "description": "Resize the browser to mobile width and verify that the input and result remain visible and usable.",
-      "criticalPath": false,
-      "storyId": "CALC-UI",
-      "acIndex": 3
+      "storyId": "US-005",
+      "acIndex": 1,
+      "moduleId": "CalculatorApp"
     }
   ],
   "coverageTargets": {
