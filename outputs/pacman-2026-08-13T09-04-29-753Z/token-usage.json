@@ -117,5 +117,85 @@
     "outputTokens": 5944,
     "totalTokens": 13668,
     "timestamp": "2026-08-13T09:05:48.161Z"
+  },
+  {
+    "agentId": "principal-backend",
+    "model": "gpt-oss-120b",
+    "phase": "development",
+    "inputTokens": 6247,
+    "outputTokens": 158,
+    "totalTokens": 6405,
+    "timestamp": "2026-08-13T09:05:52.602Z",
+    "invocationId": "inv-principal-backend-18"
+  },
+  {
+    "agentId": "senior-backend",
+    "model": "gpt-oss-120b",
+    "phase": "development",
+    "inputTokens": 4094,
+    "outputTokens": 31,
+    "totalTokens": 4125,
+    "timestamp": "2026-08-13T09:05:56.142Z",
+    "invocationId": "inv-senior-backend-1"
+  },
+  {
+    "agentId": "senior-backend",
+    "model": "gpt-oss-120b",
+    "phase": "development",
+    "inputTokens": 3599,
+    "outputTokens": 763,
+    "totalTokens": 4362,
+    "timestamp": "2026-08-13T09:06:05.985Z",
+    "invocationId": "inv-senior-backend-2"
+  },
+  {
+    "agentId": "principal-backend",
+    "model": "gpt-oss-120b",
+    "phase": "development",
+    "inputTokens": 6276,
+    "outputTokens": 668,
+    "totalTokens": 6944,
+    "timestamp": "2026-08-13T09:06:18.858Z",
+    "invocationId": "inv-principal-backend-18"
+  },
+  {
+    "agentId": "senior-backend",
+    "model": "gpt-oss-120b",
+    "phase": "development",
+    "inputTokens": 4131,
+    "outputTokens": 1242,
+    "totalTokens": 5373,
+    "timestamp": "2026-08-13T09:06:25.844Z",
+    "invocationId": "inv-senior-backend-1"
+  },
+  {
+    "agentId": "senior-backend",
+    "model": "gpt-oss-120b",
+    "phase": "development",
+    "inputTokens": 3766,
+    "outputTokens": 54,
+    "totalTokens": 3820,
+    "timestamp": "2026-08-13T09:06:29.038Z",
+    "invocationId": "inv-senior-backend-2"
+  },
+  {
+    "agentId": "principal-backend",
+    "model": "gpt-oss-120b",
+    "phase": "development",
+    "inputTokens": 6610,
+    "outputTokens": 158,
+    "totalTokens": 6768,
+    "timestamp": "2026-08-13T09:06:33.979Z",
+    "invocationId": "inv-principal-backend-18"
+  },
+  {
+    "agentId": "product-manager",
+    "model": "gpt-oss-120b",
+    "phase": "product-manager",
+    "inputTokens": 4824,
+    "outputTokens": 7534,
+    "totalTokens": 12358,
+    "timestamp": "2026-08-13T09:06:35.768Z",
+    "invocationId": "inv-product-manager-3"
   }
 ]
