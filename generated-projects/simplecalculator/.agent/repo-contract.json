@@ -6,7 +6,8 @@
       "kind": "frontend",
       "stack": "node",
       "entryPoints": [
-        "src/index.tsx"
+        "index.html",
+        "src/main.tsx"
       ],
       "sourceDirs": [
         "src"
@@ -23,80 +24,169 @@
   ],
   "modules": [
     {
-      "id": "MOD-UI-APP",
-      "path": "src/App.tsx",
-      "componentName": "UI",
-      "exports": [
-        {
-          "name": "App",
-          "kind": "component",
-          "signature": "React.FC"
-        }
-      ],
-      "dependsOn": [
-        "MOD-ENGINE",
-        "MOD-UI-CALC_DISPLAY",
-        "MOD-UI-CALC_BUTTONS"
-      ]
-    },
-    {
-      "id": "MOD-UI-CALC_DISPLAY",
-      "path": "src/components/Display.tsx",
-      "componentName": "UI",
-      "exports": [
-        {
-          "name": "Display",
-          "kind": "component",
-          "signature": "React.FC<{value: string}>"
-        }
-      ],
-      "dependsOn": []
-    },
-    {
-      "id": "MOD-UI-CALC_BUTTONS",
-      "path": "src/components/Buttons.tsx",
-      "componentName": "UI",
-      "exports": [
-        {
-          "name": "Buttons",
-          "kind": "component",
-          "signature": "React.FC<{onPress: (value: string) => void}>"
-        }
-      ],
-      "dependsOn": []
-    },
-    {
-      "id": "MOD-ENGINE",
-      "path": "src/engine/calculator.ts",
+      "id": "MOD-CALC-ENGINE",
+      "path": "src/engine/calculatorEngine.ts",
       "componentName": "Calculator Engine",
       "exports": [
         {
-          "name": "evaluate",
-          "kind": "function",
-          "signature": "(expression: string) => number"
+          "name": "CalculatorEngine",
+          "kind": "class",
+          "signature": "class CalculatorEngine { evaluate(expression: string): number; clear(): void; }"
         }
       ],
       "dependsOn": [
-        "MOD-UTILS"
+        "MOD-MATH-UTILS",
+        "MOD-CONSTANTS"
       ]
     },
     {
-      "id": "MOD-UTILS",
-      "path": "src/utils/validation.ts",
-      "componentName": "Validation Utils",
+      "id": "MOD-MATH-UTILS",
+      "path": "src/utils/mathUtils.ts",
+      "componentName": "Math Utilities",
       "exports": [
         {
-          "name": "isValidExpression",
+          "name": "sqrt",
           "kind": "function",
-          "signature": "(expr: string) => boolean"
+          "signature": "function sqrt(x: number): number"
+        },
+        {
+          "name": "pow",
+          "kind": "function",
+          "signature": "function pow(base: number, exponent: number): number"
+        },
+        {
+          "name": "log",
+          "kind": "function",
+          "signature": "function log(x: number, base?: number): number"
+        },
+        {
+          "name": "ln",
+          "kind": "function",
+          "signature": "function ln(x: number): number"
+        },
+        {
+          "name": "sin",
+          "kind": "function",
+          "signature": "function sin(rad: number): number"
+        },
+        {
+          "name": "cos",
+          "kind": "function",
+          "signature": "function cos(rad: number): number"
+        },
+        {
+          "name": "tan",
+          "kind": "function",
+          "signature": "function tan(rad: number): number"
+        },
+        {
+          "name": "factorial",
+          "kind": "function",
+          "signature": "function factorial(n: number): number"
+        },
+        {
+          "name": "abs",
+          "kind": "function",
+          "signature": "function abs(x: number): number"
+        },
+        {
+          "name": "radToDeg",
+          "kind": "function",
+          "signature": "function radToDeg(rad: number): number"
+        },
+        {
+          "name": "degToRad",
+          "kind": "function",
+          "signature": "function degToRad(deg: number): number"
+        },
+        {
+          "name": "percent",
+          "kind": "function",
+          "signature": "function percent(x: number): number"
+        }
+      ],
+      "dependsOn": []
+    },
+    {
+      "id": "MOD-CONSTANTS",
+      "path": "src/constants.ts",
+      "componentName": "Constants",
+      "exports": [
+        {
+          "name": "PI",
+          "kind": "const",
+          "signature": "const PI: number"
+        },
+        {
+          "name": "E",
+          "kind": "const",
+          "signature": "const E: number"
+        }
+      ],
+      "dependsOn": []
+    },
+    {
+      "id": "MOD-SCIENTIFIC-BUTTON",
+      "path": "src/components/ScientificButton.tsx",
+      "componentName": "Calculator UI",
+      "exports": [
+        {
+          "name": "ScientificButton",
+          "kind": "component",
+          "signature": "function ScientificButton(props: { symbol: string; tooltip: string; onClick: () => void; }): JSX.Element"
+        }
+      ],
+      "dependsOn": [
+        "MOD-TOOLTIP"
+      ]
+    },
+    {
+      "id": "MOD-TOOLTIP",
+      "path": "src/components/Tooltip.tsx",
+      "componentName": "Calculator UI",
+      "exports": [
+        {
+          "name": "Tooltip",
+          "kind": "component",
+          "signature": "function Tooltip(props: { text: string; children: React.ReactNode; }): JSX.Element"
+        }
+      ],
+      "dependsOn": []
+    },
+    {
+      "id": "MOD-CALC-UI",
+      "path": "src/components/CalculatorUI.tsx",
+      "componentName": "Calculator UI",
+      "exports": [
+        {
+          "name": "CalculatorUI",
+          "kind": "component",
+          "signature": "function CalculatorUI(): JSX.Element"
+        }
+      ],
+      "dependsOn": [
+        "MOD-CALC-ENGINE",
+        "MOD-SCIENTIFIC-BUTTON",
+        "MOD-TOOLTIP"
+      ]
+    },
+    {
+      "id": "MOD-TYPES",
+      "path": "src/types.ts",
+      "componentName": "shared",
+      "exports": [
+        {
+          "name": "Operator",
+          "kind": "type",
+          "signature": "type Operator = '+' | '-' | '*' | '/' | '^' | '√' | 'log' | 'ln' | 'sin' | 'cos' | 'tan' | '!' | '%' | '(' | ')'"
         }
       ],
       "dependsOn": []
     }
   ],
-  "namingConvention": "PascalCase components, camelCase utils, kebab-case files",
-  "sharedTypes": [],
-  "frozenPaths": [
-    "src/index.tsx"
-  ]
+  "namingConvention": "PascalCase for React components, camelCase for functions and utilities, UPPER_SNAKE_CASE for constants",
+  "sharedTypes": [
+    "src/types.ts"
+  ],
+  "frozenPaths": []
 }

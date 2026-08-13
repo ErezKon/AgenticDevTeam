@@ -8,13 +8,13 @@
 
 ## Naming Convention
 
-PascalCase components, camelCase utils, kebab-case files
+PascalCase for React components, camelCase for functions and utilities, UPPER_SNAKE_CASE for constants
 
 ## Stack Roots
 
 ### `.` (frontend / node)
 
-- **Entry points:** `src/index.tsx`
+- **Entry points:** `index.html`, `src/main.tsx`
 - **Source dirs:** `src`
 - **Test dirs:** `tests`
 - **Build output:** `dist/`
@@ -28,14 +28,14 @@ PascalCase components, camelCase utils, kebab-case files
 
 | ID | Path | Component | Exports | Depends On |
 |----|------|-----------|---------|------------|
-| MOD-UI-APP | `src/App.tsx` | UI | `App` (component) | MOD-ENGINE, MOD-UI-CALC_DISPLAY, MOD-UI-CALC_BUTTONS |
-| MOD-UI-CALC_DISPLAY | `src/components/Display.tsx` | UI | `Display` (component) | — |
-| MOD-UI-CALC_BUTTONS | `src/components/Buttons.tsx` | UI | `Buttons` (component) | — |
-| MOD-ENGINE | `src/engine/calculator.ts` | Calculator Engine | `evaluate` (function) | MOD-UTILS |
-| MOD-UTILS | `src/utils/validation.ts` | Validation Utils | `isValidExpression` (function) | — |
+| MOD-CALC-ENGINE | `src/engine/calculatorEngine.ts` | Calculator Engine | `CalculatorEngine` (class) | MOD-MATH-UTILS, MOD-CONSTANTS |
+| MOD-MATH-UTILS | `src/utils/mathUtils.ts` | Math Utilities | `sqrt` (function), `pow` (function), `log` (function), `ln` (function), `sin` (function), `cos` (function), `tan` (function), `factorial` (function), `abs` (function), `radToDeg` (function), `degToRad` (function), `percent` (function) | — |
+| MOD-CONSTANTS | `src/constants.ts` | Constants | `PI` (const), `E` (const) | — |
+| MOD-SCIENTIFIC-BUTTON | `src/components/ScientificButton.tsx` | Calculator UI | `ScientificButton` (component) | MOD-TOOLTIP |
+| MOD-TOOLTIP | `src/components/Tooltip.tsx` | Calculator UI | `Tooltip` (component) | — |
+| MOD-CALC-UI | `src/components/CalculatorUI.tsx` | Calculator UI | `CalculatorUI` (component) | MOD-CALC-ENGINE, MOD-SCIENTIFIC-BUTTON, MOD-TOOLTIP |
+| MOD-TYPES | `src/types.ts` | shared | `Operator` (type) | — |
 
-## Frozen Paths
+## Shared Types
 
-These files are locked after scaffolding and must not be modified by agents:
-
-- `src/index.tsx`
+- `src/types.ts`
