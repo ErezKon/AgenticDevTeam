@@ -39,4 +39,6 @@ coverage/
 .nyc_output/
 .conventions/
 .worktrees/
+.worktrees-failed/
+.agent/
 # ─── /AgenticDevTeam ───
