@@ -1,14 +1,38 @@
 # DBA Mission Report
 
 **Agent**: dba  
-**Generated**: 2026-08-07T22:58:12.315Z
+**Generated**: 2026-08-13T09:40:47.946Z
 
 ---
 
-## Database Engine: none
+## Database Engine: PostgreSQL
 
-The application is a pure client‑side Single Page Application built with React and TypeScript. It has no server‑side component, therefore no relational or NoSQL database is required. All data (the expression string, result, and validation state) lives in the browser memory or transient UI state. Introducing a database would add unnecessary complexity and contradict the chosen tech stack.
+PostgreSQL offers strong ACID compliance, rich data types, and powerful indexing capabilities. It integrates well with TypeScript back‑ends (e.g., via TypeORM or Prisma) and provides the scalability needed if the calculator evolves to support user accounts, persistent calculation history, or analytics. Choosing PostgreSQL aligns with common server‑side stacks while remaining agnostic to the current static‑site deployment, allowing future backend services to be added without re‑architecting the data layer.
 
-## Entities (0)
+## Entities (2)
 
+- **users**: 5 columns
+- **calculations**: 7 columns
 
+## ERD
+
+```mermaid
+erDiagram
+    USERS ||--o{ CALCULATIONS : has
+    USERS {
+        UUID id PK
+        VARCHAR email "UNIQUE NOT NULL"
+        VARCHAR display_name "NOT NULL"
+        TIMESTAMP WITH TIME ZONE created_at "NOT NULL"
+        TIMESTAMP WITH TIME ZONE updated_at "NOT NULL"
+    }
+    CALCULATIONS {
+        UUID id PK
+        UUID user_id FK "REFERENCES users(id) ON DELETE SET NULL"
+        TEXT expression "NOT NULL"
+        NUMERIC result "NOT NULL"
+        BOOLEAN is_error "NOT NULL DEFAULT FALSE"
+        TIMESTAMP WITH TIME ZONE created_at "NOT NULL"
+        TIMESTAMP WITH TIME ZONE updated_at "NOT NULL"
+    }
+```
