@@ -1,0 +1,77 @@
+{
+  "input": {
+    "systemName": "Battleship",
+    "requirementsText": "# Home Assignment: Battleship\r\n\r\n**Time estimate:** ~45 minutes\r\n\r\n## The Task\r\n\r\nBuild a **Battleship** game as a full-stack web application. Two players, each with a **6x6 board** and **3 ships** (sizes: 2, 3, 4). Players place their ships, then take turns firing at each other's board. First to sink all opponent ships wins.\r\n\r\n- **FastAPI** python backend that manages the game: board state, ship placement validation, turn logic, hit/miss/sunk detection. Expose REST endpoints for placing ships, firing shots, and viewing boards. Important: a player should never see the opponent's ship positions — only their own hits and misses.\r\n- **Angular** frontend that shows both grids (your board + your attack view of the opponent), lets you place ships and fire shots. Only Player 1 needs UI controls — Player 2 can be idle for now.\r\n- **Docker Compose** with all services containerized. Each service can expose its own port.\r\n\r\nA single `docker compose up --build` should bring everything up.\r\n\r\n## Deliverables\r\n\r\n1. Source code (Git repo or zip) with a `docker-compose.yml` at the root\r\n2. A brief `README.md` explaining how to run the project\r\n\r\n## What We're Looking For\r\n\r\nClean, readable code. A working game. Correct use of FastAPI and Angular. Solid Docker setup. Design decisions are yours — we'll discuss them in the follow-up.\r\n\r\n## Not Required\r\n\r\nPersistent storage, authentication, tests, polished UI.\r\n\r\n## Follow-Up Session (~30 minutes)\r\n\r\nAfter submission we'll do a live session: walk through your solution, debug together, extend the app with a new feature, and discuss architecture trade-offs. Come ready to share your screen.\r\n\r\nGood luck, have fun!\r\n",
+    "requirementsDocPath": "/home/sio/Code/AgenticDevTeam/.worktrees/todolistapp-feature-US-006-responsive/.worktrees/battleship-feature-us-005-docker-setup/specs/new/Battleship.md",
+    "mode": "autonomous",
+    "runType": "greenfield",
+    "repoTarget": {
+      "type": "same-repo",
+      "isPrivate": true
+    }
+  },
+  "workspacePath": "/home/sio/Code/AgenticDevTeam/.worktrees/todolistapp-feature-US-006-responsive/.worktrees/battleship-feature-us-005-docker-setup/generated-projects/battleship",
+  "outputPath": "/home/sio/Code/AgenticDevTeam/.worktrees/todolistapp-feature-US-006-responsive/.worktrees/battleship-feature-us-005-docker-setup/outputs/battleship-2026-08-13T08-34-05-496Z",
+  "systemBranch": "project/battleship",
+  "gitContext": {
+    "token": "***REDACTED***",
+    "owner": "ErezKon",
+    "repo": "AgenticDevTeam",
+    "defaultBranch": "master"
+  },
+  "codebaseAnalysis": null,
+  "architecture": null,
+  "repoContract": null,
+  "epics": [],
+  "techStack": [],
+  "dbDesign": null,
+  "userStories": [],
+  "tasks": [],
+  "assignments": [],
+  "completedAssignmentIds": [],
+  "fileChanges": [],
+  "testPlan": null,
+  "testReports": [],
+  "bugs": [],
+  "fixedBugIds": [],
+  "devopsPlan": null,
+  "runningContainers": [],
+  "pullRequests": [],
+  "branchAssignments": [],
+  "phase": "intake",
+  "iteration": {
+    "bugfix": 0
+  },
+  "approvals": [],
+  "pendingRerun": null,
+  "phaseFeedback": {},
+  "cancelled": false,
+  "artifacts": [],
+  "transcript": [
+    {
+      "timestamp": "2026-08-13T08:34:07.220Z",
+      "agentId": "conductor",
+      "phase": "intake",
+      "message": "Intake complete (greenfield). System branch: project/battleship. Repo: ErezKon/AgenticDevTeam. Requirements: 1673 chars"
+    }
+  ],
+  "tokenUsage": [],
+  "configBaseline": null,
+  "acceptance": null,
+  "latestGateReport": null,
+  "unrecoverable": null,
+  "verificationErrors": [],
+  "dispatchRounds": [],
+  "attemptedBugIds": [],
+  "bugAttempts": {},
+  "outputIntegrity": [],
+  "planViolations": [],
+  "completionEvidence": [],
+  "salvageBranches": [],
+  "phantomFileChanges": [],
+  "qaClaimDiscrepancies": [],
+  "e2eStatus": "not-run",
+  "e2eSkipReason": null,
+  "e2eEvidence": null,
+  "invariantViolations": []
+}

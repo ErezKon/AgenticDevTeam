@@ -1,0 +1,40 @@
+{
+  "generatedAt": "2026-08-13T08:34:29.600Z",
+  "status": "crashed",
+  "systemName": "Battleship",
+  "runType": "greenfield",
+  "finalPhase": "intake",
+  "tokenUsage": {
+    "totalCalls": 1,
+    "totalTokens": 8025,
+    "totalInputTokens": 4489,
+    "totalOutputTokens": 3536
+  },
+  "budget": {
+    "level": "ok",
+    "binding": "wall",
+    "utilisation": 0.0013394444444444445,
+    "usedTokens": 8025,
+    "estCostUsd": 0.06936600000000001,
+    "elapsedMs": 24110
+  },
+  "counts": {
+    "epics": 0,
+    "userStories": 0,
+    "tasks": 0,
+    "assignments": 0,
+    "fileChanges": 0,
+    "testReports": 0,
+    "bugs": 0,
+    "pullRequests": 0,
+    "artifacts": 0
+  },
+  "files": {
+    "stateJson": "state.json",
+    "runLog": "run.log",
+    "tokenReportHtml": "token-usage-report.html",
+    "tokenReportJson": "token-usage.json",
+    "traceabilityMd": null
+  },
+  "eventCount": 7
+}

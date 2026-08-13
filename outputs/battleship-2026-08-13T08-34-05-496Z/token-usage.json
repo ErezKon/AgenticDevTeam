@@ -1,0 +1,12 @@
+[
+  {
+    "agentId": "architect",
+    "model": "gpt-oss-120b",
+    "phase": "architect",
+    "inputTokens": 4489,
+    "outputTokens": 3536,
+    "totalTokens": 8025,
+    "timestamp": "2026-08-13T08:34:22.431Z",
+    "invocationId": "inv-architect-0"
+  }
+]

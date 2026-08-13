@@ -1,0 +1,625 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Token Usage Report - Pacman</title>
+<style>
+    :root {
+        --bg-primary: #1a1b26;
+        --bg-secondary: #24283b;
+        --bg-card: #2f3346;
+        --text-primary: #c0caf5;
+        --text-secondary: #a9b1d6;
+        --text-muted: #565f89;
+        --accent-blue: #7aa2f7;
+        --accent-green: #9ece6a;
+        --accent-red: #f7768e;
+        --accent-yellow: #e0af68;
+        --accent-purple: #bb9af7;
+        --border: #3b4261;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+        font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif;
+        background: var(--bg-primary);
+        color: var(--text-primary);
+        line-height: 1.6;
+        padding: 2rem;
+    }
+    h1 {
+        font-size: 1.8rem;
+        color: var(--accent-blue);
+        margin-bottom: 0.25rem;
+    }
+    .subtitle {
+        color: var(--text-muted);
+        font-size: 0.9rem;
+        margin-bottom: 2rem;
+    }
+    .summary-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        gap: 1rem;
+        margin-bottom: 2rem;
+    }
+    .summary-card {
+        background: var(--bg-card);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 1.2rem;
+        text-align: center;
+    }
+    .summary-card .value {
+        font-size: 1.6rem;
+        font-weight: 700;
+        color: var(--accent-green);
+    }
+    .summary-card .label {
+        font-size: 0.8rem;
+        color: var(--text-muted);
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        margin-top: 0.25rem;
+    }
+    .summary-card.cost .value { color: var(--accent-yellow); }
+
+    h2 {
+        font-size: 1.2rem;
+        color: var(--text-secondary);
+        margin: 2rem 0 1rem;
+        padding-bottom: 0.4rem;
+        border-bottom: 1px solid var(--border);
+    }
+    .chart-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+        gap: 1.5rem;
+        margin-bottom: 2rem;
+    }
+    .chart-container {
+        background: var(--bg-secondary);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 1.2rem;
+        position: relative;
+    }
+    .chart-container h3 {
+        font-size: 0.95rem;
+        color: var(--text-muted);
+        margin-bottom: 0.8rem;
+    }
+    .chart-container canvas { max-height: 320px; }
+
+    table {
+        width: 100%;
+        border-collapse: collapse;
+        margin-bottom: 1.5rem;
+        font-size: 0.85rem;
+    }
+    th, td {
+        padding: 0.55rem 0.75rem;
+        border-bottom: 1px solid var(--border);
+        text-align: left;
+    }
+    th {
+        background: var(--bg-secondary);
+        color: var(--text-muted);
+        font-weight: 600;
+        text-transform: uppercase;
+        font-size: 0.75rem;
+        letter-spacing: 0.04em;
+        position: sticky;
+        top: 0;
+    }
+    td.num { text-align: right; font-variant-numeric: tabular-nums; }
+    tr:hover td { background: rgba(122, 162, 247, 0.05); }
+    tfoot td {
+        font-weight: 700;
+        border-top: 2px solid var(--border);
+        background: var(--bg-secondary);
+    }
+
+    .detail-wrapper {
+        max-height: 500px;
+        overflow-y: auto;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+    }
+    .detail-wrapper table { margin-bottom: 0; }
+
+    .footer {
+        margin-top: 3rem;
+        padding-top: 1rem;
+        border-top: 1px solid var(--border);
+        color: var(--text-muted);
+        font-size: 0.75rem;
+        text-align: center;
+    }
+    .no-charts {
+        background: var(--bg-card);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 2rem;
+        text-align: center;
+        color: var(--text-muted);
+    }
+    .status-banner {
+        padding: 0.75rem 1.2rem;
+        border-radius: 8px;
+        margin-bottom: 1.5rem;
+        font-weight: 600;
+        font-size: 0.9rem;
+    }
+    .status-banner.in-progress {
+        background: rgba(224, 175, 104, 0.15);
+        border: 1px solid var(--accent-yellow);
+        color: var(--accent-yellow);
+    }
+    .status-banner.failed {
+        background: rgba(247, 118, 142, 0.15);
+        border: 1px solid var(--accent-red);
+        color: var(--accent-red);
+    }
+    .status-banner.completed {
+        background: rgba(158, 206, 106, 0.15);
+        border: 1px solid var(--accent-green);
+        color: var(--accent-green);
+    }
+</style>
+</head>
+<body>
+<h1>Token Usage Report</h1>
+<p class="subtitle">Pacman &mdash; 2026-08-13T09:05:45.950Z</p>
+
+<div class="status-banner in-progress">&#9203; Run in progress &mdash; this report updates automatically as agents complete their work.</div>
+
+<!-- Summary cards -->
+<div class="summary-grid">
+    <div class="summary-card">
+        <div class="value">67,289</div>
+        <div class="label">Total Tokens</div>
+    </div>
+    <div class="summary-card">
+        <div class="value">57,568</div>
+        <div class="label">Input Tokens</div>
+    </div>
+    <div class="summary-card">
+        <div class="value">9,721</div>
+        <div class="label">Output Tokens</div>
+    </div>
+    <div class="summary-card">
+        <div class="value">11</div>
+        <div class="label">LLM Calls</div>
+    </div>
+    <div class="summary-card">
+        <div class="value">3</div>
+        <div class="label">Agents</div>
+    </div>
+    <div class="summary-card cost">
+        <div class="value">$0.4621</div>
+        <div class="label">Estimated Cost</div>
+    </div>
+</div>
+
+<!-- Charts -->
+<div class="chart-grid">
+    <div class="chart-container">
+        <h3>Token Distribution by Agent</h3>
+        <canvas id="pieChart"></canvas>
+    </div>
+    <div class="chart-container">
+        <h3>Input vs Output Tokens by Agent</h3>
+        <canvas id="barChart"></canvas>
+    </div>
+    <div class="chart-container">
+        <h3>Tokens by Pipeline Phase</h3>
+        <canvas id="phaseChart"></canvas>
+    </div>
+    <div class="chart-container">
+        <h3>Estimated Cost by Agent (Input vs Output)</h3>
+        <canvas id="costChart"></canvas>
+    </div>
+</div>
+<noscript>
+    <div class="no-charts">Charts require JavaScript. The tables below contain the same data.</div>
+</noscript>
+
+<!-- Cost Table -->
+<h2>Cost Breakdown by Agent</h2>
+<table>
+    <thead>
+        <tr>
+            <th>Agent</th><th>Model</th><th>Calls</th>
+            <th>Input Tokens</th><th>Output Tokens</th><th>Total Tokens</th>
+            <th>Input Cost</th><th>Output Cost</th><th>Total Cost</th>
+        </tr>
+    </thead>
+    <tbody>
+        <tr>
+            <td>principal-backend</td>
+            <td>gpt-oss-120b</td>
+            <td class="num">8</td>
+            <td class="num">44,099</td>
+            <td class="num">3,058</td>
+            <td class="num">47,157</td>
+            <td class="num">$0.2646</td>
+            <td class="num">$0.0367</td>
+            <td class="num">$0.3013</td>
+        </tr>
+<tr>
+            <td>architect</td>
+            <td>gpt-oss-120b</td>
+            <td class="num">1</td>
+            <td class="num">5,858</td>
+            <td class="num">6,305</td>
+            <td class="num">12,163</td>
+            <td class="num">$0.0351</td>
+            <td class="num">$0.0757</td>
+            <td class="num">$0.1108</td>
+        </tr>
+<tr>
+            <td>senior-backend</td>
+            <td>gpt-oss-120b</td>
+            <td class="num">2</td>
+            <td class="num">7,611</td>
+            <td class="num">358</td>
+            <td class="num">7,969</td>
+            <td class="num">$0.0457</td>
+            <td class="num">$0.0043</td>
+            <td class="num">$0.0500</td>
+        </tr>
+    </tbody>
+    <tfoot>
+        <tr>
+            <td colspan="3">Total</td>
+            <td class="num">57,568</td>
+            <td class="num">9,721</td>
+            <td class="num">67,289</td>
+            <td class="num">$0.3454</td>
+            <td class="num">$0.1167</td>
+            <td class="num">$0.4621</td>
+        </tr>
+    </tfoot>
+</table>
+
+<!-- By Phase -->
+<h2>Usage by Phase</h2>
+<table>
+    <thead>
+        <tr><th>Phase</th><th>Calls</th><th>Input</th><th>Output</th><th>Total</th></tr>
+    </thead>
+    <tbody><tr>
+            <td>development</td>
+            <td class="num">10</td>
+            <td class="num">51,710</td>
+            <td class="num">3,416</td>
+            <td class="num">55,126</td>
+        </tr>
+<tr>
+            <td>architect</td>
+            <td class="num">1</td>
+            <td class="num">5,858</td>
+            <td class="num">6,305</td>
+            <td class="num">12,163</td>
+        </tr></tbody>
+</table>
+
+<!-- By Model -->
+<h2>Usage by Model</h2>
+<table>
+    <thead>
+        <tr><th>Model</th><th>Calls</th><th>Input</th><th>Output</th><th>Total</th><th>Est. Cost</th></tr>
+    </thead>
+    <tbody><tr>
+            <td>gpt-oss-120b</td>
+            <td class="num">11</td>
+            <td class="num">57,568</td>
+            <td class="num">9,721</td>
+            <td class="num">67,289</td>
+            <td class="num">$0.4621</td>
+        </tr></tbody>
+</table>
+
+<!-- Invocation Efficiency -->
+<h2>Invocation Efficiency</h2>
+<table>
+    <thead>
+        <tr>
+            <th>Agent</th><th>Invocations</th><th>Avg Calls/Inv</th>
+            <th>Avg Input/Call</th><th>1st Call Input</th><th>Last Call Input</th>
+            <th>Growth</th><th>Respawns</th>
+        </tr>
+    </thead>
+    <tbody><tr>
+            <td>senior-backend</td>
+            <td class="num">2</td>
+            <td class="num">1</td>
+            <td class="num">3,806</td>
+            <td class="num">4,048</td>
+            <td class="num">3,563</td>
+            <td class="num">0.88x</td>
+            <td class="num">0</td>
+        </tr>
+<tr>
+            <td>architect</td>
+            <td class="num">1</td>
+            <td class="num">1</td>
+            <td class="num">5,858</td>
+            <td class="num">5,858</td>
+            <td class="num">5,858</td>
+            <td class="num">1x</td>
+            <td class="num">0</td>
+        </tr></tbody>
+</table>
+
+<!-- History Compaction & Truncation -->
+<h2>History Compaction &amp; Truncation</h2>
+<table>
+    <thead>
+        <tr><th>Metric</th><th>Value</th></tr>
+    </thead>
+    <tbody>
+        <tr><td>Compaction invocations</td><td class="num">198</td></tr>
+        <tr><td>Original chars</td><td class="num">2,609,502</td></tr>
+        <tr><td>Compacted chars</td><td class="num">2,381,193</td></tr>
+        <tr><td>Chars saved by compaction</td><td class="num">228,309 (9%)</td></tr>
+        <tr><td>Tool results stubbed</td><td class="num">510</td></tr>
+        <tr><td>Write args stubbed</td><td class="num">148</td></tr>
+        
+    </tbody>
+</table>
+
+<!-- Pricing Rates -->
+<h2>Configured Pricing Rates</h2>
+<table>
+    <thead>
+        <tr><th>Model</th><th>Input ($/1K tokens)</th><th>Output ($/1K tokens)</th></tr>
+    </thead>
+    <tbody><tr>
+            <td>gpt-oss-120b</td>
+            <td class="num">$0.0060</td>
+            <td class="num">$0.0120</td>
+        </tr>
+<tr>
+            <td>llama-3-3-70b-instruct</td>
+            <td class="num">$0.0030</td>
+            <td class="num">$0.0060</td>
+        </tr>
+<tr>
+            <td>gemma-3-27b-it</td>
+            <td class="num">$0.0010</td>
+            <td class="num">$0.0020</td>
+        </tr>
+<tr>
+            <td>mistral-small-3-1-24b-instruct-2503</td>
+            <td class="num">$0.0010</td>
+            <td class="num">$0.0020</td>
+        </tr>
+<tr>
+            <td>llama-3-2-3b-instruct</td>
+            <td class="num">$0.0003</td>
+            <td class="num">$0.0006</td>
+        </tr>
+<tr>
+            <td>gpt-oss-20b</td>
+            <td class="num">$0.0010</td>
+            <td class="num">$0.0020</td>
+        </tr></tbody>
+</table>
+
+<!-- Detailed invocations -->
+<h2>All Invocations (11 records)</h2>
+<div class="detail-wrapper">
+<table>
+    <thead>
+        <tr>
+            <th>Agent</th><th>Phase</th><th>Model</th>
+            <th>Input</th><th>Output</th><th>Total</th>
+            <th>Cost</th><th>Timestamp</th>
+        </tr>
+    </thead>
+    <tbody><tr>
+            <td>principal-backend</td>
+            <td>development</td>
+            <td>gpt-oss-120b</td>
+            <td class="num">5,300</td>
+            <td class="num">428</td>
+            <td class="num">5,728</td>
+            <td class="num">$0.0369</td>
+            <td>2026-08-13T09:04:38.884Z</td>
+        </tr>
+<tr>
+            <td>principal-backend</td>
+            <td>development</td>
+            <td>gpt-oss-120b</td>
+            <td class="num">5,675</td>
+            <td class="num">546</td>
+            <td class="num">6,221</td>
+            <td class="num">$0.0406</td>
+            <td>2026-08-13T09:04:41.837Z</td>
+        </tr>
+<tr>
+            <td>principal-backend</td>
+            <td>development</td>
+            <td>gpt-oss-120b</td>
+            <td class="num">5,009</td>
+            <td class="num">195</td>
+            <td class="num">5,204</td>
+            <td class="num">$0.0324</td>
+            <td>2026-08-13T09:04:50.350Z</td>
+        </tr>
+<tr>
+            <td>principal-backend</td>
+            <td>development</td>
+            <td>gpt-oss-120b</td>
+            <td class="num">6,007</td>
+            <td class="num">785</td>
+            <td class="num">6,792</td>
+            <td class="num">$0.0455</td>
+            <td>2026-08-13T09:04:59.445Z</td>
+        </tr>
+<tr>
+            <td>principal-backend</td>
+            <td>development</td>
+            <td>gpt-oss-120b</td>
+            <td class="num">5,011</td>
+            <td class="num">248</td>
+            <td class="num">5,259</td>
+            <td class="num">$0.0330</td>
+            <td>2026-08-13T09:05:03.928Z</td>
+        </tr>
+<tr>
+            <td>architect</td>
+            <td>architect</td>
+            <td>gpt-oss-120b</td>
+            <td class="num">5,858</td>
+            <td class="num">6,305</td>
+            <td class="num">12,163</td>
+            <td class="num">$0.1108</td>
+            <td>2026-08-13T09:05:07.798Z</td>
+        </tr>
+<tr>
+            <td>principal-backend</td>
+            <td>development</td>
+            <td>gpt-oss-120b</td>
+            <td class="num">5,897</td>
+            <td class="num">114</td>
+            <td class="num">6,011</td>
+            <td class="num">$0.0368</td>
+            <td>2026-08-13T09:05:09.854Z</td>
+        </tr>
+<tr>
+            <td>principal-backend</td>
+            <td>development</td>
+            <td>gpt-oss-120b</td>
+            <td class="num">5,067</td>
+            <td class="num">104</td>
+            <td class="num">5,171</td>
+            <td class="num">$0.0317</td>
+            <td>2026-08-13T09:05:16.750Z</td>
+        </tr>
+<tr>
+            <td>principal-backend</td>
+            <td>development</td>
+            <td>gpt-oss-120b</td>
+            <td class="num">6,133</td>
+            <td class="num">638</td>
+            <td class="num">6,771</td>
+            <td class="num">$0.0445</td>
+            <td>2026-08-13T09:05:32.172Z</td>
+        </tr>
+<tr>
+            <td>senior-backend</td>
+            <td>development</td>
+            <td>gpt-oss-120b</td>
+            <td class="num">4,048</td>
+            <td class="num">296</td>
+            <td class="num">4,344</td>
+            <td class="num">$0.0278</td>
+            <td>2026-08-13T09:05:37.199Z</td>
+        </tr>
+<tr>
+            <td>senior-backend</td>
+            <td>development</td>
+            <td>gpt-oss-120b</td>
+            <td class="num">3,563</td>
+            <td class="num">62</td>
+            <td class="num">3,625</td>
+            <td class="num">$0.0221</td>
+            <td>2026-08-13T09:05:42.941Z</td>
+        </tr></tbody>
+</table>
+</div>
+
+<div class="footer">
+    Generated by AgenticDevTeam Token Monitor &mdash; 2026-08-13T09:05:45.950Z
+</div>
+
+<!-- Chart.js from CDN -->
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<script>
+(function() {
+    if (typeof Chart === 'undefined') return; // CDN failed to load
+
+    Chart.defaults.color = '#a9b1d6';
+    Chart.defaults.borderColor = '#3b4261';
+
+    // Pie: token distribution by agent
+    new Chart(document.getElementById('pieChart'), {
+        type: 'doughnut',
+        data: {
+            labels: ["principal-backend","architect","senior-backend"],
+            datasets: [{
+                data: [47157,12163,7969],
+                backgroundColor: ["#36a2eb","#ff6384","#ffce56"],
+                borderWidth: 0,
+            }],
+        },
+        options: {
+            responsive: true,
+            plugins: {
+                legend: { position: 'right', labels: { boxWidth: 14, padding: 10 } },
+            },
+        },
+    });
+
+    // Bar: input vs output by agent
+    new Chart(document.getElementById('barChart'), {
+        type: 'bar',
+        data: {
+            labels: ["principal-backend","architect","senior-backend"],
+            datasets: [
+                { label: 'Input', data: [44099,5858,7611], backgroundColor: '#36a2eb' },
+                { label: 'Output', data: [3058,6305,358], backgroundColor: '#ff6384' },
+            ],
+        },
+        options: {
+            responsive: true,
+            scales: { x: { stacked: true }, y: { stacked: true, beginAtZero: true } },
+            plugins: { legend: { position: 'top' } },
+        },
+    });
+
+    // Bar: tokens by phase
+    new Chart(document.getElementById('phaseChart'), {
+        type: 'bar',
+        data: {
+            labels: ["development","architect"],
+            datasets: [{
+                label: 'Total Tokens',
+                data: [55126,12163],
+                backgroundColor: ["#36a2eb","#ff6384"],
+            }],
+        },
+        options: {
+            responsive: true,
+            indexAxis: 'y',
+            scales: { x: { beginAtZero: true } },
+            plugins: { legend: { display: false } },
+        },
+    });
+
+    // Bar: cost by agent (input vs output cost)
+    new Chart(document.getElementById('costChart'), {
+        type: 'bar',
+        data: {
+            labels: ["principal-backend","architect","senior-backend"],
+            datasets: [
+                { label: 'Input Cost', data: [0.264594,0.035148,0.045666], backgroundColor: '#9ece6a' },
+                { label: 'Output Cost', data: [0.036696,0.07566,0.004296], backgroundColor: '#e0af68' },
+            ],
+        },
+        options: {
+            responsive: true,
+            scales: {
+                x: { stacked: true },
+                y: { stacked: true, beginAtZero: true, ticks: { callback: function(v) { return '$' + v.toFixed(4); } } },
+            },
+            plugins: { legend: { position: 'top' } },
+        },
+    });
+})();
+</script>
+</body>
+</html>

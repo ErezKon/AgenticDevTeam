@@ -1,0 +1,121 @@
+[
+  {
+    "agentId": "principal-backend",
+    "model": "gpt-oss-120b",
+    "phase": "development",
+    "inputTokens": 5300,
+    "outputTokens": 428,
+    "totalTokens": 5728,
+    "timestamp": "2026-08-13T09:04:38.884Z",
+    "invocationId": "inv-principal-backend-19"
+  },
+  {
+    "agentId": "principal-backend",
+    "model": "gpt-oss-120b",
+    "phase": "development",
+    "inputTokens": 5675,
+    "outputTokens": 546,
+    "totalTokens": 6221,
+    "timestamp": "2026-08-13T09:04:41.837Z",
+    "invocationId": "inv-principal-backend-18"
+  },
+  {
+    "agentId": "principal-backend",
+    "model": "gpt-oss-120b",
+    "phase": "development",
+    "inputTokens": 5009,
+    "outputTokens": 195,
+    "totalTokens": 5204,
+    "timestamp": "2026-08-13T09:04:50.350Z",
+    "invocationId": "inv-principal-backend-19"
+  },
+  {
+    "agentId": "principal-backend",
+    "model": "gpt-oss-120b",
+    "phase": "development",
+    "inputTokens": 6007,
+    "outputTokens": 785,
+    "totalTokens": 6792,
+    "timestamp": "2026-08-13T09:04:59.445Z",
+    "invocationId": "inv-principal-backend-18"
+  },
+  {
+    "agentId": "principal-backend",
+    "model": "gpt-oss-120b",
+    "phase": "development",
+    "inputTokens": 5011,
+    "outputTokens": 248,
+    "totalTokens": 5259,
+    "timestamp": "2026-08-13T09:05:03.928Z",
+    "invocationId": "inv-principal-backend-19"
+  },
+  {
+    "agentId": "architect",
+    "model": "gpt-oss-120b",
+    "phase": "architect",
+    "inputTokens": 5858,
+    "outputTokens": 6305,
+    "totalTokens": 12163,
+    "timestamp": "2026-08-13T09:05:07.798Z",
+    "invocationId": "inv-architect-0"
+  },
+  {
+    "agentId": "principal-backend",
+    "model": "gpt-oss-120b",
+    "phase": "development",
+    "inputTokens": 5897,
+    "outputTokens": 114,
+    "totalTokens": 6011,
+    "timestamp": "2026-08-13T09:05:09.854Z",
+    "invocationId": "inv-principal-backend-18"
+  },
+  {
+    "agentId": "principal-backend",
+    "model": "gpt-oss-120b",
+    "phase": "development",
+    "inputTokens": 5067,
+    "outputTokens": 104,
+    "totalTokens": 5171,
+    "timestamp": "2026-08-13T09:05:16.750Z",
+    "invocationId": "inv-principal-backend-19"
+  },
+  {
+    "agentId": "principal-backend",
+    "model": "gpt-oss-120b",
+    "phase": "development",
+    "inputTokens": 6133,
+    "outputTokens": 638,
+    "totalTokens": 6771,
+    "timestamp": "2026-08-13T09:05:32.172Z",
+    "invocationId": "inv-principal-backend-18"
+  },
+  {
+    "agentId": "senior-backend",
+    "model": "gpt-oss-120b",
+    "phase": "development",
+    "inputTokens": 4048,
+    "outputTokens": 296,
+    "totalTokens": 4344,
+    "timestamp": "2026-08-13T09:05:37.199Z",
+    "invocationId": "inv-senior-backend-1"
+  },
+  {
+    "agentId": "senior-backend",
+    "model": "gpt-oss-120b",
+    "phase": "development",
+    "inputTokens": 3563,
+    "outputTokens": 62,
+    "totalTokens": 3625,
+    "timestamp": "2026-08-13T09:05:42.941Z",
+    "invocationId": "inv-senior-backend-2"
+  },
+  {
+    "agentId": "architect",
+    "model": "gpt-oss-120b",
+    "phase": "architect",
+    "inputTokens": 7724,
+    "outputTokens": 5944,
+    "totalTokens": 13668,
+    "timestamp": "2026-08-13T09:05:48.161Z"
+  }
+]
