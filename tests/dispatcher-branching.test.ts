@@ -21,6 +21,9 @@ function makeAssignment(overrides: Record<string, any>) {
     return {
         id: overrides.id ?? 'ASSIGN-001',
         storyId: 'storyId' in overrides ? overrides.storyId : 'US-001',
+        additionalStoryIds: overrides.additionalStoryIds ?? [],
+        taskIds: overrides.taskIds ?? ['TASK-001'],
+        acIndexes: overrides.acIndexes ?? [],
         devAgentId: overrides.devAgentId ?? 'junior-react',
         rank: overrides.rank ?? 'junior',
         priority: overrides.priority ?? 'medium',
@@ -31,6 +34,7 @@ function makeAssignment(overrides: Record<string, any>) {
         branchName: overrides.branchName,
         reviewerAgentIds: overrides.reviewerAgentIds ?? ['senior-frontend', 'principal-frontend'],
         taskType: overrides.taskType ?? 'feature',
+        moduleIds: overrides.moduleIds ?? [],
     };
 }
 

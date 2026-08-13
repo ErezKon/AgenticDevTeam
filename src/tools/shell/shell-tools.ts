@@ -22,7 +22,9 @@ import { logToolAction } from '../../utils/logger';
 import {
     GIT_USER_NAME, GIT_USER_EMAIL,
     SHELL_ALLOW_HOST, SHELL_DEFAULT_TIMEOUT_S, SHELL_MAX_TIMEOUT_S,
+    MAX_TOOL_RESULT_CHARS,
 } from '../../config';
+import { truncateToolResult } from '../_shared/truncate';
 
 const TAG = `${color256(166)}[shell]${LogColors.RESET}`;
 
@@ -47,6 +49,16 @@ const DENY_PATTERNS: { pattern: RegExp; reason: string }[] = [
     { pattern: /\bgit\s+push\s+(-\w*f\w*|--force)\b/,                    reason: 'force-push' },
     { pattern: /\bchmod\s+(-\w*R\w*\s+)?777\s+\//,                       reason: 'chmod 777 on root paths' },
     { pattern: />\s*\/dev\/sd/,                                            reason: 'writing to block device' },
+    // ── Gate Integrity (Sub-Plan 02): prevent config tampering via shell ──
+    { pattern: /\bnpm\s+pkg\s+set\s+scripts\./,                           reason: 'modifying package.json scripts via npm pkg set' },
+    { pattern: /\bnpm\s+pkg\s+delete\s+scripts\./,                        reason: 'deleting package.json scripts via npm pkg delete' },
+    { pattern: /\bgit\s+checkout\s+--\s+.*package\.json/,                  reason: 'reverting package.json via git checkout' },
+    { pattern: /\bgit\s+restore\s+.*package\.json/,                        reason: 'reverting package.json via git restore' },
+    { pattern: /\bsed\s+-i\b.*package\.json/,                              reason: 'modifying package.json via sed -i' },
+    { pattern: /\bperl\s+-pi\b.*package\.json/,                            reason: 'modifying package.json via perl -pi' },
+    { pattern: />\s*package\.json/,                                         reason: 'overwriting package.json via shell redirect' },
+    { pattern: /\btruncate\b.*package\.json/,                               reason: 'truncating package.json' },
+    { pattern: /\brm\b.*\.(?:test|spec)\.[jt]sx?/,                         reason: 'deleting a test file' },
 ];
 
 /**
@@ -128,13 +140,14 @@ export function createShellTool(workspaceRoot: string) {
 
             logToolAction(`${TAG} Executing: ${command} (timeout=${effectiveTimeout}s)`);
             const result = await runShell(command, workspaceRoot, timeoutMs);
-            const output = [
+            const raw = [
                 `Exit code: ${result.exitCode}`,
-                result.stdout ? `stdout:\n${result.stdout.slice(0, 5000)}` : '',
-                result.stderr ? `stderr:\n${result.stderr.slice(0, 2000)}` : '',
+                result.stdout ? `stdout:\n${result.stdout}` : '',
+                result.stderr ? `stderr:\n${result.stderr}` : '',
             ].filter(Boolean).join('\n\n');
             logToolAction(`${TAG} Completed with exit code ${result.exitCode}`);
-            return output;
+            // Tail-weighted split (headRatio=0.2): build/test failures print at the end
+            return truncateToolResult(raw, 'run_command', MAX_TOOL_RESULT_CHARS, 0.2);
         },
         {
             name: 'run_command',

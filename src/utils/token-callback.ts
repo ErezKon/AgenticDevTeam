@@ -18,6 +18,7 @@ export class TokenUsageCallbackHandler extends BaseCallbackHandler {
     private agentId: string;
     private model: string;
     private phase: string;
+    private _invocationId: string | undefined;
 
     constructor(agentId: string, model: string, phase: string) {
         super();
@@ -29,6 +30,11 @@ export class TokenUsageCallbackHandler extends BaseCallbackHandler {
     /** Update the phase context (e.g. when reusing an agent across phases). */
     setPhase(phase: string): void {
         this.phase = phase;
+    }
+
+    /** Set the current invocation ID so LLM calls are tagged for per-invocation attribution. */
+    setInvocationId(id: string | undefined): void {
+        this._invocationId = id;
     }
 
     /**
@@ -63,6 +69,7 @@ export class TokenUsageCallbackHandler extends BaseCallbackHandler {
             outputTokens,
             totalTokens,
             timestamp: new Date().toISOString(),
+            ...(this._invocationId && { invocationId: this._invocationId }),
         });
     }
 }

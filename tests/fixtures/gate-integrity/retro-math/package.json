@@ -1,0 +1,12 @@
+{
+  "name": "retroboard3",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "build": "echo Build successful",
+    "test": "npx jest"
+  },
+  "devDependencies": {
+    "@testing-library/jest-dom": "^6.9.1"
+  }
+}

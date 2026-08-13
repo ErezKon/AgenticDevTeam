@@ -25,15 +25,17 @@ const log = getLogger('[DevOpsVerify]', 33);
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
-export type DeploymentMode = 'compose' | 'dockerfile' | 'none';
+export type DeploymentMode = 'compose' | 'dockerfile' | 'none' | 'docker-unavailable';
 
 export interface VerifyResult {
     buildStatus: 'success' | 'failed' | 'skipped';
-    runStatus: 'running' | 'failed' | 'skipped';
+    runStatus: 'running' | 'unhealthy' | 'failed' | 'skipped';
     serviceUrls: { service: string; url: string }[];
     healthChecks: HealthCheckResult[];
     containerNames: string[];
     logs: string;
+    /** How the deployment was verified — consumed by nodes.ts and acceptance gate. */
+    mode: DeploymentMode;
 }
 
 // ─── Pure helpers (exported for testing) ────────────────────────────────────
@@ -139,7 +141,7 @@ export async function verifyDeployment(
     workspacePath: string,
     projectSlug: string,
 ): Promise<VerifyResult> {
-    const skipped: VerifyResult = {
+    const skippedBase: Omit<VerifyResult, 'mode'> = {
         buildStatus: 'skipped',
         runStatus: 'skipped',
         serviceUrls: [],
@@ -150,18 +152,18 @@ export async function verifyDeployment(
 
     if (!DEVOPS_VERIFY_ENABLED) {
         log.info('Deployment verification disabled (DEVOPS_VERIFY_ENABLED=false)');
-        return skipped;
+        return { ...skippedBase, mode: 'none' };
     }
 
     if (!isDockerAvailable()) {
         log.info('Docker is not available — skipping deployment verification');
-        return skipped;
+        return { ...skippedBase, mode: 'docker-unavailable' };
     }
 
     const mode = chooseDeploymentMode(workspacePath);
     if (mode === 'none') {
         log.info('No Docker artifacts found — skipping deployment verification');
-        return { ...skipped, logs: 'No Dockerfile or docker-compose found' };
+        return { ...skippedBase, mode: 'none', logs: 'No Dockerfile or docker-compose found' };
     }
 
     log.info(`Deployment mode: ${mode}`);
@@ -183,6 +185,7 @@ export async function verifyDeployment(
             healthChecks: [],
             containerNames,
             logs: truncateOutput(allLogs.join('\n') + '\nERROR: ' + err.message),
+            mode,
         };
     }
 }
@@ -215,6 +218,7 @@ async function verifyCompose(
             healthChecks: [],
             containerNames: [],
             logs: truncateOutput(allLogs.join('\n')),
+            mode: 'compose',
         };
     }
 
@@ -238,6 +242,7 @@ async function verifyCompose(
             healthChecks: [],
             containerNames: [],
             logs: truncateOutput(allLogs.join('\n')),
+            mode: 'compose',
         };
     }
 
@@ -269,19 +274,63 @@ async function verifyCompose(
     const serviceUrls = deriveServiceUrls(psOutput);
     allLogs.push(`Derived ${serviceUrls.length} service URLs`);
 
-    // Health-check
+    // Check that at least one service is actually running (D3)
+    let allServicesRunning = true;
+    try {
+        const psLines = psOutput.trim().split('\n').filter(Boolean);
+        for (const line of psLines) {
+            try {
+                const entry = JSON.parse(line);
+                const svcState = (entry.State ?? '').toLowerCase();
+                if (svcState === 'exited' || svcState === 'dead' || svcState === 'restarting') {
+                    allServicesRunning = false;
+                    allLogs.push(`Service ${entry.Service ?? entry.Name ?? 'unknown'} has state '${svcState}'`);
+                }
+            } catch { /* skip unparseable */ }
+        }
+    } catch { /* best-effort */ }
+
+    if (!allServicesRunning) {
+        return {
+            buildStatus: 'failed',
+            runStatus: 'failed',
+            serviceUrls: [],
+            healthChecks: [],
+            containerNames,
+            logs: truncateOutput(allLogs.join('\n')),
+            mode: 'compose',
+        };
+    }
+
+    if (serviceUrls.length === 0) {
+        allLogs.push('compose up succeeded but no services with published ports found');
+        return {
+            buildStatus: 'success',
+            runStatus: 'failed',
+            serviceUrls: [],
+            healthChecks: [],
+            containerNames,
+            logs: truncateOutput(allLogs.join('\n')),
+            mode: 'compose',
+        };
+    }
+
+    // Health-check (D4: runStatus depends on health check results)
     const checks = serviceUrls.map(s => ({ service: s.service, url: s.url }));
     const healthChecks = checks.length > 0
         ? await healthCheck(checks, DEVOPS_HEALTH_RETRIES, DEVOPS_HEALTH_DELAY_MS)
         : [];
 
+    const allHealthy = healthChecks.length === 0 || healthChecks.every(h => h.status === 'healthy');
+
     return {
         buildStatus: 'success',
-        runStatus: serviceUrls.length > 0 ? 'running' : 'failed',
+        runStatus: allHealthy ? 'running' : 'unhealthy',
         serviceUrls,
         healthChecks,
         containerNames,
         logs: truncateOutput(allLogs.join('\n')),
+        mode: 'compose',
     };
 }
 
@@ -309,6 +358,7 @@ async function verifyDockerfile(
             healthChecks: [],
             containerNames: [],
             logs: truncateOutput(allLogs.join('\n')),
+            mode: 'dockerfile',
         };
     }
 
@@ -339,24 +389,28 @@ async function verifyDockerfile(
             healthChecks: [],
             containerNames: [],
             logs: truncateOutput(allLogs.join('\n')),
+            mode: 'dockerfile',
         };
     }
 
     containerNames.push(containerName);
 
-    // Health-check
+    // Health-check (D4: runStatus depends on health check results)
     const checks = serviceUrls.map(s => ({ service: s.service, url: s.url }));
     const healthChecks = checks.length > 0
         ? await healthCheck(checks, DEVOPS_HEALTH_RETRIES, DEVOPS_HEALTH_DELAY_MS)
         : [];
 
+    const allHealthy = healthChecks.length === 0 || healthChecks.every(h => h.status === 'healthy');
+
     return {
         buildStatus: 'success',
-        runStatus: 'running',
+        runStatus: allHealthy ? 'running' : 'unhealthy',
         serviceUrls,
         healthChecks,
         containerNames,
         logs: truncateOutput(allLogs.join('\n')),
+        mode: 'dockerfile',
     };
 }
 

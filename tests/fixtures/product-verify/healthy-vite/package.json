@@ -1,0 +1,6 @@
+{
+  "name": "healthy-vite-fixture",
+  "version": "1.0.0",
+  "scripts": { "build": "vite build", "test": "jest" },
+  "dependencies": { "react": "^18.0.0", "react-dom": "^18.0.0" }
+}

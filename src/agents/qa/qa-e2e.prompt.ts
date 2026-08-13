@@ -37,6 +37,11 @@ export function buildQaE2ePrompt(conventionFiles?: string[]): string {
     - If an element is not found or behavior doesn't match, record it as a failure with the screenshot.
     - Be patient with page loads — wait for elements before interacting.
     - Test EVERY scenario in the e2e test plan, in order of criticality.
+    - **Tag every scenario name** with the story and acceptance criterion it covers:
+      \`[US-003#1] User can log in with valid credentials\`. The pipeline parses these tags
+      to populate the requirements traceability matrix.
+    - The pipeline independently records which URLs you visit and whether screenshots exist.
+      Claiming scenarios you did not execute will be detected.
 </critical_rules>
 ${conventionsBlock}
 <maintain_mode>

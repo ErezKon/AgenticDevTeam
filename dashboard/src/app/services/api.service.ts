@@ -68,8 +68,20 @@ export class ApiService {
     return this.http.get<RunEvent[]>(`/api/events?limit=${limit}`);
   }
 
-  approvePhase(id: string, approved: boolean, feedback?: string): Observable<any> {
-    return this.http.post(`/api/run/${id}/approve`, { approved, feedback });
+  approvePhase(id: string, decision: 'approve' | 'deny' | 'enhance', feedback?: string): Observable<any> {
+    return this.http.post(`/api/run/${id}/approve`, { decision, feedback });
+  }
+
+  getActiveRuns(): Observable<any[]> {
+    return this.http.get<any[]>('/api/runs');
+  }
+
+  getArtifact(runId: string, agentId: string): Observable<any> {
+    return this.http.get(`/api/run/${runId}/artifact/${agentId}`);
+  }
+
+  getArtifacts(runId: string): Observable<any[]> {
+    return this.http.get<any[]>(`/api/run/${runId}/artifacts`);
   }
 
   connectWebSocket(): Observable<WsMessage> {

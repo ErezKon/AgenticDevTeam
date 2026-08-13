@@ -3,14 +3,24 @@
  *
  * Endpoints:
  * - POST /api/run          Start a new run
+ * - GET  /api/runs          List all active HITL sessions
  * - GET  /api/run/:id       Get run state
  * - POST /api/run/:id/approve  Approve a HITL phase
+ * - GET  /api/run/:id/artifact/:agentId  Get a single artifact with content
+ * - GET  /api/run/:id/artifacts          List all artifacts with content
  * - GET  /api/agents        List all agents
  * - GET  /api/events        Recent run events (ring buffer backfill)
  *
  * WebSocket:
  * - ws://host:port/ws       Real-time transcript + state updates
  */
+
+// Polyfill globalThis.crypto for Node 18 (required by @langchain/core uuid)
+import { webcrypto } from 'node:crypto';
+if (!globalThis.crypto) {
+  (globalThis as any).crypto = webcrypto;
+}
+
 process.env.NODE_TLS_REJECT_UNAUTHORIZED ??= '0';
 import './env';
 import express from 'express';
@@ -25,7 +35,7 @@ import { getLogger } from './utils/logger';
 import { LogColors, color256 } from './utils/log-colors.util';
 import { tokenTracker } from './utils/token-tracker';
 import { refreshTokenReport } from './utils/token-report';
-import { onRunEvent, getRecentEvents } from './utils/event-bus';
+import { onRunEvent, getRecentEvents, getAllEvents } from './utils/event-bus';
 import * as path from 'path';
 import * as fs from 'fs';
 
@@ -80,6 +90,24 @@ app.get('/api/events', (_req, res) => {
     res.json(getRecentEvents(limit));
 });
 
+app.get('/api/runs', async (_req, res) => {
+    const runs: any[] = [];
+    for (const [threadId, session] of sessions.entries()) {
+        try {
+            const state = await session.getState();
+            runs.push({
+                threadId,
+                systemName: state.input?.systemName,
+                phase: state.phase,
+                mode: state.input?.mode,
+                runType: state.input?.runType,
+                cancelled: state.cancelled,
+            });
+        } catch { /* session may be stale */ }
+    }
+    res.json(runs);
+});
+
 app.post('/api/run', async (req, res) => {
     try {
         const { systemName, requirementsText, requirementsDocPath, mode, runType, existingProjectPath, repoTarget } = req.body;
@@ -121,7 +149,13 @@ app.post('/api/run', async (req, res) => {
             runAutonomous({ systemName, requirementsText: text, mode: 'autonomous', runType: resolvedRunType, existingProjectPath, repoTarget })
                 .then((state) => {
                     states.set(systemName, state);
-                    broadcast('run:complete', { systemName, state });
+                    const acceptance = state.acceptance;
+                    const status = state.cancelled ? 'cancelled'
+                        : acceptance?.status === 'accepted' ? 'completed'
+                        : acceptance?.status === 'partial' ? 'partial'
+                        : acceptance?.status === 'inconclusive' ? 'inconclusive'
+                        : 'failed';
+                    broadcast('run:complete', { systemName, state, status, blockers: acceptance?.blockers ?? [] });
                 })
                 .catch((err) => {
                     // run.ts already flushes the token report on failure,
@@ -150,6 +184,14 @@ app.post('/api/run', async (req, res) => {
             const state = await session.getState();
             states.set(session.threadId, state);
             broadcast('run:started', { systemName, threadId: session.threadId, mode: 'human' });
+            // With interruptAfter, the first HITL phase has already completed.
+            // Notify the dashboard that the phase output is ready for review.
+            broadcast('hitl:waiting', {
+                threadId: session.threadId,
+                phase: state.phase,
+                systemName,
+                latestArtifact: state.artifacts?.[state.artifacts.length - 1] ?? null,
+            });
 
             res.json({
                 status: 'started',
@@ -201,11 +243,56 @@ app.post('/api/run/:id/approve', async (req, res) => {
         const state = await session.getState();
         states.set(req.params.id, state);
         broadcast('run:phase-complete', { threadId: req.params.id, phase: state.phase, decision: hitlDecision });
-        res.json({ phase: state.phase, decision: hitlDecision, state });
+        // With interruptAfter, the next phase has already completed.
+        // Notify the dashboard that the newly completed phase output is ready for review.
+        if (state.phase !== 'finalize') {
+            broadcast('hitl:waiting', {
+                threadId: req.params.id,
+                phase: state.phase,
+                latestArtifact: state.artifacts?.[state.artifacts.length - 1] ?? null,
+            });
+        }
+        res.json({ phase: state.phase, decision: hitlDecision, state, waiting: state.phase !== 'finalize' });
     } catch (err: any) {
         log.error(`POST /api/run/:id/approve failed: ${err.message}`);
         res.status(500).json({ error: err.message });
     }
+});
+
+// ─── Artifact endpoints ──────────────────────────────────────────────────────
+
+app.get('/api/run/:id/artifact/:agentId', async (req, res) => {
+    const session = sessions.get(req.params.id);
+    const state = session ? await session.getState() : states.get(req.params.id);
+    if (!state) { res.status(404).json({ error: 'Run not found' }); return; }
+
+    const artifact = (state.artifacts ?? []).find(
+        (a: any) => a.agentId === req.params.agentId
+    );
+    if (!artifact) { res.status(404).json({ error: 'Artifact not found' }); return; }
+
+    const filePath = path.join(state.workspacePath, artifact.filePath);
+    if (!fs.existsSync(filePath)) {
+        res.status(404).json({ error: 'Artifact file not found on disk' });
+        return;
+    }
+
+    const content = fs.readFileSync(filePath, 'utf-8');
+    res.json({ agentId: artifact.agentId, title: artifact.title, filePath: artifact.filePath, content });
+});
+
+app.get('/api/run/:id/artifacts', async (req, res) => {
+    const session = sessions.get(req.params.id);
+    const state = session ? await session.getState() : states.get(req.params.id);
+    if (!state) { res.status(404).json({ error: 'Run not found' }); return; }
+
+    const artifacts = (state.artifacts ?? []).map((a: any) => {
+        const filePath = path.join(state.workspacePath, a.filePath);
+        let content = '';
+        try { content = fs.readFileSync(filePath, 'utf-8'); } catch {}
+        return { ...a, content };
+    });
+    res.json(artifacts);
 });
 
 // ─── PR endpoints ────────────────────────────────────────────────────────────
@@ -230,7 +317,7 @@ app.get('/api/run/:id/prs', async (req, res) => {
 const dashboardPath = path.join(__dirname, '..', 'dashboard', 'dist', 'dashboard', 'browser');
 if (fs.existsSync(dashboardPath)) {
     app.use(express.static(dashboardPath));
-    app.get('*', (_req, res) => {
+    app.get('*path', (_req, res) => {
         res.sendFile(path.join(dashboardPath, 'index.html'));
     });
     log.info(`Serving Angular dashboard from ${dashboardPath}`);

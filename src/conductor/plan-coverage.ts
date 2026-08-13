@@ -1,0 +1,304 @@
+/**
+ * Plan coverage validator — detects silent scope loss between planning phases.
+ *
+ * Two validators:
+ * - `validateStoryPlan`:      epics → stories → tasks  (after Product Manager)
+ * - `validateAssignmentPlan`: stories/tasks → assignments  (after Team Leader)
+ *
+ * Both return a list of `CoverageViolation` objects graded critical or major.
+ * The conductor can then re-invoke the planning agent with a targeted gap prompt
+ * or (under PLAN_COVERAGE_MODE='enforce') fail the run early.
+ */
+import type { ProjectStateType } from './state';
+import { getLogger } from '../utils/logger';
+
+const log = getLogger('[plan-coverage]', 213);
+
+// ─── Types ──────────────────────────────────────────────────────────────────
+
+export interface CoverageViolation {
+    kind:
+        | 'story-without-task'
+        | 'task-without-assignment'
+        | 'story-without-assignment'
+        | 'ac-without-assignment'
+        | 'dangling-story-ref'
+        | 'dangling-task-ref'
+        | 'dangling-dependency'
+        | 'epic-without-story'
+        | 'duplicate-id';
+    severity: 'critical' | 'major';
+    id: string;
+    detail: string;
+}
+
+// ─── Story Plan Validator (after PM) ────────────────────────────────────────
+
+/**
+ * Validate epics → stories → tasks.
+ * Called at the end of productManagerNode.
+ */
+export function validateStoryPlan(state: ProjectStateType): CoverageViolation[] {
+    const violations: CoverageViolation[] = [];
+
+    const epicIds = new Set((state.epics ?? []).map(e => e.id));
+    const storyIds = new Set((state.userStories ?? []).map(s => s.id));
+    const taskStoryIds = new Set<string>();
+
+    // Detect duplicate story ids
+    const seenStoryIds = new Set<string>();
+    for (const s of state.userStories ?? []) {
+        if (seenStoryIds.has(s.id)) {
+            violations.push({ kind: 'duplicate-id', severity: 'major', id: s.id, detail: `Duplicate user story id: ${s.id}` });
+        }
+        seenStoryIds.add(s.id);
+    }
+
+    // Detect duplicate task ids
+    const seenTaskIds = new Set<string>();
+    for (const t of state.tasks ?? []) {
+        if (seenTaskIds.has(t.id)) {
+            violations.push({ kind: 'duplicate-id', severity: 'major', id: t.id, detail: `Duplicate task id: ${t.id}` });
+        }
+        seenTaskIds.add(t.id);
+        if (t.storyId) taskStoryIds.add(t.storyId);
+    }
+
+    // Every epic should have at least one story
+    for (const epic of state.epics ?? []) {
+        const hasStory = (state.userStories ?? []).some(s => s.epicId === epic.id);
+        if (!hasStory) {
+            violations.push({ kind: 'epic-without-story', severity: 'major', id: epic.id, detail: `Epic ${epic.id} has no user stories` });
+        }
+    }
+
+    // Every story's epicId should resolve
+    for (const s of state.userStories ?? []) {
+        if (s.epicId && !epicIds.has(s.epicId)) {
+            violations.push({ kind: 'dangling-story-ref', severity: 'major', id: s.id, detail: `Story ${s.id} references non-existent epic ${s.epicId}` });
+        }
+    }
+
+    // Every story should have at least one task
+    for (const s of state.userStories ?? []) {
+        if (!taskStoryIds.has(s.id)) {
+            violations.push({ kind: 'story-without-task', severity: 'critical', id: s.id, detail: `Story ${s.id} has no tasks` });
+        }
+    }
+
+    // Every task's storyId (if present) should resolve
+    for (const t of state.tasks ?? []) {
+        if (t.storyId && !storyIds.has(t.storyId)) {
+            violations.push({ kind: 'dangling-task-ref', severity: 'major', id: t.id, detail: `Task ${t.id} references non-existent story ${t.storyId}` });
+        }
+    }
+
+    return violations;
+}
+
+// ─── Assignment Plan Validator (after TL) ───────────────────────────────────
+
+/**
+ * Validate stories/tasks → assignments.
+ * Called at the end of teamLeaderNode.
+ */
+export function validateAssignmentPlan(state: ProjectStateType): CoverageViolation[] {
+    const violations: CoverageViolation[] = [];
+
+    const storyIds = new Set((state.userStories ?? []).map(s => s.id));
+    const taskIds = new Set((state.tasks ?? []).map(t => t.id));
+    const assignmentIds = new Set<string>();
+
+    // Collect all story ids covered by assignments (primary + additional)
+    const coveredStoryIds = new Set<string>();
+    // Collect all task ids covered by assignments
+    const coveredTaskIds = new Set<string>();
+    // Track AC coverage: storyId → Set<acIndex>
+    const coveredAcByStory = new Map<string, Set<number>>();
+
+    // Detect duplicate assignment ids
+    const seenIds = new Set<string>();
+    for (const a of state.assignments ?? []) {
+        if (seenIds.has(a.id)) {
+            violations.push({ kind: 'duplicate-id', severity: 'major', id: a.id, detail: `Duplicate assignment id: ${a.id}` });
+        }
+        seenIds.add(a.id);
+        assignmentIds.add(a.id);
+
+        // Primary story
+        coveredStoryIds.add(a.storyId);
+
+        // Additional stories
+        for (const sid of a.additionalStoryIds ?? []) {
+            coveredStoryIds.add(sid);
+        }
+
+        // Task ids
+        for (const tid of a.taskIds ?? []) {
+            coveredTaskIds.add(tid);
+        }
+
+        // AC indexes
+        const allStoryIds = [a.storyId, ...(a.additionalStoryIds ?? [])];
+        for (const sid of allStoryIds) {
+            if (!coveredAcByStory.has(sid)) coveredAcByStory.set(sid, new Set());
+            const acSet = coveredAcByStory.get(sid)!;
+            if ((a.acIndexes ?? []).length === 0) {
+                // Empty acIndexes = covers all AC for this story
+                acSet.add(-1); // sentinel for "all"
+            } else {
+                for (const idx of a.acIndexes ?? []) acSet.add(idx);
+            }
+        }
+    }
+
+    // Every story should be assigned
+    for (const s of state.userStories ?? []) {
+        if (!coveredStoryIds.has(s.id)) {
+            const acCount = s.acceptanceCriteria?.length ?? 0;
+            violations.push({
+                kind: 'story-without-assignment',
+                severity: 'critical',
+                id: s.id,
+                detail: `Story ${s.id} (${acCount} AC): "As a ${s.asA}, I want ${s.iWant}" — has no assignment`,
+            });
+        }
+    }
+
+    // Every task should be assigned
+    for (const t of state.tasks ?? []) {
+        if (!coveredTaskIds.has(t.id)) {
+            violations.push({
+                kind: 'task-without-assignment',
+                severity: 'critical',
+                id: t.id,
+                detail: `Task ${t.id} [${t.layer}] "${t.title}" — unassigned`,
+            });
+        }
+    }
+
+    // Every AC of every story should be covered
+    for (const s of state.userStories ?? []) {
+        const acSet = coveredAcByStory.get(s.id);
+        if (!acSet) continue; // story-without-assignment already reported
+        if (acSet.has(-1)) continue; // "all" sentinel covers everything
+        const acCount = s.acceptanceCriteria?.length ?? 0;
+        for (let i = 0; i < acCount; i++) {
+            if (!acSet.has(i)) {
+                violations.push({
+                    kind: 'ac-without-assignment',
+                    severity: 'major',
+                    id: `${s.id}:AC${i}`,
+                    detail: `Story ${s.id} AC[${i}]: "${(s.acceptanceCriteria ?? [])[i]}" — not covered by any assignment's acIndexes`,
+                });
+            }
+        }
+    }
+
+    // Every assignment.storyId / additionalStoryIds should resolve
+    for (const a of state.assignments ?? []) {
+        if (!storyIds.has(a.storyId) && a.storyId !== 'US-BUGFIX') {
+            violations.push({
+                kind: 'dangling-story-ref',
+                severity: 'critical',
+                id: a.id,
+                detail: `Assignment ${a.id} references non-existent story ${a.storyId}`,
+            });
+        }
+        for (const sid of a.additionalStoryIds ?? []) {
+            if (!storyIds.has(sid)) {
+                violations.push({
+                    kind: 'dangling-story-ref',
+                    severity: 'major',
+                    id: a.id,
+                    detail: `Assignment ${a.id} additionalStoryIds references non-existent story ${sid}`,
+                });
+            }
+        }
+
+        // Every taskIds entry should resolve (skip BUGFIX- prefixed tasks)
+        for (const tid of a.taskIds ?? []) {
+            if (!taskIds.has(tid) && !tid.startsWith('BUGFIX-')) {
+                violations.push({
+                    kind: 'dangling-task-ref',
+                    severity: 'major',
+                    id: a.id,
+                    detail: `Assignment ${a.id} references non-existent task ${tid}`,
+                });
+            }
+        }
+
+        // Every dependsOn entry should resolve
+        for (const dep of a.dependsOn ?? []) {
+            if (!assignmentIds.has(dep)) {
+                violations.push({
+                    kind: 'dangling-dependency',
+                    severity: 'critical',
+                    id: a.id,
+                    detail: `Assignment ${a.id} dependsOn non-existent assignment ${dep}`,
+                });
+            }
+        }
+    }
+
+    return violations;
+}
+
+// ─── Gap Prompt Builder ─────────────────────────────────────────────────────
+
+/**
+ * Build a targeted gap prompt for the TL to close coverage gaps.
+ * Returns only the additions needed, not the full plan.
+ */
+export function buildCoverageGapPrompt(
+    violations: CoverageViolation[],
+    nextAssignmentId: number,
+): string {
+    const storyGaps = violations.filter(v => v.kind === 'story-without-assignment');
+    const taskGaps = violations.filter(v => v.kind === 'task-without-assignment');
+    const danglingDeps = violations.filter(v => v.kind === 'dangling-dependency');
+
+    const parts: string[] = [
+        'Your assignment plan is incomplete. The following gaps MUST be closed:',
+        '',
+    ];
+
+    if (storyGaps.length > 0) {
+        parts.push(`## Unassigned stories (${storyGaps.length}):`);
+        for (const v of storyGaps) parts.push(`  ${v.detail}`);
+        parts.push('');
+    }
+
+    if (taskGaps.length > 0) {
+        parts.push(`## Unassigned tasks (${taskGaps.length}):`);
+        for (const v of taskGaps) parts.push(`  ${v.detail}`);
+        parts.push('');
+    }
+
+    if (danglingDeps.length > 0) {
+        parts.push(`## Dangling dependsOn ids (${danglingDeps.length}):`);
+        for (const v of danglingDeps) parts.push(`  ${v.detail}`);
+        parts.push('');
+    }
+
+    parts.push(
+        `Return ONLY the ADDITIONAL assignments needed to close these gaps, as`,
+        `{ "assignments": [ ...the remaining items... ] }`,
+        `Continue the id sequence from ASSIGN-${String(nextAssignmentId).padStart(3, '0')}.`,
+        `Do not restate assignments you already produced.`,
+    );
+
+    return parts.join('\n');
+}
+
+/**
+ * Log the planning funnel at the end of teamLeaderNode.
+ */
+export function logPlanFunnel(state: ProjectStateType): void {
+    const epicCount = (state.epics ?? []).length;
+    const storyCount = (state.userStories ?? []).length;
+    const acCount = (state.userStories ?? []).reduce((sum, s) => sum + (s.acceptanceCriteria?.length ?? 0), 0);
+    const taskCount = (state.tasks ?? []).length;
+    const assignmentCount = (state.assignments ?? []).length;
+    log.info(`Plan funnel: ${epicCount} epics → ${storyCount} stories (${acCount} AC) → ${taskCount} tasks → ${assignmentCount} assignments`);
+}

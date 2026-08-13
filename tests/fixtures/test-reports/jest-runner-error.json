@@ -1,0 +1,21 @@
+{
+  "numTotalTests": 0,
+  "numPassedTests": 0,
+  "numFailedTests": 0,
+  "numPendingTests": 0,
+  "success": false,
+  "testResults": [
+    {
+      "testFilePath": "/tmp/project/src/setupTests.ts",
+      "testResults": [
+        {
+          "ancestorTitles": [],
+          "title": "test suite failed to run",
+          "status": "failed",
+          "duration": null,
+          "failureMessages": ["Cannot find module '@testing-library/jest-dom' from 'src/setupTests.ts'\n\n      Require stack:\n        src/setupTests.ts\n\n    > 1 | import '@testing-library/jest-dom';\n        | ^\n\n      at Resolver._throwModNotFoundError (../node_modules/jest-resolve/src/resolver.ts:491:11)\n      at Object.<anonymous> (src/setupTests.ts:1:1)"]
+        }
+      ]
+    }
+  ]
+}

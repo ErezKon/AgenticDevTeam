@@ -3,6 +3,11 @@
  *
  * Every path is resolved against and confined to the workspace root.
  * Escaping the workspace via ".." is rejected.
+ *
+ * Protection modes (Sub-Plan 02 — Gate Integrity):
+ *   'off'  — all writes allowed (scaffold agents)
+ *   'warn' — writes to protected config files are allowed but logged as warnings
+ *   'deny' — writes to protected config files return a REFUSED error string
  */
 import { tool } from '@langchain/core/tools';
 import { z } from 'zod';
@@ -10,19 +15,69 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { resolveWorkspacePath } from '../../utils/workspace';
 import { LogColors, color256 } from '../../utils/log-colors.util';
-import { logToolAction } from '../../utils/logger';
+import { logToolAction, getLogger } from '../../utils/logger';
+import { truncateToolResult } from '../_shared/truncate';
+import { matchesProtectedGlob, PROTECTED_CONFIG_GLOBS, PROTECTED_SCRIPT_GLOBS } from '../../conductor/gate-integrity';
 
 const TAG_COLOR = 75;
 const TAG = `${color256(TAG_COLOR)}[fs-tools]${LogColors.RESET}`;
+const protLog = getLogger('[fs-protect]', 214);
+
+// ─── Protection types ───────────────────────────────────────────────────────
+
+export type ProtectionMode = 'off' | 'warn' | 'deny';
+
+export interface WorkspaceToolOptions {
+    /** Which protection mode for config files. Default: 'off'. */
+    protectionMode?: ProtectionMode;
+    /** Override the set of globs considered protected. Defaults to PROTECTED_CONFIG_GLOBS. */
+    protectedGlobs?: string[];
+}
+
+/** REFUSED message returned to agents when a write is blocked. */
+const REFUSED_MESSAGE = `REFUSED: This is a protected configuration file during a quality-gate repair.
+You must fix the source code so the existing build and test commands pass.
+If a dependency is genuinely missing, add it to \`dependencies\` ONLY — do not change \`scripts\`.`;
+
+/**
+ * Check if a file path is protected and return the refusal or null.
+ */
+function checkProtection(
+    filePath: string,
+    mode: ProtectionMode,
+    globs: string[],
+): string | null {
+    if (mode === 'off') return null;
+    if (!matchesProtectedGlob(filePath, globs)) return null;
+
+    if (mode === 'warn') {
+        protLog.warn(`Protected file write (warn mode): ${filePath}`);
+        return null; // allow, just warn
+    }
+    // mode === 'deny'
+    protLog.warn(`REFUSED write to protected file: ${filePath}`);
+    return `${REFUSED_MESSAGE}\nBlocked file: \`${filePath}\``;
+}
 
 /**
  * Create workspace-scoped filesystem tools bound to a specific workspace root.
  */
-export function createWorkspaceTools(workspaceRoot: string) {
+export function createWorkspaceTools(
+    workspaceRoot: string,
+    opts?: WorkspaceToolOptions,
+) {
+    const protectionMode = opts?.protectionMode ?? 'off';
+    const protectedGlobs = opts?.protectedGlobs ?? PROTECTED_CONFIG_GLOBS;
+
     const writeFileTool = tool(
         async ({ filePath, content }) => {
             const resolved = resolveWorkspacePath(workspaceRoot, filePath);
             logToolAction(`${TAG} write_file: ${filePath}`);
+
+            // Protection check
+            const refusal = checkProtection(filePath, protectionMode, protectedGlobs);
+            if (refusal) return refusal;
+
             fs.mkdirSync(path.dirname(resolved), { recursive: true });
             fs.writeFileSync(resolved, content, 'utf-8');
             return `File written: ${filePath} (${content.length} chars)`;
@@ -38,20 +93,30 @@ export function createWorkspaceTools(workspaceRoot: string) {
     );
 
     const readFileTool = tool(
-        async ({ filePath }) => {
+        async ({ filePath, offset, limit }) => {
             const resolved = resolveWorkspacePath(workspaceRoot, filePath);
-            logToolAction(`${TAG} read_file: ${filePath}`);
+            logToolAction(`${TAG} read_file: ${filePath}${offset ? ` offset=${offset}` : ''}${limit ? ` limit=${limit}` : ''}`);
             if (!fs.existsSync(resolved)) {
                 return `Error: File not found: ${filePath}`;
             }
-            const content = fs.readFileSync(resolved, 'utf-8');
-            return content;
+            const raw = fs.readFileSync(resolved, 'utf-8');
+            const allLines = raw.split('\n');
+            const totalLines = allLines.length;
+            if (offset || limit) {
+                const start = Math.max((offset ?? 1) - 1, 0);
+                const end = limit ? start + limit : totalLines;
+                const slice = allLines.slice(start, end).join('\n');
+                return `[lines ${start + 1}-${Math.min(end, totalLines)} of ${totalLines}]\n${slice}`;
+            }
+            return truncateToolResult(raw, `read_file ${filePath}`);
         },
         {
             name: 'read_file',
-            description: 'Read the contents of a file in the project workspace.',
+            description: 'Read the contents of a file in the project workspace. Use offset/limit for large files to read a specific line range.',
             schema: z.object({
                 filePath: z.string().describe('Relative path within the workspace'),
+                offset: z.number().optional().describe('1-based start line number (default: 1)'),
+                limit: z.number().optional().describe('Number of lines to return (default: all)'),
             }),
         }
     );
@@ -60,6 +125,11 @@ export function createWorkspaceTools(workspaceRoot: string) {
         async ({ filePath, oldString, newString }) => {
             const resolved = resolveWorkspacePath(workspaceRoot, filePath);
             logToolAction(`${TAG} edit_file: ${filePath}`);
+
+            // Protection check
+            const refusal = checkProtection(filePath, protectionMode, protectedGlobs);
+            if (refusal) return refusal;
+
             if (!fs.existsSync(resolved)) {
                 return `Error: File not found: ${filePath}`;
             }
@@ -90,7 +160,8 @@ export function createWorkspaceTools(workspaceRoot: string) {
                 return `Error: Directory not found: ${dirPath}`;
             }
             const entries = listDirectory(resolved, workspaceRoot, recursive ?? false);
-            return entries.join('\n') || '(empty directory)';
+            const raw = entries.join('\n') || '(empty directory)';
+            return truncateToolResult(raw, 'list_dir');
         },
         {
             name: 'list_dir',
@@ -108,7 +179,8 @@ export function createWorkspaceTools(workspaceRoot: string) {
             logToolAction(`${TAG} search_code: "${query}" pattern=${filePattern || '*'}`);
             const results = searchInFiles(resolved, workspaceRoot, query, filePattern);
             if (results.length === 0) return 'No matches found.';
-            return results.slice(0, 50).join('\n');
+            const raw = results.slice(0, 50).join('\n');
+            return truncateToolResult(raw, 'search_code');
         },
         {
             name: 'search_code',

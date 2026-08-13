@@ -21,3 +21,4 @@ export * from './transcript.schema';
 export * from './codebase-analysis.schema';
 export * from './pr.schema';
 export * from './token-usage.schema';
+export * from './repo-contract.schema';

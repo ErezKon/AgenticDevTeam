@@ -1,0 +1,58 @@
+{
+  "generatedAt": "2026-08-11T00:51:52.486Z",
+  "status": "completed",
+  "systemName": "RetroBoard3",
+  "runType": "greenfield",
+  "finalPhase": "e2e",
+  "tokenUsage": {
+    "totalCalls": 3990,
+    "totalTokens": 14618677,
+    "totalInputTokens": 14114969,
+    "totalOutputTokens": 503708
+  },
+  "budget": {
+    "level": "ok",
+    "binding": "none",
+    "utilisation": 0,
+    "usedTokens": 14618677,
+    "estCostUsd": 90.73431000000001,
+    "elapsedMs": 13383071
+  },
+  "counts": {
+    "epics": 6,
+    "userStories": 13,
+    "tasks": 54,
+    "assignments": 51,
+    "fileChanges": 135,
+    "testReports": 8,
+    "bugs": 1,
+    "pullRequests": 14,
+    "artifacts": 35
+  },
+  "files": {
+    "stateJson": "state.json",
+    "runLog": "run.log",
+    "tokenReportHtml": "***REDACTED***",
+    "tokenReportJson": "***REDACTED***",
+    "traceabilityMd": "traceability.md"
+  },
+  "eventCount": 500,
+  "traceability": {
+    "criteria": 26,
+    "verified": 0,
+    "implemented": 16,
+    "missing": 2,
+    "coveragePct": 0,
+    "orphanedStories": [
+      "US-011"
+    ],
+    "orphanedAssignments": [
+      "ASSIGN-001",
+      "ASSIGN-002",
+      "ASSIGN-003",
+      "ASSIGN-004",
+      "ASSIGN-005",
+      "BUGFIX-1-ASSIGN-051"
+    ]
+  }
+}

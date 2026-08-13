@@ -1,0 +1,9 @@
+I need a simple to-do list web application.
+
+Requirements:
+- A user can create, edit, and delete tasks.
+- Each task has a title and an optional description.
+- Tasks can be marked as "done" or "not done".
+- The app should show all tasks in a list, with done tasks visually distinct from not-done tasks.
+- The list should be stored locally in the browser so that refreshing the page does not lose tasks.
+- The interface should be very simple and easy to use on both desktop and mobile.

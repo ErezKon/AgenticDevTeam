@@ -24,6 +24,8 @@ export interface TokenCallRecord {
     outputTokens: number;
     totalTokens: number;
     timestamp: string;
+    /** Optional invocation ID for per-invocation attribution. */
+    invocationId?: string;
 }
 
 /** Aggregated usage summary for one agent. */
@@ -49,12 +51,36 @@ export interface RunUsageSummary {
 
 // ─── Run status ─────────────────────────────────────────────────────────────
 
-export type RunStatus = 'in-progress' | 'completed' | 'failed' | 'cancelled';
+export type RunStatus = 'in-progress' | 'completed' | 'failed' | 'cancelled' | 'partial' | 'inconclusive';
+
+/** Tracks a single agent invocation (multiple LLM calls) for the efficiency table. */
+export interface InvocationRecord {
+    id: string;
+    agentId: string;
+    phase: string;
+    startedAt: number;
+    endedAt?: number;
+    respawns?: number;
+}
+
+/** Per-invocation efficiency summary for the report. */
+export interface InvocationEfficiencyRow {
+    agentId: string;
+    invocations: number;
+    avgCallsPerInvocation: number;
+    avgInputPerCall: number;
+    firstCallInput: number;
+    lastCallInput: number;
+    growthFactor: number;
+    respawns: number;
+}
 
 // ─── Singleton ──────────────────────────────────────────────────────────────
 
 class TokenTracker {
     private ledger: TokenCallRecord[] = [];
+    private _invocations: Map<string, InvocationRecord> = new Map();
+    private _nextInvocationId = 0;
 
     // ── Persistence fields ──────────────────────────────────────────────
     private _outputPath: string | null = null;
@@ -195,6 +221,92 @@ class TokenTracker {
         };
     }
 
+    // ── Invocation tracking API ───────────────────────────────────────────
+
+    /**
+     * Start tracking a new agent invocation. Returns a unique invocation ID
+     * that should be threaded through TokenUsageCallbackHandler so all LLM
+     * calls within this invocation are tagged.
+     */
+    startInvocation(agentId: string, phase: string): string {
+        const id = `inv-${agentId}-${this._nextInvocationId++}`;
+        this._invocations.set(id, { id, agentId, phase, startedAt: Date.now() });
+        return id;
+    }
+
+    /** Mark an invocation as ended. */
+    endInvocation(id: string, respawns?: number): void {
+        const inv = this._invocations.get(id);
+        if (inv) {
+            inv.endedAt = Date.now();
+            if (respawns !== undefined) inv.respawns = respawns;
+        }
+    }
+
+    /**
+     * Build the Invocation Efficiency summary table.
+     * Groups by agentId, computes per-invocation call counts and growth factor.
+     */
+    getInvocationSummaries(): InvocationEfficiencyRow[] {
+        // Group invocations by agentId
+        const byAgent = new Map<string, InvocationRecord[]>();
+        for (const inv of this._invocations.values()) {
+            const list = byAgent.get(inv.agentId) ?? [];
+            list.push(inv);
+            byAgent.set(inv.agentId, list);
+        }
+
+        const rows: InvocationEfficiencyRow[] = [];
+        for (const [agentId, invocations] of byAgent.entries()) {
+            let totalCalls = 0;
+            let totalInput = 0;
+            let totalRespawns = 0;
+            let globalFirstInput = 0;
+            let globalLastInput = 0;
+
+            for (const inv of invocations) {
+                totalRespawns += inv.respawns ?? 0;
+                // Find all records tagged with this invocation ID
+                const records = this.ledger.filter(r => r.invocationId === inv.id);
+                totalCalls += records.length;
+                totalInput += records.reduce((s, r) => s + r.inputTokens, 0);
+
+                if (records.length > 0) {
+                    if (globalFirstInput === 0) globalFirstInput = records[0].inputTokens;
+                    globalLastInput = records[records.length - 1].inputTokens;
+                }
+            }
+
+            // Fallback: if no records were tagged with invocation IDs, use all records for this agent
+            if (totalCalls === 0) {
+                const agentRecords = this.ledger.filter(r => r.agentId === agentId);
+                totalCalls = agentRecords.length;
+                totalInput = agentRecords.reduce((s, r) => s + r.inputTokens, 0);
+                if (agentRecords.length > 0) {
+                    globalFirstInput = agentRecords[0].inputTokens;
+                    globalLastInput = agentRecords[agentRecords.length - 1].inputTokens;
+                }
+            }
+
+            const avgCalls = invocations.length > 0 ? totalCalls / invocations.length : 0;
+            const avgInput = totalCalls > 0 ? totalInput / totalCalls : 0;
+            const growth = globalFirstInput > 0 ? globalLastInput / globalFirstInput : 1;
+
+            rows.push({
+                agentId,
+                invocations: invocations.length,
+                avgCallsPerInvocation: Math.round(avgCalls * 10) / 10,
+                avgInputPerCall: Math.round(avgInput),
+                firstCallInput: globalFirstInput,
+                lastCallInput: globalLastInput,
+                growthFactor: Math.round(growth * 100) / 100,
+                respawns: totalRespawns,
+            });
+        }
+
+        return rows.sort((a, b) => b.invocations - a.invocations);
+    }
+
     /** Return the raw ledger as a serializable snapshot for state storage. */
     getSnapshot(): TokenCallRecord[] {
         return [...this.ledger];
@@ -204,6 +316,8 @@ class TokenTracker {
     reset(): void {
         if (this._refreshTimer) { clearTimeout(this._refreshTimer); this._refreshTimer = null; }
         this.ledger = [];
+        this._invocations.clear();
+        this._nextInvocationId = 0;
         this._outputPath = null;
         this._systemName = '';
         this._runStatus = 'in-progress';

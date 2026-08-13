@@ -6,9 +6,14 @@
 
 Build a **Battleship** game as a full-stack web application. Two players, each with a **6x6 board** and **3 ships** (sizes: 2, 3, 4). Players place their ships, then take turns firing at each other's board. First to sink all opponent ships wins.
 
+<<<<<<< HEAD
 - **FastAPI** backend that manages the game: board state, ship placement validation, turn logic, hit/miss/sunk detection. Expose REST endpoints for placing ships, firing shots, and viewing boards. Important: a player should never see the opponent's ship positions — only their own hits and misses.
 - **MCP tool server** ([Python SDK](https://github.com/modelcontextprotocol/python-sdk)) running over **Streamable HTTP** that exposes the same game actions as tools — so an AI agent could play the game.
 - **Vue 3** frontend that shows both grids (your board + your attack view of the opponent), lets you place ships and fire shots. Only Player 1 needs UI controls — Player 2 can be idle for now.
+=======
+- **FastAPI** python backend that manages the game: board state, ship placement validation, turn logic, hit/miss/sunk detection. Expose REST endpoints for placing ships, firing shots, and viewing boards. Important: a player should never see the opponent's ship positions — only their own hits and misses.
+- **Angular** frontend that shows both grids (your board + your attack view of the opponent), lets you place ships and fire shots. Only Player 1 needs UI controls — Player 2 can be idle for now.
+>>>>>>> master
 - **Docker Compose** with all services containerized. Each service can expose its own port.
 
 A single `docker compose up --build` should bring everything up.
@@ -20,7 +25,11 @@ A single `docker compose up --build` should bring everything up.
 
 ## What We're Looking For
 
+<<<<<<< HEAD
 Clean, readable code. A working game. Correct use of FastAPI, Vue, and MCP. Solid Docker setup. Design decisions are yours — we'll discuss them in the follow-up.
+=======
+Clean, readable code. A working game. Correct use of FastAPI and Angular. Solid Docker setup. Design decisions are yours — we'll discuss them in the follow-up.
+>>>>>>> master
 
 ## Not Required
 

@@ -20,6 +20,9 @@ import type { Assignment, Bug, PullRequest } from '../src/agents/_shared/base-sc
 function makeAssignment(overrides: Partial<Assignment> & { id: string }): Assignment {
     return {
         storyId: 'US-001',
+        additionalStoryIds: [],
+        taskIds: ['TASK-001'],
+        acIndexes: [],
         devAgentId: 'junior-react',
         rank: 'junior',
         priority: 'medium',
@@ -28,6 +31,7 @@ function makeAssignment(overrides: Partial<Assignment> & { id: string }): Assign
         description: 'Build something',
         dependsOn: [],
         taskType: 'feature',
+        moduleIds: [],
         ...overrides,
     };
 }
@@ -114,22 +118,24 @@ describe('selectPendingAssignments', () => {
 // ─── completedIdsFromPullRequests ────────────────────────────────────────────
 
 describe('completedIdsFromPullRequests', () => {
-    it('includes merged and approved, excludes open and closed', () => {
+    it('includes only merged, excludes approved/open/closed/blocked (Sub-Plan 07)', () => {
         const prs = [
             makePR({ assignmentIds: ['A-001', 'A-002'], status: 'merged' }),
             makePR({ assignmentIds: ['A-003'], status: 'approved' }),
             makePR({ assignmentIds: ['A-004'], status: 'open' }),
             makePR({ assignmentIds: ['A-005'], status: 'closed' }),
             makePR({ assignmentIds: ['A-006'], status: 'escalated_open' }),
+            makePR({ assignmentIds: ['A-007'], status: 'blocked' }),
         ];
         const result = completedIdsFromPullRequests(prs);
 
         expect(result).toContain('A-001');
         expect(result).toContain('A-002');
-        expect(result).toContain('A-003');
+        expect(result).not.toContain('A-003');
         expect(result).not.toContain('A-004');
         expect(result).not.toContain('A-005');
         expect(result).not.toContain('A-006');
+        expect(result).not.toContain('A-007');
     });
 
     it('returns empty for no PRs', () => {

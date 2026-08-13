@@ -53,10 +53,26 @@
 
     <div class="form-group">
       <label for="requirements">{{ runType === 'maintain' ? 'Specs / Demands' : 'Requirements' }}</label>
-      <textarea id="requirements" [(ngModel)]="requirements" rows="12"
-        [placeholder]="runType === 'maintain'
-          ? 'Describe the changes, fixes, or features you want...'
-          : 'Paste your system requirements here...'"></textarea>
+
+      <div class="drop-zone"
+        [class.drag-over]="isDragOver"
+        (dragover)="onDragOver($event)"
+        (dragleave)="onDragLeave($event)"
+        (drop)="onDrop($event)">
+        <div class="drop-zone-hint" *ngIf="!requirements">
+          <span class="drop-icon">&#x1F4C4;</span>
+          <span>Drop a spec file here, or type / paste below</span>
+          <small>Supports .txt, .md, .json, .yaml, .yml, .xml, .csv, .html</small>
+        </div>
+        <div class="drop-zone-file" *ngIf="droppedFileName">
+          <span class="file-badge">{{ droppedFileName }}</span>
+          <button class="btn-clear" (click)="clearFile()" title="Remove file">&times;</button>
+        </div>
+        <textarea id="requirements" [(ngModel)]="requirements" rows="12"
+          [placeholder]="runType === 'maintain'
+            ? 'Describe the changes, fixes, or features you want...'
+            : 'Paste your system requirements here...'"></textarea>
+      </div>
     </div>
 
     <div class="form-actions">

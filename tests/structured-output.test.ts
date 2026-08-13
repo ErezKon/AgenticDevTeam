@@ -98,6 +98,46 @@ describe('parseAgentJson', () => {
             expect((result.value as any).nested.deep).toBe(true);
         }
     });
+
+    // ── Strategy 4: jsonrepair ──────────────────────────────────────────
+
+    test('repairs truncated JSON (missing closing braces)', () => {
+        // Simulates a response truncated by max_tokens
+        const raw = '{"dbDesign":{"engine":"PostgreSQL","rationale":"Good choice","entities":[{"name":"users","columns":[{"name":"id","type":"int"}]}';
+        const result = parseAgentJson(raw);
+        expect(result.ok).toBe(true);
+        if (result.ok) {
+            expect((result.value as any).dbDesign.engine).toBe('PostgreSQL');
+        }
+    });
+
+    test('repairs JSON with trailing commas', () => {
+        const raw = '{"name": "test", "items": [1, 2, 3,],}';
+        const result = parseAgentJson(raw);
+        expect(result.ok).toBe(true);
+        if (result.ok) {
+            expect((result.value as any).name).toBe('test');
+            expect((result.value as any).items).toEqual([1, 2, 3]);
+        }
+    });
+
+    test('repairs JSON with single quotes', () => {
+        const raw = "{'key': 'value', 'num': 42}";
+        const result = parseAgentJson(raw);
+        expect(result.ok).toBe(true);
+        if (result.ok) {
+            expect((result.value as any).key).toBe('value');
+        }
+    });
+
+    test('repairs truncated JSON embedded in prose', () => {
+        const raw = 'Here is the result: {"data": {"items": [1, 2, 3';
+        const result = parseAgentJson(raw);
+        expect(result.ok).toBe(true);
+        if (result.ok) {
+            expect((result.value as any).data.items).toEqual([1, 2, 3]);
+        }
+    });
 });
 
 // ─── summariseZodIssues ─────────────────────────────────────────────────────
@@ -243,6 +283,29 @@ describe('buildRepairMessage', () => {
         const msg = buildRepairMessage('- x: bad', 'do something');
         // The original request is kept for reference but not echoed
         expect(msg).not.toContain('do something');
+    });
+
+    test('includes previousRaw when supplied', () => {
+        const issues = '- status: Required';
+        const previousRaw = '{"name": "test", "count": 5}';
+        const msg = buildRepairMessage(issues, 'original request', previousRaw);
+        expect(msg).toContain('Your previous (invalid) JSON:');
+        expect(msg).toContain(previousRaw);
+    });
+
+    test('middle-clips previousRaw over 16k chars', () => {
+        const issues = '- status: Required';
+        const bigRaw = 'x'.repeat(20000);
+        const msg = buildRepairMessage(issues, 'original request', bigRaw);
+        expect(msg).toContain('Your previous (invalid) JSON:');
+        expect(msg).toContain('omitted');
+        // Should NOT contain the full 20000-char run
+        expect(msg).not.toContain('x'.repeat(20000));
+    });
+
+    test('does not add previousRaw section when not supplied', () => {
+        const msg = buildRepairMessage('- x: bad', 'do something');
+        expect(msg).not.toContain('Your previous (invalid) JSON:');
     });
 });
 

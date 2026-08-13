@@ -23,19 +23,19 @@ export const ARCHITECT_MODEL =
 
 /** Product Manager agent model. */
 export const PRODUCT_MANAGER_MODEL =
-    process.env.PRODUCT_MANAGER_MODEL ?? 'llama-3-3-70b-instruct';
+    process.env.PRODUCT_MANAGER_MODEL ?? 'gpt-oss-120b';
 
 /** DBA agent model. */
 export const DBA_MODEL =
-    process.env.DBA_MODEL ?? 'llama-3-3-70b-instruct';
+    process.env.DBA_MODEL ?? 'gpt-oss-120b';
 
 /** Team Leader agent model. */
 export const TEAM_LEADER_MODEL =
-    process.env.TEAM_LEADER_MODEL ?? 'gemma-3-27b-it';
+    process.env.TEAM_LEADER_MODEL ?? 'gpt-oss-120b';
 
 /** DevOps agent model. */
 export const DEVOPS_MODEL =
-    process.env.DEVOPS_MODEL ?? 'mistral-small-3-1-24b-instruct-2503';
+    process.env.DEVOPS_MODEL ?? 'gpt-oss-120b';
 
 /** Codebase Analyzer agent model. */
 export const CODEBASE_ANALYZER_MODEL =
@@ -43,11 +43,11 @@ export const CODEBASE_ANALYZER_MODEL =
 
 /** Principal Developer agent model (frontend & backend). */
 export const PRINCIPAL_DEV_MODEL =
-    process.env.PRINCIPAL_DEV_MODEL ?? 'llama-3-3-70b-instruct';
+    process.env.PRINCIPAL_DEV_MODEL ?? 'gpt-oss-120b';
 
 /** Senior Developer agent model (frontend & backend). */
 export const SENIOR_DEV_MODEL =
-    process.env.SENIOR_DEV_MODEL ?? 'mistral-small-3-1-24b-instruct-2503';
+    process.env.SENIOR_DEV_MODEL ?? 'gpt-oss-120b';
 
 /** Junior Developer agent model (all specialties).
  *  Minimum recommended: 20B+ parameters for reliable code generation.
@@ -108,47 +108,62 @@ export const WORKSPACE_SYNC_ALLOW_RESET =
  * LangGraph recursion limits per agent type.
  *
  * Pipeline agents (architect, PM, DBA, TL, QA) need very few tool calls (1-5).
- * Developer agents may need 15-25 tool calls (read, edit, git add, commit,
- * push — per file), so their limit must accommodate multi-file changes.
+ * Developer agents need many tool calls (read, create/edit, run tests).
  * LangGraph counts 2 steps per tool call (LLM + tool), so limit ÷ 2 ≈ max calls.
- * Reviewer agents need 2-5 (diff, log, produce JSON).
+ * Reviewer agents need 5-7 (diff, log, review comments, produce JSON).
  *
- * Lower limits prevent poisoned/looping agents from burning tokens until
- * the global ceiling (150). Per-type env vars override the global fallback.
+ * With split read/write/shell budgets (Sub-Plan 08), the loop guard is the
+ * binding constraint — the recursion limit is a safety net, not the primary
+ * stop mechanism.  6 × `Recursion limit of 58` killed dev agents mid-work
+ * in pacman8 alone; raised to 140 so the loop guard fires first.
+ *
+ * Per-type env vars override the global fallback.
  */
 export const PIPELINE_RECURSION_LIMIT =
     parseInt(process.env.PIPELINE_RECURSION_LIMIT ?? process.env.AGENT_RECURSION_LIMIT ?? '15', 10);
 
+/** Dev recursion limit.  Was 58 — raised to 140 because 6 recursion-limit kills
+ *  in pacman8 destroyed dev agents mid-work.  The loop guard (read/write/shell
+ *  budgets) is now the binding constraint. */
 export const DEV_RECURSION_LIMIT =
-    parseInt(process.env.DEV_RECURSION_LIMIT ?? process.env.AGENT_RECURSION_LIMIT ?? '50', 10);
+    parseInt(process.env.DEV_RECURSION_LIMIT ?? process.env.AGENT_RECURSION_LIMIT ?? '140', 10);
 
+/** Reviewer recursion limit.  Was 26 — raised to 40 because reviewers abstained
+ *  on recursion limits and that counted as approval under the old policy. */
 export const REVIEWER_RECURSION_LIMIT =
-    parseInt(process.env.REVIEWER_RECURSION_LIMIT ?? process.env.AGENT_RECURSION_LIMIT ?? '26', 10);
+    parseInt(process.env.REVIEWER_RECURSION_LIMIT ?? process.env.AGENT_RECURSION_LIMIT ?? '40', 10);
 
 /**
  * Recursion limit for pipeline agents that USE TOOLS (codebase-analyzer,
  * qa-unit, qa-e2e, devops). These agents explore the workspace, write files
  * and run commands, so 15 (PIPELINE_RECURSION_LIMIT) is far too low — it
  * killed the whole run at the QA phase in runs 5 and 6.
+ * Was 60 — raised to 120 because qa-unit was poisoned at 6–7 calls in all
+ * 8 QA phases across both runs.
  */
 export const TOOL_PIPELINE_RECURSION_LIMIT =
-    parseInt(process.env.TOOL_PIPELINE_RECURSION_LIMIT ?? '60', 10);
+    parseInt(process.env.TOOL_PIPELINE_RECURSION_LIMIT ?? '120', 10);
 
-/** Loop-guard ceiling (total tool calls) for tool-using pipeline agents. */
+/** Loop-guard ceiling (total tool calls) for tool-using pipeline agents.
+ *  Was 25 — raised to 50 because qa-unit was poisoned at 6–7 calls in all
+ *  8 QA phases across both runs. */
 export const TOOL_PIPELINE_MAX_TOOL_CALLS =
-    parseInt(process.env.TOOL_PIPELINE_MAX_TOOL_CALLS ?? '25', 10);
+    parseInt(process.env.TOOL_PIPELINE_MAX_TOOL_CALLS ?? '50', 10);
 
-/** Loop-guard ceiling for reviewer agents (must be < REVIEWER_RECURSION_LIMIT / 2). */
+/** Loop-guard ceiling for reviewer agents (must be < REVIEWER_RECURSION_LIMIT / 2).
+ *  Was 8 — raised to 14 because reviewers abstained on budget exhaustion. */
 export const REVIEWER_MAX_TOOL_CALLS =
-    parseInt(process.env.REVIEWER_MAX_TOOL_CALLS ?? '8', 10);
+    parseInt(process.env.REVIEWER_MAX_TOOL_CALLS ?? '14', 10);
 
 /** @deprecated Use per-type limits (PIPELINE_RECURSION_LIMIT, DEV_RECURSION_LIMIT, REVIEWER_RECURSION_LIMIT). */
 export const AGENT_RECURSION_LIMIT =
     parseInt(process.env.AGENT_RECURSION_LIMIT ?? '30', 10);
 
-/** Max file-change entries injected into the dev context prompt. */
+/** Max file-change entries injected into the dev context prompt.
+ *  Lowered from 60 to 25 — summariseFileChanges now groups by directory
+ *  so fewer entries convey the same information. */
 export const DEV_CONTEXT_FILE_CHANGES_LIMIT =
-    parseInt(process.env.DEV_CONTEXT_FILE_CHANGES_LIMIT ?? '60', 10);
+    parseInt(process.env.DEV_CONTEXT_FILE_CHANGES_LIMIT ?? '25', 10);
 
 /** Max parallel developer agents during fan-out. */
 export const MAX_CONCURRENT_DEVS =
@@ -202,9 +217,12 @@ export const DEVOPS_HEALTH_DELAY_MS =
 export const DEVOPS_TEARDOWN =
     (process.env.DEVOPS_TEARDOWN ?? 'true') === 'true';
 
-/** Allow E2E test failures to trigger a bugfix loop (default: false to preserve cost profile). */
+/** Allow E2E test failures to trigger a bugfix loop.
+ *  Was false — flipped to true because E2E never ran in either post-mortem run,
+ *  so the cost concern was hypothetical. With Sub-Plan 03's early-halt and the
+ *  run budget, an E2E failure is worth spending a bugfix iteration on. */
 export const E2E_BUGFIX_ENABLED =
-    (process.env.E2E_BUGFIX_ENABLED ?? 'false') === 'true';
+    (process.env.E2E_BUGFIX_ENABLED ?? 'true') === 'true';
 
 // ─── Run Budget ─────────────────────────────────────────────────────────────
 
@@ -212,13 +230,16 @@ export const E2E_BUGFIX_ENABLED =
 export const MAX_RUN_TOKENS =
     parseInt(process.env.MAX_RUN_TOKENS ?? '0', 10);
 
-/** Max estimated USD cost for a run. 0 = unlimited (default). */
+/** Max estimated USD cost for a run.  Was 0 (unlimited) — set to 150 now that
+ *  raised budgets make individual agents more expensive.  Sub-Plan 03's early-halt
+ *  on unrecoverability is what makes this safe: money goes to runs that can still
+ *  succeed, and failing runs stop early. */
 export const MAX_RUN_COST_USD =
-    parseFloat(process.env.MAX_RUN_COST_USD ?? '0');
+    parseFloat(process.env.MAX_RUN_COST_USD ?? '150');
 
-/** Max wall-clock time (ms) for a run. 0 = unlimited (default). */
+/** Max wall-clock time (ms) for a run.  Was 0 (unlimited) — set to 5 hours. */
 export const MAX_RUN_WALL_MS =
-    parseInt(process.env.MAX_RUN_WALL_MS ?? '0', 10);
+    parseInt(process.env.MAX_RUN_WALL_MS ?? '18000000', 10);
 
 /** Utilisation threshold for budget warning level (default: 0.70). */
 export const BUDGET_WARN_AT =
@@ -228,18 +249,31 @@ export const BUDGET_WARN_AT =
 export const BUDGET_DEGRADE_AT =
     parseFloat(process.env.BUDGET_DEGRADE_AT ?? '0.90');
 
+// ─── LLM Output Limits ──────────────────────────────────────────────────────
+
+/** Hard output-token ceiling for all agents (default 16 000). */
+export const LLM_MAX_OUTPUT_TOKENS =
+    parseInt(process.env.LLM_MAX_OUTPUT_TOKENS ?? '16000', 10);
+
+/** Output-token ceiling for planning agents (architect, PM, DBA, team-leader). Default 32 000. */
+export const PLANNING_MAX_OUTPUT_TOKENS =
+    parseInt(process.env.PLANNING_MAX_OUTPUT_TOKENS ?? '32000', 10);
+
+/** Per-request LLM timeout (ms). The hardcoded 120 000 was too short for long planning generations. */
+export const LLM_REQUEST_TIMEOUT_MS =
+    parseInt(process.env.LLM_REQUEST_TIMEOUT_MS ?? '300000', 10);
+
 // ─── Agent Output Validation ────────────────────────────────────────────────
 
 /** Number of repair attempts when agent output fails schema validation (0 disables). */
 export const AGENT_OUTPUT_REPAIR_ATTEMPTS =
-    parseInt(process.env.AGENT_OUTPUT_REPAIR_ATTEMPTS ?? '1', 10);
+    parseInt(process.env.AGENT_OUTPUT_REPAIR_ATTEMPTS ?? '2', 10);
+
+/** Continuation attempts when an agent's JSON output is truncated mid-array. */
+export const AGENT_OUTPUT_CONTINUATION_ATTEMPTS =
+    parseInt(process.env.AGENT_OUTPUT_CONTINUATION_ATTEMPTS ?? '3', 10);
 
 // ─── Context Budget ─────────────────────────────────────────────────────────
-
-/** Use compact summarisers instead of raw JSON.stringify dumps (default: true).
- *  Set to false to restore the old verbatim behaviour for A/B testing. */
-export const CONTEXT_COMPACT =
-    (process.env.CONTEXT_COMPACT ?? 'true') === 'true';
 
 /** Hard character budget for assembled context per agent prompt. */
 export const CONTEXT_MAX_CHARS =
@@ -253,6 +287,68 @@ export const CONTEXT_MAX_DESC_CHARS =
 export const RESPONSE_SCHEMA_COMPACT =
     (process.env.RESPONSE_SCHEMA_COMPACT ?? 'true') === 'true';
 
+/** Strip ALL descriptions and noise from injected JSON Schema (default: true).
+ *  Field names are self-documenting; full descriptions are only useful the first
+ *  time a developer sees the schema but are re-billed on every LLM call. */
+export const RESPONSE_SCHEMA_STRIP_ALL_DESCRIPTIONS =
+    (process.env.RESPONSE_SCHEMA_STRIP_ALL_DESCRIPTIONS ?? 'true') === 'true';
+
+/** Request JSON mode from the LLM API when a responseFormat schema is set (default: true).
+ *  Sets `response_format: { type: "json_object" }` on the model, which constrains
+ *  the model to always output valid JSON. Requires an OpenAI-compatible API that
+ *  supports JSON mode. Disable with LLM_JSON_MODE=false if the API doesn't support it. */
+export const LLM_JSON_MODE =
+    (process.env.LLM_JSON_MODE ?? 'true') === 'true';
+
+// ─── Context Compaction ─────────────────────────────────────────────────────
+
+/** Max characters any single tool result may contribute to agent history.
+ *  Was 6000 — raised to 10000 because a 4,210-char source file read was
+ *  being truncated, so agents re-read with offsets (costing more tokens). */
+export const MAX_TOOL_RESULT_CHARS =
+    parseInt(process.env.MAX_TOOL_RESULT_CHARS ?? '10000', 10);
+
+/** Number of most-recent tool results kept verbatim in ReAct history.
+ *  Was 2 — raised to 4 because agents re-read files they had already read
+ *  since the result had been stubbed out of history. */
+export const HISTORY_KEEP_RECENT_TOOL_RESULTS =
+    parseInt(process.env.HISTORY_KEEP_RECENT_TOOL_RESULTS ?? '4', 10);
+
+/** Enable the preModelHook that compacts ReAct history before each LLM call. */
+export const HISTORY_COMPACTION_ENABLED =
+    (process.env.HISTORY_COMPACTION_ENABLED ?? 'true') === 'true';
+
+/** Hard character ceiling for the assembled ReAct history passed to the LLM.
+ *  Was 30000 — raised to 60000.  With `growth 1.88x` observed, over-aggressive
+ *  compaction caused re-reads that cost *more* tokens than the saved context. */
+export const HISTORY_MAX_CHARS =
+    parseInt(process.env.HISTORY_MAX_CHARS ?? '60000', 10);
+
+/** Inject a distilled conventions digest in the prompt instead of making agents read_file them. */
+export const CONVENTIONS_INLINE_DIGEST =
+    (process.env.CONVENTIONS_INLINE_DIGEST ?? 'true') === 'true';
+
+/** Give developer agents git tools. The PR workflow already commits/pushes for them. */
+export const DEV_GIT_TOOLS_ENABLED =
+    (process.env.DEV_GIT_TOOLS_ENABLED ?? 'false') === 'true';
+
+/** Use the short persona variant for developer agents. */
+export const PERSONA_COMPACT =
+    (process.env.PERSONA_COMPACT ?? 'true') === 'true';
+
+/** Respawn a dev agent with a summarised handoff instead of poisoning tools at the ceiling. */
+export const AGENT_RESPAWN_ENABLED =
+    (process.env.AGENT_RESPAWN_ENABLED ?? 'true') === 'true';
+
+/** Max respawn generations per logical dev task.
+ *  Was 2 — raised to 4 because with a real handoff respawn becomes productive. */
+export const AGENT_RESPAWN_MAX_GENERATIONS =
+    parseInt(process.env.AGENT_RESPAWN_MAX_GENERATIONS ?? '4', 10);
+
+/** Input-token threshold that triggers a respawn on the next step. */
+export const AGENT_RESPAWN_TOKEN_THRESHOLD =
+    parseInt(process.env.AGENT_RESPAWN_TOKEN_THRESHOLD ?? '14000', 10);
+
 // ─── Quality Gates ──────────────────────────────────────────────────────────
 
 /** Enable multi-language quality gates (install/build/lint/test) in PR workflow and QA. */
@@ -261,15 +357,82 @@ export const QUALITY_GATES_ENABLED =
 
 /** Which gate steps to run (comma-separated). */
 export const QUALITY_GATE_STEPS =
-    (process.env.QUALITY_GATE_STEPS ?? 'install,build,lint,test').split(',') as ('install' | 'build' | 'lint' | 'test')[];
+    (process.env.QUALITY_GATE_STEPS ?? 'install,typecheck,build,lint,test').split(',') as ('install' | 'typecheck' | 'build' | 'lint' | 'test')[];
 
 /** Timeout (ms) for each quality gate step (default 5 min). */
 export const QUALITY_GATE_TIMEOUT_MS =
     parseInt(process.env.QUALITY_GATE_TIMEOUT_MS ?? '300000', 10);
 
-/** Fail the gate when a stack's toolchain is missing (default: false — missing tools produce 'skipped'). */
+/** Fail the gate when a stack's toolchain is missing (default: true — missing tools fail the gate). */
 export const QUALITY_GATE_STRICT_TOOLCHAIN =
-    (process.env.QUALITY_GATE_STRICT_TOOLCHAIN ?? 'false') === 'true';
+    (process.env.QUALITY_GATE_STRICT_TOOLCHAIN ?? 'true') === 'true';
+
+/** Max directory depth scanned when detecting stack roots (monorepo packages). */
+export const QUALITY_GATE_SCAN_DEPTH =
+    parseInt(process.env.QUALITY_GATE_SCAN_DEPTH ?? '3', 10);
+
+/** Max stack roots gated per run (guards pathological trees). */
+export const QUALITY_GATE_MAX_ROOTS =
+    parseInt(process.env.QUALITY_GATE_MAX_ROOTS ?? '8', 10);
+
+// ─── Product Verification ───────────────────────────────────────────────────
+
+/** Enable artifact / import-resolution / smoke verification of the generated product. */
+export const PRODUCT_VERIFY_ENABLED =
+    (process.env.PRODUCT_VERIFY_ENABLED ?? 'true') === 'true';
+
+/** Minimum total bytes a build must emit before it counts as a real build. */
+export const PRODUCT_MIN_ARTIFACT_BYTES =
+    parseInt(process.env.PRODUCT_MIN_ARTIFACT_BYTES ?? '2048', 10);
+
+/** Max source files scanned by the import-resolution check. */
+export const PRODUCT_RESOLVE_MAX_FILES =
+    parseInt(process.env.PRODUCT_RESOLVE_MAX_FILES ?? '2000', 10);
+
+/** First host port used by the smoke server (probes upward when busy). */
+export const PRODUCT_SMOKE_BASE_PORT =
+    parseInt(process.env.PRODUCT_SMOKE_BASE_PORT ?? '18190', 10);
+
+/** Timeout (ms) for the smoke server to become ready and answer. */
+export const PRODUCT_SMOKE_TIMEOUT_MS =
+    parseInt(process.env.PRODUCT_SMOKE_TIMEOUT_MS ?? '60000', 10);
+
+// ─── Gate Integrity ─────────────────────────────────────────────────────────
+
+/** Baseline-diff enforcement for gate tampering: 'off' | 'warn' | 'enforce'. */
+export const GATE_INTEGRITY_MODE =
+    (process.env.GATE_INTEGRITY_MODE ?? 'enforce') as 'off' | 'warn' | 'enforce';
+
+/** Protect configuration files from agent writes: 'off' | 'warn' | 'deny'. Per-agent overrides apply. */
+export const FS_CONFIG_PROTECTION =
+    (process.env.FS_CONFIG_PROTECTION ?? 'deny') as 'off' | 'warn' | 'deny';
+
+/** Reject test files whose subject is not reachable from an application entry point. */
+export const REJECT_TRIVIAL_TESTS =
+    (process.env.REJECT_TRIVIAL_TESTS ?? 'true') === 'true';
+
+// ─── Run Acceptance ─────────────────────────────────────────────────────────
+
+/**
+ * What happens when the product does not satisfy the acceptance gate.
+ *  'halt'     — stop the pipeline as soon as the outcome is unrecoverable; terminal status 'failed'.
+ *  'finalize' — always run to finalize, but the terminal status reflects the gate ('failed'|'partial'|'inconclusive').
+ *  'legacy'   — pre-Plan-19 behaviour: always 'completed'. For regression comparison only.
+ */
+export const RUN_FAIL_POLICY =
+    (process.env.RUN_FAIL_POLICY ?? 'halt') as 'halt' | 'finalize' | 'legacy';
+
+/** Minimum number of really-executed tests for the TESTS acceptance criterion. */
+export const ACCEPT_MIN_TESTS =
+    parseInt(process.env.ACCEPT_MIN_TESTS ?? '1', 10);
+
+/** Treat the SMOKE criterion as required for web products. */
+export const ACCEPT_REQUIRE_SMOKE =
+    (process.env.ACCEPT_REQUIRE_SMOKE ?? 'true') === 'true';
+
+/** Consecutive zero-output dispatch rounds that mark a run unrecoverable. */
+export const UNRECOVERABLE_ZERO_ROUNDS =
+    parseInt(process.env.UNRECOVERABLE_ZERO_ROUNDS ?? '2', 10);
 
 // ─── Security Gates ─────────────────────────────────────────────────────────
 
@@ -366,21 +529,44 @@ export const GITHUB_PROJECT_OWNER = process.env.GITHUB_PROJECT_OWNER ?? '';
 export const CHECKPOINT_PERSIST =
     (process.env.CHECKPOINT_PERSIST ?? 'false') === 'true';
 
-// ─── Observability ──────────────────────────────────────────────────────────
+// ─── Observability (Sub-Plan 12) ────────────────────────────────────────────
 
-/** Max events kept in the ring buffer for backfilling reconnecting dashboards. */
+/** Events kept in the ring buffer (was 500 — both post-mortem runs saturated it). */
 export const EVENT_BUFFER_SIZE =
-    parseInt(process.env.EVENT_BUFFER_SIZE ?? '500', 10);
+    parseInt(process.env.EVENT_BUFFER_SIZE ?? '5000', 10);
 
-// ─── Requirements Traceability ──────────────────────────────────────────────
+/** High-severity events retained regardless of ring eviction. */
+export const EVENT_PRIORITY_BUFFER_SIZE =
+    parseInt(process.env.EVENT_PRIORITY_BUFFER_SIZE ?? '500', 10);
 
-/** Minimum AC coverage percentage to pass the QA gate (0 = off). */
+/** Write outputs/<run>/ledger.jsonl and run-report.md. */
+export const RUN_LEDGER_ENABLED =
+    (process.env.RUN_LEDGER_ENABLED ?? 'true') === 'true';
+
+/** Run-invariant enforcement: 'off' | 'warn' | 'strict'. */
+export const RUN_INVARIANTS_MODE =
+    (process.env.RUN_INVARIANTS_MODE ?? 'warn') as 'off' | 'warn' | 'strict';
+
+// ─── Requirements Traceability (Sub-Plan 10) ────────────────────────────────
+
+/** Minimum verified AC coverage % for the AC_COVERAGE acceptance criterion.
+ *  Was 0 (off) — now 70.  The metric is meaningful after Sub-Plan 10:
+ *  only source:'executed' test reports count, claimed reports are excluded. */
 export const MIN_AC_COVERAGE_PCT =
-    parseInt(process.env.MIN_AC_COVERAGE_PCT ?? '0', 10);
+    parseInt(process.env.MIN_AC_COVERAGE_PCT ?? '70', 10);
 
-/** Max bugs synthesised when AC coverage is below the gate threshold. */
+/** Minimum implemented (merged code exists) AC % — a weaker but mandatory bar. 0 = off. */
+export const MIN_AC_IMPLEMENTED_PCT =
+    parseInt(process.env.MIN_AC_IMPLEMENTED_PCT ?? '90', 10);
+
+/** Max bugs synthesised for uncovered criteria.
+ *  Was 10 — raised to 25 so the bugfix loop gets enough specifics. */
 export const MIN_AC_COVERAGE_MAX_BUGS =
-    parseInt(process.env.MIN_AC_COVERAGE_MAX_BUGS ?? '10', 10);
+    parseInt(process.env.MIN_AC_COVERAGE_MAX_BUGS ?? '25', 10);
+
+/** Write outputs/<run>/traceability.json alongside the markdown. */
+export const TRACEABILITY_JSON =
+    (process.env.TRACEABILITY_JSON ?? 'true') === 'true';
 
 // ─── LLM Cassettes ──────────────────────────────────────────────────────────
 
@@ -409,3 +595,169 @@ export const GITHUB_MODE_CONFIG =
 /** Port for the Express + WebSocket server. */
 export const DASHBOARD_PORT =
     parseInt(process.env.DASHBOARD_PORT ?? '3000', 10);
+
+// ─── Plan Coverage (Sub-Plan 04) ────────────────────────────────────────────
+
+/** Plan coverage enforcement: 'off' | 'warn' | 'enforce'. */
+export const PLAN_COVERAGE_MODE =
+    (process.env.PLAN_COVERAGE_MODE ?? 'enforce') as 'off' | 'warn' | 'enforce';
+
+/** Gap-repair attempts when the plan does not cover every story/task. */
+export const PLAN_COVERAGE_REPAIR_ATTEMPTS =
+    parseInt(process.env.PLAN_COVERAGE_REPAIR_ATTEMPTS ?? '2', 10);
+
+/** Context char budget for the Team Leader (it now receives full acceptance criteria). */
+export const TEAM_LEADER_CONTEXT_MAX_CHARS =
+    parseInt(process.env.TEAM_LEADER_CONTEXT_MAX_CHARS ?? '48000', 10);
+
+// ─── Architecture Contract (Sub-Plan 05) ────────────────────────────────────
+
+/** Enforce the Architect's repo contract: 'off' | 'warn' | 'enforce'. */
+export const REPO_CONTRACT_MODE =
+    (process.env.REPO_CONTRACT_MODE ?? 'enforce') as 'off' | 'warn' | 'enforce';
+
+/** Cap on declared modules (keeps the contract proportional). */
+export const REPO_CONTRACT_MAX_MODULES =
+    parseInt(process.env.REPO_CONTRACT_MAX_MODULES ?? '60', 10);
+
+/** Create typed interface stubs for every declared module during scaffolding. */
+export const CONTRACT_STUB_SCAFFOLD =
+    (process.env.CONTRACT_STUB_SCAFFOLD ?? 'true') === 'true';
+
+/** Char budget for the contract section injected into agent prompts. */
+export const CONTRACT_PROMPT_MAX_CHARS =
+    parseInt(process.env.CONTRACT_PROMPT_MAX_CHARS ?? '6000', 10);
+
+// ─── PR Workflow / Work Preservation (Sub-Plan 06) ──────────────────────────
+
+/** Max failed worktrees retained under .worktrees-failed/ for salvage. */
+export const WORKTREE_SALVAGE_MAX =
+    parseInt(process.env.WORKTREE_SALVAGE_MAX ?? '10', 10);
+
+/** Export `git format-patch` bundles for every branch that fails to merge. */
+export const PR_SALVAGE_PATCHES =
+    (process.env.PR_SALVAGE_PATCHES ?? 'true') === 'true';
+
+/** Dev-agent attempts at resolving a merge conflict before the branch is reported blocked. */
+export const MERGE_CONFLICT_FIX_ATTEMPTS =
+    parseInt(process.env.MERGE_CONFLICT_FIX_ATTEMPTS ?? '1', 10);
+
+/** Max times a single assignment may be re-dispatched. */
+export const ASSIGNMENT_MAX_ATTEMPTS =
+    parseInt(process.env.ASSIGNMENT_MAX_ATTEMPTS ?? '3', 10);
+
+/** Only the scaffold branch may modify shared root config files. */
+export const CONFIG_OWNERSHIP_SCAFFOLD_ONLY =
+    (process.env.CONFIG_OWNERSHIP_SCAFFOLD_ONLY ?? 'true') === 'true';
+
+// ─── Review & Merge Policy (Sub-Plan 07) ────────────────────────────────────
+
+/** Merge policy: 'strict' (evidence required) | 'permissive' | 'legacy' (pre-Plan-19). */
+export const REVIEW_MERGE_POLICY =
+    (process.env.REVIEW_MERGE_POLICY ?? 'strict') as 'strict' | 'permissive' | 'legacy';
+
+/** Genuine approvals required to merge (abstentions do not count). */
+export const REVIEW_QUORUM =
+    parseInt(process.env.REVIEW_QUORUM ?? '1', 10);
+
+/** Retries when every reviewer abstained (schema error / recursion limit / empty output). */
+export const REVIEW_ABSTAIN_RETRIES =
+    parseInt(process.env.REVIEW_ABSTAIN_RETRIES ?? '1', 10);
+
+/** Extra tool calls granted to an escalated developer. */
+export const ESCALATION_TOOL_CALL_BONUS =
+    parseInt(process.env.ESCALATION_TOOL_CALL_BONUS ?? '10', 10);
+
+/** Convert unresolved major review comments into Bugs for the bugfix loop. */
+export const REVIEW_MAJORS_TO_BUGS =
+    (process.env.REVIEW_MAJORS_TO_BUGS ?? 'true') === 'true';
+
+// ─── Agent Budgets & Context (Sub-Plan 08) ──────────────────────────────────
+
+/** Max files listed in the injected workspace snapshot. */
+export const SNAPSHOT_MAX_FILES =
+    parseInt(process.env.SNAPSHOT_MAX_FILES ?? '400', 10);
+
+/** Char budget for the injected workspace snapshot. */
+export const SNAPSHOT_MAX_CHARS =
+    parseInt(process.env.SNAPSHOT_MAX_CHARS ?? '8000', 10);
+
+/** Extra tool calls granted when an agent is making verified progress (writes). */
+export const LOOP_GUARD_PROGRESS_BONUS =
+    parseInt(process.env.LOOP_GUARD_PROGRESS_BONUS ?? '10', 10);
+
+/** Absolute per-invocation tool-call ceiling. */
+export const LOOP_GUARD_HARD_CEILING =
+    parseInt(process.env.LOOP_GUARD_HARD_CEILING ?? '80', 10);
+
+/**
+ * Per-rank read/write/shell tool-call budgets (JSON override).
+ * Format: `{"principal":{"reads":30,"writes":25,"shell":10},...}`
+ * Empty string (default) uses built-in defaults.
+ */
+export const TOOL_BUDGETS_JSON =
+    process.env.TOOL_BUDGETS_JSON ?? '';
+
+/** Invocation-level retries for transient LLM/network failures. */
+export const AGENT_INVOKE_RETRIES =
+    parseInt(process.env.AGENT_INVOKE_RETRIES ?? '1', 10);
+
+/** Reconcile agent-claimed fileChanges against the worktree and drop phantoms. */
+export const RECONCILE_FILE_CHANGES =
+    (process.env.RECONCILE_FILE_CHANGES ?? 'true') === 'true';
+
+// ─── QA Real Execution (Sub-Plan 09) ────────────────────────────────────────
+
+/** Enforce test-sufficiency rules (min counts, coverage floor, per-story coverage). */
+export const QA_ENFORCE_SUFFICIENCY =
+    (process.env.QA_ENFORCE_SUFFICIENCY ?? 'true') === 'true';
+
+/** Minimum total non-trivial executed tests. 0 = derive as max(5, storyCount). */
+export const QA_MIN_TOTAL_TESTS =
+    parseInt(process.env.QA_MIN_TOTAL_TESTS ?? '0', 10);
+
+/** Minimum tagged passing tests per user story. */
+export const QA_MIN_TESTS_PER_STORY =
+    parseInt(process.env.QA_MIN_TESTS_PER_STORY ?? '1', 10);
+
+/** Minimum line-coverage percentage. 0 = off. */
+export const QA_MIN_COVERAGE_PCT =
+    parseInt(process.env.QA_MIN_COVERAGE_PCT ?? '40', 10);
+
+/** Timeout (ms) for a single test-runner invocation. */
+export const QA_TEST_TIMEOUT_MS =
+    parseInt(process.env.QA_TEST_TIMEOUT_MS ?? '600000', 10);
+
+/** Max qa-unit invocations per QA phase (one per story/module). */
+export const QA_MAX_INVOCATIONS =
+    parseInt(process.env.QA_MAX_INVOCATIONS ?? '12', 10);
+
+/** Route QA-authored tests through the PR workflow on a dedicated test branch. */
+export const QA_TESTS_VIA_PR =
+    (process.env.QA_TESTS_VIA_PR ?? 'true') === 'true';
+
+// ─── DevOps & E2E Hardening (Sub-Plan 11) ───────────────────────────────────
+
+/** Serve the built product locally for E2E when no Docker services are available. */
+export const E2E_ALLOW_LOCAL_SERVER =
+    (process.env.E2E_ALLOW_LOCAL_SERVER ?? 'true') === 'true';
+
+/** Make the E2E acceptance criterion required. */
+export const ACCEPT_REQUIRE_E2E =
+    (process.env.ACCEPT_REQUIRE_E2E ?? 'false') === 'true';
+
+/** Playwright MCP startup budget (ms). */
+export const PLAYWRIGHT_MCP_STARTUP_TIMEOUT_MS =
+    parseInt(process.env.PLAYWRIGHT_MCP_STARTUP_TIMEOUT_MS ?? '60000', 10);
+
+/** Connection retries for the Playwright MCP server. */
+export const PLAYWRIGHT_MCP_CONNECT_RETRIES =
+    parseInt(process.env.PLAYWRIGHT_MCP_CONNECT_RETRIES ?? '2', 10);
+
+/** Run `npx playwright install chromium --with-deps` when browsers are missing. */
+export const PLAYWRIGHT_AUTO_INSTALL =
+    (process.env.PLAYWRIGHT_AUTO_INSTALL ?? 'true') === 'true';
+
+/** Generate a deterministic Dockerfile/compose when the DevOps agent fails or produces none. */
+export const DEVOPS_FALLBACK_ENABLED =
+    (process.env.DEVOPS_FALLBACK_ENABLED ?? 'true') === 'true';

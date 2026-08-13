@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<testsuites>
+  <testsuite name="tests" errors="0" failures="1" skipped="1" tests="5" time="2.345">
+    <testcase classname="tests.test_api" name="[US-010#0] test_create_user" time="0.123" />
+    <testcase classname="tests.test_api" name="[US-010#1] test_get_user_by_id" time="0.045" />
+    <testcase classname="tests.test_api" name="[US-011#0] test_delete_user" time="0.089">
+      <failure message="AssertionError: 404 != 200">Expected 200 but got 404</failure>
+    </testcase>
+    <testcase classname="tests.test_auth" name="[US-012#0] test_login_with_valid_credentials" time="0.210" />
+    <testcase classname="tests.test_auth" name="test_refresh_token" time="0.0">
+      <skipped message="Not implemented yet" />
+    </testcase>
+  </testsuite>
+</testsuites>

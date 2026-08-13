@@ -13,8 +13,8 @@ export const DevOpsPlanSchema = z.object({
         filename: z.string().describe('K8s manifest filename'),
         content: z.string().describe('YAML content'),
     })).describe('Kubernetes manifests'),
-    buildStatus: z.enum(['pending', 'building', 'success', 'failed']).describe('Docker build status'),
-    runStatus: z.enum(['pending', 'starting', 'running', 'healthy', 'unhealthy', 'stopped', 'failed']).describe('Run status'),
+    buildStatus: z.enum(['pending', 'building', 'success', 'failed', 'skipped', 'unverified']).describe('Docker build status'),
+    runStatus: z.enum(['pending', 'starting', 'running', 'healthy', 'unhealthy', 'stopped', 'failed', 'skipped']).describe('Run status'),
     healthChecks: z.array(z.object({
         service: z.string().describe('Service name'),
         url: z.string().describe('Health check URL'),
@@ -24,5 +24,7 @@ export const DevOpsPlanSchema = z.object({
         service: z.string().describe('Service name'),
         url: z.string().describe('Accessible URL'),
     })).describe('Running service URLs'),
+    /** How the deployment was verified: compose, dockerfile, none (no Docker artifacts), or docker-unavailable. */
+    verificationMode: z.enum(['compose', 'dockerfile', 'none', 'docker-unavailable']).optional().describe('How the deployment was verified'),
 });
 export type DevOpsPlan = z.infer<typeof DevOpsPlanSchema>;

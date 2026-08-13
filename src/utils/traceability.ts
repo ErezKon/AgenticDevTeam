@@ -3,12 +3,47 @@
  *
  * Chains epics -> stories -> acceptance criteria -> tasks -> assignments ->
  * PRs -> tests into one matrix so "did we build and verify what was asked?"
- * is answerable.  Previously (PART A10) test plan items carried no story or
- * criterion reference, so a story dropped by the Team Leader was undetectable.
+ * is answerable.
+ *
+ * Sub-Plan 10 rewrite:
+ *  - Graded AcStatus (6 states) replaces the old 4-state enum
+ *  - CoverageTotals carries verifiedPct, implementedPct, deliveryScore
+ *  - Coverage derived from executed tests only (source === 'executed')
+ *  - hasMerged requires status === 'merged' (not 'approved')
+ *  - No in-place mutation of story.acceptanceCriteria
+ *  - TraceRow.taskIds from assignment.taskIds
+ *  - orphanedTasks, unassignedTasks, blockedDeliveries
+ *  - Bugfix sentinel (US-BUGFIX) excluded from orphan detection
+ *  - acIndexes from assignments used for per-AC coverage
+ *  - Gap-first ordering, Top Gaps, Claimed vs Executed sections
  */
 import type { ProjectStateType } from '../conductor/state';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
+
+export type AcStatus =
+    | 'verified'              // merged + a passing tagged test (source: 'executed')
+    | 'tested-failing'        // merged + a tagged test that FAILS
+    | 'implemented-untested'  // merged, no tagged test
+    | 'planned-only'          // assigned, PR not merged
+    | 'blocked'               // assigned, PR blocked/conflicted/open after run
+    | 'missing';              // no assignment at all
+
+export interface CoverageTotals {
+    criteria: number;
+    verified: number;
+    testedFailing: number;
+    implemented: number;
+    plannedOnly: number;
+    blocked: number;
+    missing: number;
+    /** verified / criteria — the strict bar. */
+    verifiedPct: number;
+    /** (verified + implemented) / criteria — "the code exists". */
+    implementedPct: number;
+    /** Weighted delivery score: verified 1.0, implemented 0.5, testedFailing 0.25, others 0. */
+    deliveryScore: number;
+}
 
 export interface TraceRow {
     epicId: string;
@@ -21,24 +56,43 @@ export interface TraceRow {
     prNumbers: number[];
     prStatuses: string[];
     testNames: string[];
+    /** Test source breakdown for the Claimed vs Executed column. */
+    executedTests: { name: string; status: 'pass' | 'fail' | 'skip' }[];
+    claimedTests: { name: string; status: 'pass' | 'fail' | 'skip' }[];
+    plannedTests: string[];
     testStatus: 'pass' | 'fail' | 'none';
-    status: 'verified' | 'implemented-untested' | 'planned-only' | 'missing';
+    status: AcStatus;
+}
+
+export interface ClaimedVsExecuted {
+    agentId: string;
+    claimedTotal: number;
+    claimedPassed: number;
+    claimedFailed: number;
+    executedTotal: number;
+    executedPassed: number;
+    executedFailed: number;
 }
 
 export interface TraceabilityReport {
     rows: TraceRow[];
-    totals: {
-        criteria: number;
-        verified: number;
-        implemented: number;
-        missing: number;
-        coveragePct: number;
-    };
-    /** Stories the Team Leader never assigned -- silent scope loss. */
+    totals: CoverageTotals;
+    /** Stories the Team Leader never assigned — silent scope loss. */
     orphanedStories: string[];
-    /** Assignments whose storyId matches no user story -- invented work. */
+    /** Assignments whose storyId matches no user story — invented work. */
     orphanedAssignments: string[];
+    /** Tasks whose storyId matches no user story — vanished silently. */
+    orphanedTasks: string[];
+    /** Tasks not referenced in any assignment's taskIds. */
+    unassignedTasks: string[];
+    /** Branches that are blocked/conflicted, with PR info. */
+    blockedDeliveries: { branchName: string; prNumber: number; status: string; reason: string }[];
+    /** Discrepancies between agent-claimed and runner-executed results. */
+    claimedVsExecuted: ClaimedVsExecuted[];
 }
+
+// ─── Bugfix sentinel ────────────────────────────────────────────────────────
+const BUGFIX_STORY_ID = 'US-BUGFIX';
 
 // ─── Report Builder ─────────────────────────────────────────────────────────
 
@@ -61,13 +115,28 @@ export function buildTraceabilityReport(state: ProjectStateType): TraceabilityRe
         }
     }
 
-    // Index assignments by storyId
+    // All task IDs in the system (for unassignedTasks detection)
+    const allTaskIds = new Set((state.tasks ?? []).map(t => t.id));
+    const taskIdsInAssignments = new Set<string>();
+
+    // Index assignments by storyId AND additionalStoryIds
     const assignmentsByStory = new Map<string, typeof state.assignments>();
     for (const a of state.assignments ?? []) {
         assignedStoryIds.add(a.storyId);
         const list = assignmentsByStory.get(a.storyId) ?? [];
         list.push(a);
         assignmentsByStory.set(a.storyId, list);
+        // Also index by additionalStoryIds (Sub-Plan 04)
+        for (const sid of a.additionalStoryIds ?? []) {
+            assignedStoryIds.add(sid);
+            const addList = assignmentsByStory.get(sid) ?? [];
+            addList.push(a);
+            assignmentsByStory.set(sid, addList);
+        }
+        // Track taskIds referenced in assignments
+        for (const tid of a.taskIds ?? []) {
+            taskIdsInAssignments.add(tid);
+        }
     }
 
     // Index PRs by assignmentId
@@ -83,11 +152,23 @@ export function buildTraceabilityReport(state: ProjectStateType): TraceabilityRe
     // Collect test references from test plan items and test report cases.
     // A test "covers" (storyId, acIndex) if it carries those fields.
     // acIndex === -1 means whole-story coverage (every AC of that story).
-    interface TestRef { testName: string; storyId: string; acIndex: number; status: 'pass' | 'fail' | 'skip' | 'planned' }
+    interface TestRef {
+        testName: string;
+        storyId: string;
+        acIndex: number;
+        status: 'pass' | 'fail' | 'skip' | 'planned';
+        source: 'executed' | 'claimed' | 'quality-gates' | 'planned';
+    }
 
     const testRefs: TestRef[] = [];
 
-    // From test plan items (planned)
+    // Determine latest iteration index for filtering
+    const allReports = state.testReports ?? [];
+    const maxIteration = allReports.length > 0
+        ? Math.max(...allReports.map(r => (r as any).iterationIndex ?? 0))
+        : 0;
+
+    // From test plan items (planned — informational only, never produces 'verified')
     const plan = state.testPlan;
     if (plan) {
         for (const item of [...(plan.unit ?? []), ...(plan.integration ?? [])]) {
@@ -97,6 +178,7 @@ export function buildTraceabilityReport(state: ProjectStateType): TraceabilityRe
                     storyId: item.storyId,
                     acIndex: item.acIndex ?? -1,
                     status: 'planned',
+                    source: 'planned',
                 });
             }
         }
@@ -107,13 +189,18 @@ export function buildTraceabilityReport(state: ProjectStateType): TraceabilityRe
                     storyId: item.storyId,
                     acIndex: item.acIndex ?? -1,
                     status: 'planned',
+                    source: 'planned',
                 });
             }
         }
     }
 
-    // From test report cases (executed)
-    for (const report of state.testReports ?? []) {
+    // From test report cases — only latest iteration
+    for (const report of allReports) {
+        const iterIdx = (report as any).iterationIndex ?? 0;
+        if (iterIdx < maxIteration) continue; // skip stale iterations
+        const reportSource: 'executed' | 'claimed' | 'quality-gates' =
+            (report as any).source ?? 'claimed';
         for (const c of report.cases ?? []) {
             if (c.storyId) {
                 testRefs.push({
@@ -121,6 +208,7 @@ export function buildTraceabilityReport(state: ProjectStateType): TraceabilityRe
                     storyId: c.storyId,
                     acIndex: c.acIndex ?? -1,
                     status: c.status,
+                    source: reportSource,
                 });
             }
         }
@@ -139,26 +227,41 @@ export function buildTraceabilityReport(state: ProjectStateType): TraceabilityRe
     for (const story of state.userStories ?? []) {
         storyIds.add(story.id);
 
-        const criteria = story.acceptanceCriteria ?? [];
-        if (criteria.length === 0) {
-            // Story with no AC gets one synthetic row
-            criteria.push('(no acceptance criteria defined)');
-        }
+        // T6 fix: do NOT mutate story.acceptanceCriteria — use a local copy
+        const criteria = (story.acceptanceCriteria?.length ?? 0) > 0
+            ? story.acceptanceCriteria!
+            : ['(no acceptance criteria defined)'];
 
         for (let acIdx = 0; acIdx < criteria.length; acIdx++) {
             const acText = criteria[acIdx];
 
-            // Tasks for this story
-            const taskIds = tasksByStory.get(story.id) ?? [];
+            // Tasks for this story (from task.storyId)
+            const storyTaskIds = tasksByStory.get(story.id) ?? [];
+            // Also include taskIds from assignments (Sub-Plan 04) — T7 fix
+            const assignmentTaskIds = (assignmentsByStory.get(story.id) ?? []).flatMap(a => a.taskIds ?? []);
+            const allRowTaskIds = [...new Set([...storyTaskIds, ...assignmentTaskIds])];
 
             // Assignments for this story
             const storyAssignments = assignmentsByStory.get(story.id) ?? [];
-            const assignmentIds = storyAssignments.map(a => a.id);
+
+            // Check if this specific AC is covered by any assignment's acIndexes
+            // An assignment with acIndexes: [0] on a 3-criteria story means only AC#0 is covered
+            let acAssignments = storyAssignments;
+            const hasAnyAcIndexes = storyAssignments.some(a => (a.acIndexes ?? []).length > 0);
+            if (hasAnyAcIndexes) {
+                acAssignments = storyAssignments.filter(a => {
+                    const acIdxs = a.acIndexes ?? [];
+                    // No acIndexes means "all criteria" (backward compat)
+                    return acIdxs.length === 0 || acIdxs.includes(acIdx);
+                });
+            }
+
+            const assignmentIds = acAssignments.map(a => a.id);
 
             // PRs for these assignments
             const prSet = new Map<number, typeof state.pullRequests[number]>();
             const branchSet = new Set<string>();
-            for (const a of storyAssignments) {
+            for (const a of acAssignments) {
                 for (const pr of prsByAssignment.get(a.id) ?? []) {
                     prSet.set(pr.prNumber, pr);
                     branchSet.add(pr.branchName);
@@ -169,8 +272,9 @@ export function buildTraceabilityReport(state: ProjectStateType): TraceabilityRe
             const prStatuses = [...prSet.values()].map(pr => pr.status);
             const branchNames = [...branchSet];
 
-            // Has any PR been merged/approved?
-            const hasMerged = prStatuses.some(s => s === 'merged' || s === 'approved');
+            // T3 fix: hasMerged requires status === 'merged' only (not 'approved')
+            const hasMerged = prStatuses.some(s => s === 'merged');
+            const isBlocked = prStatuses.some(s => s === 'blocked' || s === 'open');
 
             // Tests covering this specific criterion or the whole story (-1)
             const specificTests = testsByStoryAc.get(`${story.id}:${acIdx}`) ?? [];
@@ -179,28 +283,39 @@ export function buildTraceabilityReport(state: ProjectStateType): TraceabilityRe
 
             const testNames = allTests.map(t => t.testName);
 
-            // Determine test status: pass if any executed test passed,
-            // fail if any executed test failed, none otherwise
-            const executedTests = allTests.filter(t => t.status !== 'planned');
+            // Separate by source for reporting
+            const executedTests = allTests
+                .filter(t => t.source === 'executed')
+                .map(t => ({ name: t.testName, status: t.status as 'pass' | 'fail' | 'skip' }));
+            const claimedTests = allTests
+                .filter(t => t.source === 'claimed')
+                .map(t => ({ name: t.testName, status: t.status as 'pass' | 'fail' | 'skip' }));
+            const plannedTests = allTests
+                .filter(t => t.source === 'planned')
+                .map(t => t.testName);
+
+            // T2 fix: determine test status from EXECUTED reports only
+            const execNonPlanned = allTests.filter(t => t.source === 'executed');
             let testStatus: 'pass' | 'fail' | 'none' = 'none';
-            if (executedTests.some(t => t.status === 'pass')) {
+            if (execNonPlanned.some(t => t.status === 'pass')) {
                 testStatus = 'pass';
-            } else if (executedTests.some(t => t.status === 'fail')) {
+            } else if (execNonPlanned.some(t => t.status === 'fail')) {
                 testStatus = 'fail';
             }
 
-            // Derive status
-            let status: TraceRow['status'];
+            // Derive status — 6-state model
+            let status: AcStatus;
             if (assignmentIds.length === 0) {
                 status = 'missing';
+            } else if (isBlocked && !hasMerged) {
+                status = 'blocked';
             } else if (!hasMerged) {
                 status = 'planned-only';
-            } else if (testStatus === 'none') {
-                status = 'implemented-untested';
             } else if (testStatus === 'pass') {
                 status = 'verified';
+            } else if (testStatus === 'fail') {
+                status = 'tested-failing';
             } else {
-                // tests exist but none passed (all fail/skip)
                 status = 'implemented-untested';
             }
 
@@ -209,41 +324,122 @@ export function buildTraceabilityReport(state: ProjectStateType): TraceabilityRe
                 storyId: story.id,
                 acIndex: acIdx,
                 acText,
-                taskIds,
+                taskIds: allRowTaskIds,
                 assignmentIds,
                 branchNames,
                 prNumbers,
                 prStatuses,
                 testNames,
+                executedTests,
+                claimedTests,
+                plannedTests,
                 testStatus,
                 status,
             });
         }
     }
 
-    // Orphaned stories: stories with no assignments
-    const orphanedStories = [...storyIds].filter(id => !assignedStoryIds.has(id));
+    // Orphaned stories: stories with no assignments (exclude bugfix sentinel)
+    const orphanedStories = [...storyIds].filter(id =>
+        !assignedStoryIds.has(id) && id !== BUGFIX_STORY_ID,
+    );
 
     // Orphaned assignments: assignments whose storyId matches no user story
+    // Exclude bugfix sentinel assignments
     const orphanedAssignments: string[] = [];
     for (const a of state.assignments ?? []) {
-        if (!storyIds.has(a.storyId)) {
+        if (!storyIds.has(a.storyId) && a.storyId !== BUGFIX_STORY_ID) {
             orphanedAssignments.push(a.id);
         }
     }
 
-    // Compute totals
+    // Orphaned tasks: tasks whose storyId matches no user story (P14)
+    const orphanedTasks: string[] = [];
+    for (const t of state.tasks ?? []) {
+        if (t.storyId && !storyIds.has(t.storyId)) {
+            orphanedTasks.push(t.id);
+        }
+    }
+
+    // Unassigned tasks: tasks not referenced in any assignment's taskIds
+    const unassignedTasks: string[] = [];
+    for (const tid of allTaskIds) {
+        if (!taskIdsInAssignments.has(tid)) {
+            unassignedTasks.push(tid);
+        }
+    }
+
+    // Blocked deliveries: PRs that are blocked/open with details
+    const blockedDeliveries: TraceabilityReport['blockedDeliveries'] = [];
+    for (const pr of state.pullRequests ?? []) {
+        if (pr.status === 'blocked' || pr.status === 'open') {
+            blockedDeliveries.push({
+                branchName: pr.branchName,
+                prNumber: pr.prNumber,
+                status: pr.status,
+                reason: pr.status === 'blocked' ? 'Merge conflicts or review blocked'
+                    : 'PR still open at end of run',
+            });
+        }
+    }
+
+    // Claimed vs executed: compare agent self-reports against runner data
+    const claimedVsExecuted: ClaimedVsExecuted[] = [];
+    const claimedReports = allReports.filter(r => (r as any).source === 'claimed');
+    const executedReports = allReports.filter(r => (r as any).source === 'executed');
+    if (claimedReports.length > 0 || executedReports.length > 0) {
+        const execTotals = executedReports.reduce((acc, r) => ({
+            total: acc.total + r.total,
+            passed: acc.passed + r.passed,
+            failed: acc.failed + r.failed,
+        }), { total: 0, passed: 0, failed: 0 });
+        const claimedTotals = claimedReports.reduce((acc, r) => ({
+            total: acc.total + r.total,
+            passed: acc.passed + r.passed,
+            failed: acc.failed + r.failed,
+        }), { total: 0, passed: 0, failed: 0 });
+
+        if (claimedTotals.total > 0 || execTotals.total > 0) {
+            claimedVsExecuted.push({
+                agentId: claimedReports[0]?.agentId ?? executedReports[0]?.agentId ?? 'unknown',
+                claimedTotal: claimedTotals.total,
+                claimedPassed: claimedTotals.passed,
+                claimedFailed: claimedTotals.failed,
+                executedTotal: execTotals.total,
+                executedPassed: execTotals.passed,
+                executedFailed: execTotals.failed,
+            });
+        }
+    }
+
+    // Compute totals — graded model
     const criteria = rows.length;
     const verified = rows.filter(r => r.status === 'verified').length;
+    const testedFailing = rows.filter(r => r.status === 'tested-failing').length;
     const implemented = rows.filter(r => r.status === 'implemented-untested').length;
+    const plannedOnly = rows.filter(r => r.status === 'planned-only').length;
+    const blocked = rows.filter(r => r.status === 'blocked').length;
     const missing = rows.filter(r => r.status === 'missing').length;
-    const coveragePct = criteria > 0 ? verified / criteria : 0;
+
+    const verifiedPct = criteria > 0 ? verified / criteria : 0;
+    const implementedPct = criteria > 0 ? (verified + implemented) / criteria : 0;
+    const deliveryScore = criteria > 0
+        ? (verified * 1.0 + implemented * 0.5 + testedFailing * 0.25) / criteria
+        : 0;
 
     return {
         rows,
-        totals: { criteria, verified, implemented, missing, coveragePct },
+        totals: {
+            criteria, verified, testedFailing, implemented,
+            plannedOnly, blocked, missing,
+            verifiedPct, implementedPct, deliveryScore,
+        },
         orphanedStories,
         orphanedAssignments,
+        orphanedTasks,
+        unassignedTasks,
+        blockedDeliveries,
+        claimedVsExecuted,
     };
 }
 
@@ -254,9 +450,22 @@ function escPipe(text: string): string {
     return text.replace(/\|/g, '\\|');
 }
 
-/** Markdown rendering: summary, coverage table, orphan sections. */
+/** Status icon for display. */
+function statusIcon(status: AcStatus): string {
+    switch (status) {
+        case 'verified': return 'verified';
+        case 'tested-failing': return 'FAILING';
+        case 'implemented-untested': return 'implemented-untested';
+        case 'planned-only': return 'planned-only';
+        case 'blocked': return 'BLOCKED';
+        case 'missing': return 'MISSING';
+    }
+}
+
+/** Markdown rendering: summary, coverage table, gap sections, orphan sections. */
 export function renderTraceabilityMarkdown(report: TraceabilityReport): string {
-    const { totals, rows, orphanedStories, orphanedAssignments } = report;
+    const { totals, rows, orphanedStories, orphanedAssignments, orphanedTasks,
+        unassignedTasks, blockedDeliveries, claimedVsExecuted } = report;
     const lines: string[] = [];
 
     // Summary
@@ -265,28 +474,94 @@ export function renderTraceabilityMarkdown(report: TraceabilityReport): string {
     lines.push(`| Metric | Value |`);
     lines.push(`|--------|-------|`);
     lines.push(`| Total acceptance criteria | ${totals.criteria} |`);
-    lines.push(`| Verified (merged + test passed) | ${totals.verified} |`);
+    lines.push(`| Verified (merged + executed test passed) | ${totals.verified} |`);
+    lines.push(`| Tested but failing | ${totals.testedFailing} |`);
     lines.push(`| Implemented but untested | ${totals.implemented} |`);
-    lines.push(`| Planned only (no merged PR) | ${rows.filter(r => r.status === 'planned-only').length} |`);
+    lines.push(`| Planned only (no merged PR) | ${totals.plannedOnly} |`);
+    lines.push(`| Blocked | ${totals.blocked} |`);
     lines.push(`| Missing (no assignment) | ${totals.missing} |`);
-    lines.push(`| Coverage | ${(totals.coveragePct * 100).toFixed(1)}% |`);
+    lines.push(`| Verified % | ${(totals.verifiedPct * 100).toFixed(1)}% |`);
+    lines.push(`| Implemented % | ${(totals.implementedPct * 100).toFixed(1)}% |`);
+    lines.push(`| Delivery score | ${totals.deliveryScore.toFixed(2)} |`);
     lines.push('');
 
-    // Coverage table
+    // Top Gaps (gap-first ordering: missing, tested-failing, blocked, implemented-untested)
+    const gaps = rows.filter(r =>
+        r.status === 'missing' || r.status === 'tested-failing'
+        || r.status === 'blocked' || r.status === 'implemented-untested',
+    );
+    // Sort: missing first, then tested-failing, then blocked, then implemented-untested
+    const gapOrder: Record<AcStatus, number> = {
+        'missing': 0, 'tested-failing': 1, 'blocked': 2,
+        'implemented-untested': 3, 'planned-only': 4, 'verified': 5,
+    };
+    gaps.sort((a, b) => gapOrder[a.status] - gapOrder[b.status]);
+
+    if (gaps.length > 0) {
+        lines.push('## Top Gaps');
+        lines.push('');
+        const topGaps = gaps.slice(0, 15);
+        lines.push('| Story | AC# | Criterion | Status | Assignment/Module |');
+        lines.push('|-------|-----|-----------|--------|-------------------|');
+        for (const row of topGaps) {
+            const assignCol = row.assignmentIds.length > 0
+                ? row.assignmentIds[0]
+                : `Story ${row.storyId}`;
+            lines.push(`| ${escPipe(row.storyId)} | ${row.acIndex} | ${escPipe(row.acText.slice(0, 80))} | ${statusIcon(row.status)} | ${escPipe(assignCol)} |`);
+        }
+        if (gaps.length > 15) {
+            lines.push(`| ... | ... | (${gaps.length - 15} more gaps) | ... | ... |`);
+        }
+        lines.push('');
+    }
+
+    // Coverage table — gap-first ordering
+    const sortedRows = [...rows].sort((a, b) => gapOrder[a.status] - gapOrder[b.status]);
+
     lines.push('## Traceability Matrix');
     lines.push('');
     lines.push('| Epic | Story | AC# | Acceptance Criterion | Status | PRs | Tests |');
     lines.push('|------|-------|-----|----------------------|--------|-----|-------|');
-    for (const row of rows) {
+    for (const row of sortedRows) {
         const prCol = row.prNumbers.length > 0
             ? row.prNumbers.map((n, i) => `#${n} (${row.prStatuses[i]})`).join(', ')
             : '--';
-        const testCol = row.testNames.length > 0
-            ? `${row.testNames.length} [${row.testStatus}]`
-            : '--';
-        lines.push(`| ${escPipe(row.epicId)} | ${escPipe(row.storyId)} | ${row.acIndex} | ${escPipe(row.acText)} | ${row.status} | ${escPipe(prCol)} | ${escPipe(testCol)} |`);
+        // Distinguish executed vs planned in test column
+        const execCount = row.executedTests.length;
+        const plannedCount = row.plannedTests.length;
+        const claimedCount = row.claimedTests.length;
+        const testParts: string[] = [];
+        if (execCount > 0) testParts.push(`${execCount} exec [${row.testStatus}]`);
+        if (claimedCount > 0) testParts.push(`${claimedCount} claimed`);
+        if (plannedCount > 0) testParts.push(`${plannedCount} planned`);
+        const testCol = testParts.length > 0 ? testParts.join(', ') : '--';
+        lines.push(`| ${escPipe(row.epicId)} | ${escPipe(row.storyId)} | ${row.acIndex} | ${escPipe(row.acText)} | ${statusIcon(row.status)} | ${escPipe(prCol)} | ${escPipe(testCol)} |`);
     }
     lines.push('');
+
+    // Blocked deliveries
+    if (blockedDeliveries.length > 0) {
+        lines.push('## Blocked Deliveries');
+        lines.push('');
+        lines.push('| Branch | PR | Status | Reason |');
+        lines.push('|--------|-----|--------|--------|');
+        for (const bd of blockedDeliveries) {
+            lines.push(`| ${escPipe(bd.branchName)} | #${bd.prNumber} | ${bd.status} | ${escPipe(bd.reason)} |`);
+        }
+        lines.push('');
+    }
+
+    // Claimed vs Executed
+    if (claimedVsExecuted.length > 0) {
+        lines.push('## Claimed vs Executed');
+        lines.push('');
+        lines.push('| Agent | Claimed Total | Claimed Passed | Claimed Failed | Executed Total | Executed Passed | Executed Failed |');
+        lines.push('|-------|---------------|----------------|----------------|----------------|-----------------|-----------------|');
+        for (const cve of claimedVsExecuted) {
+            lines.push(`| ${escPipe(cve.agentId)} | ${cve.claimedTotal} | ${cve.claimedPassed} | ${cve.claimedFailed} | ${cve.executedTotal} | ${cve.executedPassed} | ${cve.executedFailed} |`);
+        }
+        lines.push('');
+    }
 
     // Orphaned stories
     if (orphanedStories.length > 0) {
@@ -303,6 +578,26 @@ export function renderTraceabilityMarkdown(report: TraceabilityReport): string {
         lines.push('## Orphaned Assignments (storyId matches no user story -- invented work)');
         lines.push('');
         for (const id of orphanedAssignments) {
+            lines.push(`- ${id}`);
+        }
+        lines.push('');
+    }
+
+    // Orphaned tasks
+    if (orphanedTasks.length > 0) {
+        lines.push('## Orphaned Tasks (storyId matches no user story -- vanished silently)');
+        lines.push('');
+        for (const id of orphanedTasks) {
+            lines.push(`- ${id}`);
+        }
+        lines.push('');
+    }
+
+    // Unassigned tasks
+    if (unassignedTasks.length > 0) {
+        lines.push('## Unassigned Tasks (not referenced in any assignment)');
+        lines.push('');
+        for (const id of unassignedTasks) {
             lines.push(`- ${id}`);
         }
         lines.push('');

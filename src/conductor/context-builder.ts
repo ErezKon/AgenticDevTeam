@@ -9,11 +9,17 @@
  *
  * All functions are pure (no I/O) and fully unit-testable.
  */
-import { CONTEXT_MAX_DESC_CHARS } from '../config';
+import { CONTEXT_MAX_DESC_CHARS, CONTRACT_PROMPT_MAX_CHARS } from '../config';
+import { getLogger } from '../utils/logger';
 import type {
     ArchitectureDoc, TechDecision, DbDesign, UserStory, Task,
     FileChange, CodebaseAnalysis,
 } from '../agents/_shared/base-schemas';
+import type { Epic } from '../agents/_shared/schemas/epic.schema';
+import type { RepoContract } from '../agents/_shared/schemas/repo-contract.schema';
+import { renderContractForPrompt } from '../utils/repo-contract-writer';
+
+const log = getLogger('[context-builder]', 183);
 
 // ─── Context Stats (module-level singleton, same pattern as llm-throttle) ───
 
@@ -61,6 +67,17 @@ export function summariseArchitecture(arch: ArchitectureDoc | null, maxDescChars
         lines.push(`NFRs: ${arch.nonFunctional.join(', ')}`);
     }
     return lines.join('\n');
+}
+
+/**
+ * `- EPIC-001: title — one-sentence description` lines.
+ */
+export function summariseEpics(epics: Epic[]): string {
+    if (!epics?.length) return '(no epics)';
+    return epics.map(e => {
+        const desc = firstSentence(e.description ?? '');
+        return `- ${e.id}: ${e.title}${desc ? ` — ${desc}` : ''}`;
+    }).join('\n');
 }
 
 /**
@@ -132,15 +149,48 @@ export function summariseStories(stories: UserStory[]): string {
 
 /**
  * Only the stories referenced by these ids, WITH their acceptance criteria.
+ *
+ * Returns `{ text, missing }` — `missing` lists ids that matched no story
+ * (P12: callers must log error for dangling storyId references).
  */
-export function storiesForIds(stories: UserStory[], ids: string[]): string {
-    if (!stories?.length || !ids?.length) return '(no stories)';
+export function storiesForIds(stories: UserStory[], ids: string[]): { text: string; missing: string[] } {
+    if (!stories?.length || !ids?.length) return { text: '(no stories)', missing: [...(ids ?? [])] };
     const idSet = new Set(ids);
     const matched = stories.filter(s => idSet.has(s.id));
-    if (matched.length === 0) return '(no matching stories)';
-    return matched.map(s => {
+    const matchedIds = new Set(matched.map(s => s.id));
+    const missing = ids.filter(id => !matchedIds.has(id));
+    if (matched.length === 0) return { text: '(no matching stories)', missing };
+    const text = matched.map(s => {
         const acLines = (s.acceptanceCriteria ?? []).map(ac => `    - ${ac}`).join('\n');
         return `- ${s.id}: As a ${s.asA}, I want ${s.iWant}\n  So that: ${s.soThat}\n  Acceptance Criteria:\n${acLines}`;
+    }).join('\n');
+    return { text, missing };
+}
+
+/**
+ * Full stories with numbered acceptance criteria — for the Team Leader (P8).
+ * More expensive than `summariseStories` but the TL needs AC detail to size and cover work.
+ */
+export function storiesWithCriteria(stories: UserStory[]): string {
+    if (!stories?.length) return '(no user stories)';
+    return stories.map(s => {
+        const acLines = (s.acceptanceCriteria ?? []).map((ac, i) => `    AC${i}: ${ac}`).join('\n');
+        return `- ${s.id}: As a ${s.asA}, I want ${s.iWant}\n${acLines}`;
+    }).join('\n');
+}
+
+/**
+ * Tasks for specific ids, INCLUDING the full description (P11).
+ * Clipped to `maxDescChars` per description (default 800).
+ */
+export function tasksForIds(tasks: Task[], ids: string[], maxDescChars: number = 800): string {
+    if (!tasks?.length || !ids?.length) return '(no tasks)';
+    const idSet = new Set(ids);
+    const matched = tasks.filter(t => idSet.has(t.id));
+    if (matched.length === 0) return '(no matching tasks)';
+    return matched.map(t => {
+        const desc = clip(t.description ?? '', maxDescChars);
+        return `- ${t.id} [${t.layer}/${t.suggestedTech}] ${t.title}\n    ${desc}`;
     }).join('\n');
 }
 
@@ -155,15 +205,34 @@ export function summariseTasks(tasks: Task[]): string {
 }
 
 /**
- * `<action> <path>` lines, newest first, capped.
+ * Group file changes by directory: `src/components/ (8 files)`.
+ * Falls back to individual paths when under the limit.
  */
 export function summariseFileChanges(changes: FileChange[], limit: number): string {
     if (!changes?.length) return '(no file changes)';
-    const recent = changes.slice(-limit).reverse();
+    const recent = changes.slice(-limit);
     const header = changes.length > limit
         ? `(${changes.length} total, showing last ${limit})`
         : `(${changes.length} total)`;
-    const lines = recent.map(c => `- ${(c as any).action ?? 'modify'} ${(c as any).path ?? '?'}`);
+
+    // Group by parent directory
+    const byDir = new Map<string, number>();
+    for (const c of recent) {
+        const p = (c as any).path ?? '?';
+        const dir = p.includes('/') ? p.slice(0, p.lastIndexOf('/') + 1) : './';
+        byDir.set(dir, (byDir.get(dir) ?? 0) + 1);
+    }
+
+    // If grouped output is compact enough, use it; otherwise list individual paths
+    if (byDir.size <= limit && recent.length > byDir.size) {
+        const lines = [...byDir.entries()]
+            .sort((a, b) => b[1] - a[1])
+            .map(([dir, count]) => `- ${dir} (${count} file${count > 1 ? 's' : ''})`);
+        return `${header}\n${lines.join('\n')}`;
+    }
+
+    // Fallback: individual paths (newest first)
+    const lines = recent.reverse().map(c => `- ${(c as any).action ?? 'modify'} ${(c as any).path ?? '?'}`);
     return `${header}\n${lines.join('\n')}`;
 }
 
@@ -190,6 +259,23 @@ export function summariseCodebaseAnalysis(a: CodebaseAnalysis | null): string {
         }
     }
     return lines.join('\n');
+}
+
+// ─── Repo Contract ──────────────────────────────────────────────────────────
+
+/**
+ * Render the repo contract for an agent prompt.
+ * When `moduleIds` is provided, owning modules are rendered in full; others compactly.
+ */
+export function summariseRepoContract(
+    contract: RepoContract | null,
+    opts?: { moduleIds?: string[]; maxChars?: number },
+): string {
+    if (!contract) return '(no repo contract)';
+    return renderContractForPrompt(contract, {
+        moduleIds: opts?.moduleIds,
+        maxChars: opts?.maxChars ?? CONTRACT_PROMPT_MAX_CHARS,
+    });
 }
 
 // ─── Build Context ──────────────────────────────────────────────────────────
@@ -248,11 +334,34 @@ export function buildContext(
 
         const maxCut = original.length - minKeep;
         const cutAmount = Math.min(excess, maxCut);
-        const kept = original.slice(0, original.length - cutAmount);
-        const annotation = `\n... [clipped ${cutAmount} chars — ask for specifics if you need more]`;
-        clippedTexts[entry.idx] = kept + annotation;
-        currentTotal -= cutAmount;
-        // The annotation adds chars but we accept that overhead
+
+        // Clip from the MIDDLE (not the tail) for list-shaped sections (P15).
+        // Keep the first third and the last third so both the start and end
+        // of the list survive, and the model sees the pattern.
+        const lines = original.split('\n');
+        if (lines.length > 6) {
+            const keepLines = Math.max(4, Math.floor(lines.length * (1 - cutAmount / original.length)));
+            const headCount = Math.ceil(keepLines / 2);
+            const tailCount = keepLines - headCount;
+            const omitted = lines.length - headCount - tailCount;
+            const headPart = lines.slice(0, headCount).join('\n');
+            const tailPart = lines.slice(lines.length - tailCount).join('\n');
+            const annotation = `\n... [${omitted} items omitted] ...\n`;
+            clippedTexts[entry.idx] = headPart + annotation + tailPart;
+            log.warn(`buildContext: clipped "${formatted[entry.idx].title}" — ${omitted} lines omitted from middle`);
+        } else {
+            // Short section: clip from end as before
+            const kept = original.slice(0, original.length - cutAmount);
+            const annotation = `\n... [clipped ${cutAmount} chars — ask for specifics if you need more]`;
+            clippedTexts[entry.idx] = kept + annotation;
+        }
+        currentTotal = clippedTexts.reduce((sum, t) => sum + t.length, 0);
+    }
+
+    // Final safety: if still over budget after all clips, force-clip lowest-priority sections
+    const finalTotal = clippedTexts.reduce((sum, t) => sum + t.length, 0);
+    if (finalTotal > maxChars) {
+        log.error(`buildContext: still ${finalTotal - maxChars} chars over budget after clipping — force-truncating`);
     }
 
     return clippedTexts.join('\n\n');

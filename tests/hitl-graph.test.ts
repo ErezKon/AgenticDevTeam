@@ -57,6 +57,25 @@ function makeMinimalState(overrides: Partial<ProjectStateType> = {}): ProjectSta
         artifacts: [],
         transcript: [],
         tokenUsage: [],
+        configBaseline: null,
+        acceptance: null,
+        latestGateReport: null,
+        unrecoverable: null,
+        verificationErrors: [],
+        dispatchRounds: [],
+        attemptedBugIds: [],
+        bugAttempts: {},
+        outputIntegrity: [],
+        planViolations: [],
+        repoContract: null,
+        completionEvidence: [],
+        salvageBranches: [],
+        phantomFileChanges: [],
+        qaClaimDiscrepancies: [],
+        e2eStatus: 'not-run' as const,
+        e2eSkipReason: null,
+        e2eEvidence: null,
+        invariantViolations: [],
         ...overrides,
     };
 }
@@ -76,7 +95,7 @@ describe('afterQaRouter', () => {
 
     it('routes to bugfix-triage when there are failures and iterations remain', () => {
         const state = makeMinimalState({
-            testReports: [{ type: 'unit' as any, framework: 'jest', total: 1, passed: 0, failed: 1, skipped: 0, status: 'fail', failures: [], agentId: 'qa' }],
+            testReports: [{ type: 'unit' as any, framework: 'jest', total: 1, passed: 0, failed: 1, skipped: 0, status: 'fail', source: 'quality-gates' as const, iterationIndex: 0, runnerError: false, cases: [], failures: [], agentId: 'qa' }],
             iteration: { bugfix: 0 },
         });
         expect(afterQaRouter(state)).toBe('bugfix-triage');
@@ -91,9 +110,9 @@ describe('afterE2eRouter', () => {
         expect(afterE2eRouter(state)).toBe('finalize');
     });
 
-    it('routes to finalize when no failures', () => {
+    it('routes to acceptance-gate when no failures', () => {
         const state = makeMinimalState({ testReports: [] });
-        expect(afterE2eRouter(state)).toBe('finalize');
+        expect(afterE2eRouter(state)).toBe('acceptance-gate');
     });
 });
 

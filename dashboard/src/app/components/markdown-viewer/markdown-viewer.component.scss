@@ -1,0 +1,138 @@
+.markdown-viewer {
+  color: var(--text-primary);
+  font-size: 0.9rem;
+  line-height: 1.65;
+
+  // Headings
+  h1, h2, h3, h4, h5, h6 {
+    margin: 1.25rem 0 0.5rem;
+    color: var(--text-primary);
+    font-weight: 700;
+  }
+  h1 { font-size: 1.4rem; border-bottom: 1px solid var(--border); padding-bottom: 0.3rem; }
+  h2 { font-size: 1.2rem; border-bottom: 1px solid var(--border); padding-bottom: 0.2rem; }
+  h3 { font-size: 1.05rem; }
+  h4 { font-size: 0.95rem; }
+
+  // Paragraphs
+  p {
+    margin: 0.6rem 0;
+  }
+
+  // Strong / emphasis
+  strong { color: var(--text-primary); font-weight: 700; }
+  em { font-style: italic; color: var(--text-secondary); }
+
+  // Lists
+  ul, ol {
+    margin: 0.5rem 0 0.5rem 1.5rem;
+    color: var(--text-primary);
+  }
+  li {
+    margin-bottom: 0.3rem;
+  }
+  li > ul, li > ol {
+    margin-top: 0.2rem;
+  }
+
+  // Inline code
+  code {
+    font-family: 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
+    font-size: 0.82rem;
+    background: var(--bg-primary);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 0.15rem 0.4rem;
+    color: var(--accent-blue);
+  }
+
+  // Code blocks
+  pre {
+    background: var(--bg-primary);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 1rem;
+    overflow-x: auto;
+    margin: 0.75rem 0;
+
+    code {
+      background: none;
+      border: none;
+      padding: 0;
+      color: var(--text-primary);
+      font-size: 0.8rem;
+      line-height: 1.5;
+    }
+  }
+
+  // Tables
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 0.75rem 0;
+    font-size: 0.85rem;
+  }
+  th, td {
+    padding: 0.5rem 0.75rem;
+    text-align: left;
+    border: 1px solid var(--border);
+  }
+  th {
+    background: var(--bg-primary);
+    color: var(--text-secondary);
+    font-weight: 600;
+    font-size: 0.75rem;
+    text-transform: uppercase;
+  }
+  td {
+    color: var(--text-primary);
+  }
+
+  // Blockquotes
+  blockquote {
+    border-left: 3px solid var(--accent-purple);
+    padding: 0.5rem 1rem;
+    margin: 0.75rem 0;
+    color: var(--text-secondary);
+    background: var(--bg-primary);
+    border-radius: 0 6px 6px 0;
+  }
+
+  // Horizontal rules
+  hr {
+    border: none;
+    border-top: 1px solid var(--border);
+    margin: 1.5rem 0;
+  }
+
+  // Links
+  a {
+    color: var(--accent-blue);
+    text-decoration: none;
+    &:hover {
+      text-decoration: underline;
+    }
+  }
+
+  // Images
+  img {
+    max-width: 100%;
+    border-radius: 6px;
+  }
+
+  // Mermaid rendered diagrams
+  .mermaid-rendered {
+    margin: 1rem 0;
+    padding: 1rem;
+    background: var(--bg-primary);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    overflow-x: auto;
+    text-align: center;
+
+    svg {
+      max-width: 100%;
+      height: auto;
+    }
+  }
+}

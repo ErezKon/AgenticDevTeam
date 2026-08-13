@@ -25,6 +25,11 @@ export const qaLeadSystemPrompt = `
     - E2E scenarios must cover all critical user paths identified in the user stories.
     - Be specific: name the component/endpoint/page being tested, not generic descriptions.
     - The test plan must be actionable — QA Unit and QA E2E agents use it directly.
+    - If a repo contract is provided, use its testDirs for test placement and scripts.test
+      for running tests. Write tests in the declared test directories.
+    - Every test name MUST begin with \`[<storyId>#<acIndex>]\` — this is mandatory for
+      traceability. Include this instruction in the plan so QA Unit follows the convention.
+      Example: \`it('[US-003#1] eating a dot removes it and increments the score', ...)\`
 </critical_rules>
 
 <maintain_mode>

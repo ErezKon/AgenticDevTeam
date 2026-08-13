@@ -26,6 +26,22 @@
     </div>
   </section>
 
+  <!-- Active Runs -->
+  <section class="card" style="margin-bottom: 1.5rem;" *ngIf="activeRuns.length > 0">
+    <h2 style="margin-bottom: 1rem;">Active Runs ({{ activeRuns.length }})</h2>
+    <div *ngFor="let run of activeRuns" class="run-entry">
+      <span class="badge badge-purple">{{ run.phase }}</span>
+      <span class="run-system-name">{{ run.systemName }}</span>
+      <span class="run-meta">
+        <span class="badge" [ngClass]="run.runType === 'greenfield' ? 'badge-green' : 'badge-blue'">{{ run.runType }}</span>
+        <span class="badge badge-red" *ngIf="run.cancelled">cancelled</span>
+      </span>
+      <a [routerLink]="['/run', run.threadId]" class="btn-primary run-review-btn">
+        {{ run.cancelled ? 'View' : 'Review' }}
+      </a>
+    </div>
+  </section>
+
   <!-- Agent Roster -->
   <section class="card" style="margin-bottom: 1.5rem;">
     <h2 style="margin-bottom: 1rem;">Agent Roster ({{ agents.length }})</h2>

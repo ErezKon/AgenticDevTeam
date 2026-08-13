@@ -1,0 +1,12 @@
+{"Time":"2026-08-10T10:00:00Z","Action":"start","Package":"example.com/myapp/pkg"}
+{"Time":"2026-08-10T10:00:00Z","Action":"run","Package":"example.com/myapp/pkg","Test":"[US-020#0] TestCreateItem"}
+{"Time":"2026-08-10T10:00:01Z","Action":"output","Package":"example.com/myapp/pkg","Test":"[US-020#0] TestCreateItem","Output":"=== RUN   [US-020#0] TestCreateItem\n"}
+{"Time":"2026-08-10T10:00:01Z","Action":"pass","Package":"example.com/myapp/pkg","Test":"[US-020#0] TestCreateItem","Elapsed":0.5}
+{"Time":"2026-08-10T10:00:01Z","Action":"run","Package":"example.com/myapp/pkg","Test":"[US-020#1] TestUpdateItem"}
+{"Time":"2026-08-10T10:00:02Z","Action":"output","Package":"example.com/myapp/pkg","Test":"[US-020#1] TestUpdateItem","Output":"--- FAIL: [US-020#1] TestUpdateItem (0.30s)\n"}
+{"Time":"2026-08-10T10:00:02Z","Action":"output","Package":"example.com/myapp/pkg","Test":"[US-020#1] TestUpdateItem","Output":"    item_test.go:42: expected status 200, got 500\n"}
+{"Time":"2026-08-10T10:00:02Z","Action":"fail","Package":"example.com/myapp/pkg","Test":"[US-020#1] TestUpdateItem","Elapsed":0.3}
+{"Time":"2026-08-10T10:00:02Z","Action":"run","Package":"example.com/myapp/pkg","Test":"TestHelperFunc"}
+{"Time":"2026-08-10T10:00:02Z","Action":"pass","Package":"example.com/myapp/pkg","Test":"TestHelperFunc","Elapsed":0.01}
+{"Time":"2026-08-10T10:00:02Z","Action":"run","Package":"example.com/myapp/pkg","Test":"[US-021#0] TestDeleteItem"}
+{"Time":"2026-08-10T10:00:02Z","Action":"skip","Package":"example.com/myapp/pkg","Test":"[US-021#0] TestDeleteItem","Elapsed":0}

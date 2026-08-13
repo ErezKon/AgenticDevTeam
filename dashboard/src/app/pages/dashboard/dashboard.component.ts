@@ -14,6 +14,7 @@ import { ApiService, AgentEntry, WsMessage } from '../../services/api.service';
 export class DashboardComponent implements OnInit, OnDestroy {
   agents: AgentEntry[] = [];
   events: WsMessage[] = [];
+  activeRuns: any[] = [];
   currentPhase = '';
   budgetLevel = 'ok';
   budgetUtilisation = 0;
@@ -25,6 +26,8 @@ export class DashboardComponent implements OnInit, OnDestroy {
 
   ngOnInit() {
     this.api.getAgents().subscribe(agents => this.agents = agents);
+    this.api.getActiveRuns().subscribe(runs => this.activeRuns = runs);
+
     this.sub = this.api.connectWebSocket().subscribe(msg => {
       this.events.unshift(msg);
       if (this.events.length > 200) this.events.length = 200;
@@ -40,6 +43,10 @@ export class DashboardComponent implements OnInit, OnDestroy {
       if (msg.event === 'tokens:update' && msg.data) {
         this.totalTokens = msg.data.totalTokens ?? this.totalTokens;
         this.totalCalls = msg.data.totalCalls ?? this.totalCalls;
+      }
+      // Refresh active runs on HITL events
+      if (msg.event === 'hitl:waiting' || msg.event === 'run:started') {
+        this.api.getActiveRuns().subscribe(runs => this.activeRuns = runs);
       }
     });
   }
@@ -67,6 +74,8 @@ export class DashboardComponent implements OnInit, OnDestroy {
     if (eventType.startsWith('gate:')) return 'badge-yellow';
     if (eventType.startsWith('budget:')) return 'badge-red';
     if (eventType.startsWith('tokens:')) return 'badge-cyan';
+    if (eventType.startsWith('hitl:')) return 'badge-purple';
+    if (eventType.startsWith('run:')) return 'badge-green';
     return 'badge-blue';
   }
 
