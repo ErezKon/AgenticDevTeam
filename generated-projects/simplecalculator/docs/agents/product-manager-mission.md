@@ -1,47 +1,46 @@
 # Product Manager Mission Report
 
 **Agent**: product-manager  
-**Generated**: 2026-08-07T22:57:52.416Z
+**Generated**: 2026-08-13T09:40:35.204Z
 
 ---
 
-## User Stories (7)
+## User Stories (6)
 
-### US-001: As a user, I want to enter an arithmetic expression in an input field
-- So that: I can calculate results
-- AC: The input field accepts keyboard entry and displays a placeholder like "Enter expression".; Only allowed characters (digits, +, -, *, /, parentheses, decimal point) are permitted; other characters are ignored or prevented.; The layout is responsive and works on both desktop and mobile screen sizes.
-### US-002: As a user, I want to see the calculated result displayed instantly
-- So that: I get immediate feedback
-- AC: When a valid expression is typed, the result area updates within 200 ms of the keystroke.; The result is shown as a clean number (no trailing zeros) and updates on every change.; If the expression is invalid, an error message is shown instead of a numeric result.
-### US-003: As a developer, I want a pure TypeScript Calculator Engine library that can parse and evaluate arithmetic expressions
-- So that: the UI can rely on accurate computations
-- AC: The engine exports a function evaluate(expression: string): { result?: number, error?: string }.; It correctly handles addition, subtraction, multiplication, division, parentheses, decimal numbers, and negative numbers.; It returns a structured error for syntax errors or division‑by‑zero situations.
-### US-004: As a user, I want clear error messages when I type an invalid expression
-- So that: I can correct my input quickly
-- AC: When the engine returns an error, the UI displays a user‑friendly message near the input field.; Error messages differentiate between syntax errors (e.g., "Unexpected token") and runtime errors (e.g., "Division by zero").; The application does not crash or become unresponsive when an error occurs.
-### US-005: As a QA engineer, I want unit tests for the Calculator Engine covering all operators and edge cases
-- So that: regressions are prevented
-- AC: Jest test suite includes at least one test for each operator (+, -, *, /), nested parentheses, decimal handling, negative numbers, division‑by‑zero, and malformed expressions.; Test coverage for the engine source files is at least 90%.
-### US-006: As a developer, I want a CI pipeline that runs tests and deploys to GitHub Pages on merge
-- So that: changes are automatically validated and published
-- AC: GitHub Actions workflow triggers on push to the main branch, runs npm ci, builds the Vite bundle, executes all Jest tests, and fails if any test fails.; On successful test run, the workflow deploys the built static site to the gh‑pages branch, making it live on GitHub Pages.
-### US-007: As a keyboard‑oriented user, I want to submit the expression using the Enter key
-- So that: I can calculate without reaching for the mouse
-- AC: Pressing Enter while the input field is focused triggers evaluation and updates the result area.; Focus remains on the input after evaluation, allowing continuous typing.
+### US-001: As a User, I want to perform scientific calculations such as sqrt, power, log, sin, etc.
+- So that: I can obtain accurate results for advanced mathematical expressions
+- AC: CalculatorEngine evaluates each supported scientific operation correctly and returns the expected numeric result.; CalculatorEngine throws a clear error for any unsupported or malformed expression.
+### US-002: As a User, I want a scientific calculator layout with three button groups (Basic, Scientific, Additional)
+- So that: the UI mirrors a physical scientific calculator and is easy to use
+- AC: CalculatorUI displays three distinct button groups arranged in a grid as specified.; Each button shows the correct symbol and forwards the symbol to the CalculatorEngine when clicked.
+### US-003: As a User, I want tooltips that show the full operation name when I hover over any button
+- So that: I can understand what each symbol represents, improving accessibility
+- AC: Hovering over any calculator button displays a Tooltip with the correct operation name.; Tooltips are accessible via aria-labels and are readable by screen readers.
+### US-004: As a User, I want buttons for the constants π and e that insert their numeric values
+- So that: I can include these constants in my calculations without typing them manually
+- AC: Clicking the π button inserts the numeric value of PI into the current expression.; Clicking the e button inserts the numeric value of E into the current expression.
+### US-005: As a User, I want to build expressions with parentheses, decimal points, and negative numbers
+- So that: I can create complex mathematical expressions
+- AC: CalculatorEngine correctly parses and evaluates expressions containing nested parentheses.; Decimal literals and unary minus are handled accurately, producing the expected result.
+### US-999: As a User, I want all calculator components to be wired together so the app is fully functional
+- So that: I can interact with the scientific calculator end‑to‑end in the browser
+- AC: Running the application starts the main React entry point, renders CalculatorUI, and connects it to CalculatorEngine.; A user can click a sequence of buttons (including scientific and constant buttons) and see the correct result displayed.
 
-## Tasks (14)
+## Tasks (16)
 
-- **TASK-001** [infra/Vite] Initialize project with Vite React+TypeScript template
-- **TASK-002** [infra/ESLint, Prettier] Configure ESLint and Prettier for TypeScript
-- **TASK-003** [frontend/React] Create InputField component
-- **TASK-004** [frontend/React] Create ResultDisplay component
-- **TASK-005** [frontend/React] Create ErrorMessage component
-- **TASK-006** [backend/TypeScript] Implement Calculator Engine library
-- **TASK-007** [testing/Jest] Write unit tests for Calculator Engine
-- **TASK-008** [frontend/React, TypeScript] Integrate Engine with UI
-- **TASK-009** [frontend/CSS] Implement responsive layout
-- **TASK-010** [frontend/React] Add Enter‑key submission support
-- **TASK-011** [infra/GitHub Actions] Set up GitHub Actions CI workflow
-- **TASK-012** [infra/Vite, vite-plugin-gh-pages] Configure GitHub Pages deployment
-- **TASK-013** [testing/Jest, React Testing Library] Write React component tests for InputField and ResultDisplay
-- **TASK-014** [frontend/React] Add accessibility attributes
+- **TASK-001** [backend/TypeScript] Extend CalculatorEngine to support scientific operations
+- **TASK-002** [testing/Jest] Add unit tests for new scientific operations
+- **TASK-003** [frontend/React + TypeScript] Update CalculatorUI layout with scientific and additional button groups
+- **TASK-004** [frontend/CSS Modules] Add CSS Module styles for new button groups
+- **TASK-005** [testing/Jest + @testing-library/react] Write component tests for CalculatorUI layout
+- **TASK-006** [frontend/React + TypeScript] Enhance Tooltip component for accessibility
+- **TASK-007** [frontend/React + TypeScript] Wrap ScientificButton with Tooltip displaying operation name
+- **TASK-008** [testing/Jest + @testing-library/react] Add tests for tooltip visibility and accessibility
+- **TASK-009** [backend/TypeScript] Verify and expose mathematical constants
+- **TASK-010** [frontend/React + TypeScript] Add constant buttons to CalculatorUI
+- **TASK-011** [testing/Jest + @testing-library/react] Write tests for constant button functionality
+- **TASK-012** [backend/TypeScript] Enhance parser to handle parentheses, decimals, and unary minus
+- **TASK-013** [frontend/React + TypeScript] Add UI buttons for parentheses, decimal point, and negative sign
+- **TASK-014** [testing/Jest] Add unit tests for complex expression evaluation
+- **TASK-015** [frontend/React + TypeScript] Verify main entry point wires UI and Engine
+- **TASK-016** [testing/Jest + @testing-library/react] Add end‑to‑end test simulating user workflow
