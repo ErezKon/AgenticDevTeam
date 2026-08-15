@@ -75,10 +75,21 @@ export const MODEL_PRICING: Record<string, { inputPer1k: number; outputPer1k: nu
     'mistral-small-3-1-24b-instruct-2503': { inputPer1k: 0.001, outputPer1k: 0.002 },
     'llama-3-2-3b-instruct':             { inputPer1k: 0.0003, outputPer1k: 0.0006 },
     'gpt-oss-20b':                       { inputPer1k: 0.001,  outputPer1k: 0.002 },
+    // OpenAI public models
+    'gpt-5.3-codex':                     { inputPer1k: 0.00175, outputPer1k: 0.014 },
+    'gpt-5.4-mini':                      { inputPer1k: 0.00075, outputPer1k: 0.0045 },
     // Anthropic models (Sub-Plan 20)
     'claude-opus-4-20250514':            { inputPer1k: 0.015,  outputPer1k: 0.075 },
     'claude-sonnet-4-20250514':          { inputPer1k: 0.003,  outputPer1k: 0.015 },
     'claude-3-5-haiku-20241022':         { inputPer1k: 0.0008, outputPer1k: 0.004 },
+    'claude-opus-4-6':                   { inputPer1k: 0.005,  outputPer1k: 0.025 },
+    'claude-opus-4-8':                   { inputPer1k: 0.005,  outputPer1k: 0.025 },
+    'claude-opus-5':                     { inputPer1k: 0.005,  outputPer1k: 0.025 },
+    'claude-fable-5':                    { inputPer1k: 0.01,   outputPer1k: 0.05 },
+    'claude-sonnet-4-5':                 { inputPer1k: 0.003,  outputPer1k: 0.015 },
+    'claude-sonnet-4-6':                 { inputPer1k: 0.003,  outputPer1k: 0.015 },
+    'claude-haiku-4-5':                  { inputPer1k: 0.001,  outputPer1k: 0.005 },
+    'claude-sonnet-5':                   { inputPer1k: 0.002,  outputPer1k: 0.01 },
     // Google Gemini models (Sub-Plan 20)
     'gemini-2.5-pro':                    { inputPer1k: 0.00125, outputPer1k: 0.01 },
     'gemini-2.5-flash':                  { inputPer1k: 0.00015, outputPer1k: 0.0006 },
