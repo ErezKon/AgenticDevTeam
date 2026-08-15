@@ -18,7 +18,9 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@langchain/anthropic": "^0.3.34",
     "@langchain/core": "^1.1.16",
+    "@langchain/google-genai": "^0.2.18",
     "@langchain/langgraph": "^1.0.7",
     "@langchain/mcp-adapters": "^1.1.2",
     "@langchain/openai": "^1.2.0",

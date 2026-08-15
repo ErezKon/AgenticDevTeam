@@ -75,11 +75,45 @@ export const MODEL_PRICING: Record<string, { inputPer1k: number; outputPer1k: nu
     'mistral-small-3-1-24b-instruct-2503': { inputPer1k: 0.001, outputPer1k: 0.002 },
     'llama-3-2-3b-instruct':             { inputPer1k: 0.0003, outputPer1k: 0.0006 },
     'gpt-oss-20b':                       { inputPer1k: 0.001,  outputPer1k: 0.002 },
+    // Anthropic models (Sub-Plan 20)
+    'claude-opus-4-20250514':            { inputPer1k: 0.015,  outputPer1k: 0.075 },
+    'claude-sonnet-4-20250514':          { inputPer1k: 0.003,  outputPer1k: 0.015 },
+    'claude-3-5-haiku-20241022':         { inputPer1k: 0.0008, outputPer1k: 0.004 },
+    // Google Gemini models (Sub-Plan 20)
+    'gemini-2.5-pro':                    { inputPer1k: 0.00125, outputPer1k: 0.01 },
+    'gemini-2.5-flash':                  { inputPer1k: 0.00015, outputPer1k: 0.0006 },
+    'gemini-2.0-flash':                  { inputPer1k: 0.0001,  outputPer1k: 0.0004 },
     // Merge env-based overrides if provided
     ...(process.env.MODEL_PRICING_OVERRIDES
         ? JSON.parse(process.env.MODEL_PRICING_OVERRIDES) as Record<string, { inputPer1k: number; outputPer1k: number }>
         : {}),
 };
+
+// ─── Multi-Provider LLM (Sub-Plan 20) ───────────────────────────────────────
+
+/** API key for Anthropic models (Claude). Required when any agent model matches /claude|anthropic/i. */
+export const ANTHROPIC_API_KEY =
+    process.env.ANTHROPIC_API_KEY ?? '';
+
+/** API key for Google Gemini models. Required when any agent model matches /gemini/i. */
+export const GOOGLE_API_KEY =
+    process.env.GOOGLE_API_KEY ?? '';
+
+/** Optional base URL override for Anthropic (for proxies). */
+export const ANTHROPIC_BASE_URL =
+    process.env.ANTHROPIC_BASE_URL ?? '';
+
+/** Optional base URL override for Google (for proxies). */
+export const GOOGLE_BASE_URL =
+    process.env.GOOGLE_BASE_URL ?? '';
+
+/**
+ * Provider detection strategy:
+ * - 'auto' (default): Detect provider from model name (claude* -> Anthropic, gemini* -> Google, else -> OpenAI).
+ * - 'openai': Force all models through the OpenAI-compatible endpoint (escape hatch for proxies).
+ */
+export const LLM_PROVIDER_DETECTION =
+    (process.env.LLM_PROVIDER_DETECTION ?? 'auto') as 'auto' | 'openai';
 
 // ─── OAuth2 (client-credentials) ────────────────────────────────────────────
 
@@ -671,6 +705,30 @@ export const ESCALATION_TOOL_CALL_BONUS =
 /** Convert unresolved major review comments into Bugs for the bugfix loop. */
 export const REVIEW_MAJORS_TO_BUGS =
     (process.env.REVIEW_MAJORS_TO_BUGS ?? 'true') === 'true';
+
+// ─── Strong Model PR Fixer (Sub-Plan 20) ────────────────────────────────────
+
+/** Model to use for the strong fixer agent (e.g. 'claude-opus-4.6', 'gpt-4o').
+ *  Empty string (default) falls back to PRINCIPAL_DEV_MODEL. */
+export const STRONG_FIXER_MODEL =
+    process.env.STRONG_FIXER_MODEL ?? '';
+
+/** Enable/disable the strong fixer (default: true). */
+export const STRONG_FIXER_ENABLED =
+    (process.env.STRONG_FIXER_ENABLED ?? 'true') === 'true';
+
+/** Max tool calls for the strong fixer agent (default: 40). */
+export const STRONG_FIXER_MAX_TOOL_CALLS =
+    parseInt(process.env.STRONG_FIXER_MAX_TOOL_CALLS ?? '40', 10);
+
+/**
+ * PR exhaustion strategy — controls what happens when max review iterations are reached:
+ * - 'escalate-then-fix' (default): Run existing rank-based escalation first, then strong fixer if still unresolved.
+ * - 'fix-only': Skip rank-based escalation entirely, go straight to strong fixer.
+ * - 'escalate-only': Keep existing escalation behaviour only, no strong fixer (backward-compatible).
+ */
+export const PR_EXHAUSTION_STRATEGY =
+    (process.env.PR_EXHAUSTION_STRATEGY ?? 'escalate-then-fix') as 'escalate-then-fix' | 'fix-only' | 'escalate-only';
 
 // ─── Agent Budgets & Context (Sub-Plan 08) ──────────────────────────────────
 

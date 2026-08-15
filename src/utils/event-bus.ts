@@ -23,7 +23,7 @@ export type RunEventType =
     | 'phase:start' | 'phase:end'
     | 'agent:start' | 'agent:end' | 'agent:respawn' | 'agent:budget-exhausted'
     | 'tool:call'
-    | 'pr:opened' | 'pr:reviewed' | 'pr:merged' | 'pr:blocked' | 'pr:conflict' | 'pr:salvage'
+    | 'pr:opened' | 'pr:reviewed' | 'pr:merged' | 'pr:blocked' | 'pr:conflict' | 'pr:salvage' | 'pr:strong-fixer'
     | 'gate:result'
     | 'acceptance:result'
     | 'plan:coverage'

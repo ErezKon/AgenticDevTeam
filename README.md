@@ -809,6 +809,17 @@ npm run build
 | `SENIOR_DEV_MODEL` | `mistral-small-3-1-24b-instruct-2503` | Senior developer agents model (feature modules, refactoring) |
 | `JUNIOR_DEV_MODEL` | `llama-3-2-3b-instruct` | Junior developer agents model (boilerplate, utilities, minor fixes) |
 | `QA_MODEL` | `gpt-oss-20b` | QA agents model (test plans, unit/integration/E2E tests) |
+| **Multi-Provider LLM (Plan 20)** | | |
+| `ANTHROPIC_API_KEY` | — | API key for Anthropic (Claude) models |
+| `GOOGLE_API_KEY` | — | API key for Google (Gemini) models |
+| `ANTHROPIC_BASE_URL` | — | Optional base URL override for Anthropic (proxy support) |
+| `GOOGLE_BASE_URL` | — | Optional base URL override for Google (proxy support) |
+| `LLM_PROVIDER_DETECTION` | `auto` | Provider detection: `auto` (detect from model name) or `openai` (force all through OpenAI endpoint) |
+| **Strong Model PR Fixer (Plan 20)** | | |
+| `STRONG_FIXER_MODEL` | — | Model for the strong fixer agent (e.g. `claude-opus-4-20250514`). Empty uses `PRINCIPAL_DEV_MODEL` |
+| `STRONG_FIXER_ENABLED` | `true` | Enable/disable the strong model PR fixer |
+| `STRONG_FIXER_MAX_TOOL_CALLS` | `40` | Max tool calls for the strong fixer agent |
+| `PR_EXHAUSTION_STRATEGY` | `escalate-then-fix` | PR exhaustion strategy: `escalate-then-fix`, `fix-only`, or `escalate-only` |
 | `OAUTH_TOKEN_URL` | — | OAuth2 token endpoint URL |
 | `OAUTH_CLIENT_ID` | — | OAuth2 client ID |
 | `OAUTH_CLIENT_SECRET` | — | OAuth2 client secret |
@@ -999,7 +1010,7 @@ Every agent writes a detailed Markdown mission report including:
 | Layer | Technology |
 |-------|-----------|
 | **Orchestration** | LangGraph (StateGraph, Annotations, conditional edges, HITL interrupts) |
-| **Agent Framework** | LangChain (`createReactAgent`, `ChatOpenAI`, structured output) |
+| **Agent Framework** | LangChain (`createReactAgent`, multi-provider: `ChatOpenAI`, `ChatAnthropic`, `ChatGoogleGenerativeAI`, structured output) |
 | **GitHub Integration** | Octokit REST (PR creation, code reviews, merge) |
 | **Schema Validation** | Zod (20+ schemas for all domain entities) |
 | **Runtime** | Node.js 20+ with TypeScript (tsx) |

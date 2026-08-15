@@ -4,7 +4,6 @@
  */
 import { MemorySaver } from '@langchain/langgraph';
 import { createReactAgent } from '@langchain/langgraph/prebuilt';
-import { ChatOpenAI } from '@langchain/openai';
 import type { StructuredToolInterface } from '@langchain/core/tools';
 import { z } from 'zod';
 import type { BaseMessage } from '@langchain/core/messages';
@@ -16,6 +15,7 @@ import { cassetteFetch, LLM_CASSETTE_MODE } from '../../utils/llm-cassette';
 import { withLoopGuard } from './tool-loop-guard';
 import { compactHistory, recordCompaction } from './history-compactor';
 import { TokenUsageCallbackHandler } from '../../utils/token-callback';
+import { createChatModel, detectProvider } from './llm-provider';
 import { getLogger } from '../../utils/logger';
 
 const factoryLog = getLogger('[agent-factory]', 226);
@@ -55,48 +55,49 @@ export interface AgentConfig {
 export function buildAgent(apiKey: string, cfg: AgentConfig) {
     const checkpointer = new MemorySaver();
 
-    const oauthFetch: typeof globalThis.fetch = async (url, init) => {
-        const freshToken = await getAccessToken();
-        const headers = new Headers(init?.headers);
-        headers.set('Authorization', `Bearer ${freshToken}`);
-        return globalThis.fetch(url, { ...init, headers });
-    };
-    // Cassette sits inside throttledFetch: recordings capture real responses,
-    // replays skip both the OAuth token fetch and the throttle's cooldowns.
-    const base = LLM_CASSETTE_MODE === 'off' ? oauthFetch : cassetteFetch(oauthFetch);
-    const throttled = throttledFetch(base);
-
     const modelName = cfg.model ?? LLM_MODEL;
+    const provider = detectProvider(modelName);
     const tokenCallback = new TokenUsageCallbackHandler(cfg.id, modelName, cfg.phase ?? cfg.id);
 
     // Enable JSON mode when a response schema is set AND the agent has no tools
     // (tool-using agents produce intermediate non-JSON responses during the ReAct loop).
-    const useJsonMode = LLM_JSON_MODE && !!cfg.responseFormat && cfg.tools.length === 0;
+    // JSON mode via response_format is only supported by OpenAI-compatible APIs.
+    const useJsonMode = LLM_JSON_MODE && !!cfg.responseFormat && cfg.tools.length === 0 && provider === 'openai';
 
-    const model = new ChatOpenAI({
-        model: modelName,
+    // OAuth fetch chain is only used for OpenAI-compatible endpoints.
+    // Anthropic and Google use their own API keys and HTTP handling.
+    let customFetch: typeof fetch | undefined;
+    if (provider === 'openai') {
+        const oauthFetch: typeof globalThis.fetch = async (url, init) => {
+            const freshToken = await getAccessToken();
+            const headers = new Headers(init?.headers);
+            headers.set('Authorization', `Bearer ${freshToken}`);
+            return globalThis.fetch(url, { ...init, headers });
+        };
+        // Cassette sits inside throttledFetch: recordings capture real responses,
+        // replays skip both the OAuth token fetch and the throttle's cooldowns.
+        const base = LLM_CASSETTE_MODE === 'off' ? oauthFetch : cassetteFetch(oauthFetch);
+        customFetch = throttledFetch(base);
+    }
+
+    const model = createChatModel({
+        modelName,
         temperature: cfg.temperature ?? 0.3,
-        // Retries are handled centrally: llm-throttle applies a global 429 cooldown
-        // and retry.ts retries whole agent invocations. LangChain's own retries
-        // multiplied request volume (5 x 6 = 30 HTTP calls per logical call) and
-        // sustained the 429 storm seen in runs 5 & 6.
-        maxRetries: 0,
         maxTokens: cfg.maxOutputTokens ?? LLM_MAX_OUTPUT_TOKENS,
         timeout: cfg.timeout ?? LLM_REQUEST_TIMEOUT_MS,
-        openAIApiKey: apiKey,
-        apiKey: apiKey,
-        configuration: {
-            baseURL: LLM_BASE_URL,
-            fetch: throttled,
-        },
         callbacks: [tokenCallback],
-        ...(useJsonMode && {
-            modelKwargs: { response_format: { type: 'json_object' } },
-        }),
+        // OpenAI-specific options (ignored by Anthropic/Google)
+        apiKey,
+        baseURL: LLM_BASE_URL,
+        customFetch,
+        jsonMode: useJsonMode,
     });
 
     if (useJsonMode) {
         factoryLog.debug(`${cfg.id}: JSON mode enabled via response_format`);
+    }
+    if (provider !== 'openai') {
+        factoryLog.debug(`${cfg.id}: using ${provider} provider for model "${modelName}"`);
     }
 
     let prompt = cfg.systemPrompt;

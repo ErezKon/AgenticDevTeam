@@ -13,7 +13,7 @@ import { Octokit } from '@octokit/rest';
 import { getLogger } from '../utils/logger';
 import { retryWithBackoff } from '../utils/retry';
 import { writeArtifact } from '../agents/_shared/artifact';
-import { buildDevAgent } from '../agents/developers/dev-agent.builder';
+import { buildDevAgent, buildStrongFixerAgent } from '../agents/developers/dev-agent.builder';
 import { buildReviewerAgent } from '../agents/developers/reviewer-agent.builder';
 import { getDevAgent, DEV_AGENTS } from '../agents/developers/registry';
 import { resolveConventionFiles } from '../utils/coding-conventions';
@@ -28,6 +28,8 @@ import {
     AGENT_RESPAWN_ENABLED, AGENT_RESPAWN_MAX_GENERATIONS,
     WORKTREE_SALVAGE_MAX, PR_SALVAGE_PATCHES,
     MERGE_CONFLICT_FIX_ATTEMPTS,
+    STRONG_FIXER_MODEL, STRONG_FIXER_ENABLED, STRONG_FIXER_MAX_TOOL_CALLS,
+    PR_EXHAUSTION_STRATEGY,
 } from '../config';
 import { buildHandoff, renderHandoff } from './agent-respawn';
 import { getEffectiveLimits } from '../utils/run-budget';
@@ -1642,7 +1644,9 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
         }
 
         // ── 3b. Escalation check ────────────────────────────────────────
-        if (prStatus === 'open') {
+        // Guarded by PR_EXHAUSTION_STRATEGY: 'escalate-then-fix' or 'escalate-only' run escalation.
+        // 'fix-only' skips escalation entirely (proceeds straight to strong fixer in 3c).
+        if (prStatus === 'open' && PR_EXHAUSTION_STRATEGY !== 'fix-only') {
             // Use the last iteration that actually produced reviews — the loop can
             // now end early (no-progress / rate-limit exhaustion), in which case
             // there are no reviews at the effective limit to escalate on.
@@ -1799,6 +1803,202 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                     // but if it does (e.g. registry is empty), leave PR open.
                     log.warn('No escalation candidate found — leaving PR open');
                     allTranscript.push(msg('conductor', `No escalation candidate found — PR left open`));
+                }
+            }
+        }
+
+        // ── 3c. Strong Model Fixer (Sub-Plan 20) ────────────────────────
+        // When the PR is still open after regular escalation (or instead of it
+        // for 'fix-only' strategy) and STRONG_FIXER_ENABLED, invoke a powerful
+        // model to do a comprehensive fix pass with full context.
+        if (STRONG_FIXER_ENABLED && PR_EXHAUSTION_STRATEGY !== 'escalate-only'
+            && prStatus === 'open') {
+            // Budget check — do not run if budget is exhausted
+            const { maxReviewIterations: budgetCheck } = getEffectiveLimits();
+            if (budgetCheck <= 0) {
+                log.warn('Strong fixer skipped: run budget exhausted');
+            } else {
+                const fixerModel = STRONG_FIXER_MODEL || PRINCIPAL_DEV_MODEL;
+                log.info(`Invoking strong model fixer (${fixerModel}) for PR #${ghPr.number}...`);
+                allTranscript.push(msg('conductor', `Strong fixer invoked (model: ${fixerModel})`));
+                emitRunEvent('pr:strong-fixer', { prNumber: ghPr.number, model: fixerModel, branch: branchName });
+
+                // Collect ALL review comments from all iterations
+                const allComments = allReviews.flatMap(r => r.comments);
+
+                // Get the current full diff
+                const fullDiff = gitExec(worktreeWorkspace, `diff ${baseRef}...HEAD -- . ${DIFF_EXCLUDE_SPECS}`);
+                // Truncate diff if too large
+                const maxDiffChars = 30_000;
+                const truncatedFixerDiff = fullDiff.length <= maxDiffChars
+                    ? fullDiff
+                    : fullDiff.slice(0, maxDiffChars) + `\n\n[... TRUNCATED — ${fullDiff.length - maxDiffChars} chars omitted ...]`;
+
+                // Build the strong fixer agent
+                const fixerConventions = resolveConventionFiles(['typescript', 'javascript'], techStack);
+                const buildFixerFn = () => buildStrongFixerAgent(apiKey, worktreeWorkspace, gitContext, baseBranch, fixerConventions, isMaintainMode);
+                const fixerAgent = buildFixerFn();
+
+                const fixerMsg = [
+                    `## STRONG FIXER — PR #${ghPr.number}: ${prTitle}`,
+                    `\nYou are a SENIOR EXPERT developer taking over a PR that has exhausted its review iterations.`,
+                    `Your job: read the task, understand the review feedback, and fix ALL issues to get this PR merged.`,
+                    `\n## Original Task\n${contextPrompt}`,
+                    `\n## Project Slug: ${projectSlug}`,
+                    `\n## Your Branch: ${branchName}`,
+                    `\nYou are already on this branch. Do NOT create or switch branches.`,
+                    `\n## IMPORTANT: Workspace Context`,
+                    `Your current working directory IS the project root.`,
+                    `Do NOT prefix paths with "generated-projects/${projectSlug}/" — all file operations are relative to the project root.`,
+                    `\n## PR Description\n${prBody.slice(0, 3000)}`,
+                    `\n## All Review Comments (${allComments.length} total)\n${JSON.stringify(allComments, null, 2)}`,
+                    `\n## Current Diff\n\`\`\`diff\n${truncatedFixerDiff}\n\`\`\``,
+                    gateReport ? `\n## Quality Gate Results\n${gateReportToMarkdown(gateReport)}` : '',
+                    integrityFindings.length > 0 ? `\n## Integrity Findings\n${tamperFindingsToMarkdown(integrityFindings)}` : '',
+                    `\n## Instructions`,
+                    `1. Read and understand ALL review comments.`,
+                    `2. Fix every issue raised by reviewers.`,
+                    `3. Ensure quality gates will pass (build, lint, test).`,
+                    `4. Do NOT weaken tests or build configuration.`,
+                    `5. Commit all changes when done.`,
+                    ``,
+                    `HARD CONSTRAINTS (enforced mechanically):`,
+                    `- Do NOT modify \`scripts\` in any package.json (writes are REFUSED by your tools).`,
+                    `- Do NOT delete, skip, or weaken tests. Do NOT add trivial tests for non-product code.`,
+                    `- Do NOT relax tsconfig/eslint strictness or add source paths to .gitignore.`,
+                    `- Fix the SOURCE CODE, not the build/test configuration.`,
+                ].join('\n');
+
+                try {
+                    const { output: fixerOutput, tokenUsage: fixerTokenUsage } = await invokeDevAgent(
+                        fixerAgent, fixerMsg, `strong-fixer-pr${ghPr.number}`,
+                        'strong-fixer', fixerModel,
+                        buildFixerFn,
+                    );
+                    if (fixerTokenUsage) allTokenUsage.push(fixerTokenUsage);
+                    if (fixerOutput.fileChanges) allFileChanges.push(...fixerOutput.fileChanges);
+                    log.info(`Strong fixer completed: ${fixerOutput.fileChanges?.length ?? 0} file changes`);
+                    allTranscript.push(msg('strong-fixer', `Strong fixer applied ${fixerOutput.fileChanges?.length ?? 0} file changes`));
+
+                    // Run quality gates after the fixer's changes
+                    let fixerGateReport: GateReport | null = null;
+                    try {
+                        fixerGateReport = runQualityGates(worktreeWorkspace, {
+                            timeoutMs: PR_TEST_TIMEOUT_MS,
+                            installTimeoutMs: PR_TEST_INSTALL_TIMEOUT_MS,
+                        });
+                        log.info(`Quality gates after strong fixer: ${fixerGateReport?.passed ? 'passed' : 'failed'}`);
+                    } catch (gateErr: any) {
+                        log.warn(`Quality gates after strong fixer failed: ${gateErr.message}`);
+                    }
+
+                    // Final review with a principal-rank reviewer
+                    const finalReviewerId = selectEscalationCandidate(
+                        'strong-fixer',
+                        [...reviewerAgentIds, assignments[0].devAgentId],
+                    );
+
+                    if (finalReviewerId) {
+                        const finalReviewerEntry = getDevAgent(finalReviewerId)!;
+                        const finalReviewerLog = getLogger(`${finalReviewerEntry.tag} [STRONG-FIXER REVIEW]`, finalReviewerEntry.colorCode);
+                        finalReviewerLog.info(`Final review of PR #${ghPr.number} after strong fixer`);
+
+                        const finalReviewerConventions = resolveConventionFiles(finalReviewerEntry.languages, techStack);
+                        const finalReviewer = buildReviewerAgent(apiKey, finalReviewerEntry, worktreeWorkspace, gitContext, baseBranch, finalReviewerConventions);
+                        const fixerDiff = gitExec(worktreeWorkspace, `diff ${baseRef}...${branchName} -- . ${DIFF_EXCLUDE_SPECS}`);
+                        let fixerDiffContent: string;
+                        if (fixerDiff.length <= MAX_DIFF_CHARS) {
+                            fixerDiffContent = `\`\`\`diff\n${fixerDiff}\n\`\`\``;
+                        } else {
+                            const fixerDiffStat = gitExec(worktreeWorkspace, `diff --stat ${baseRef}...${branchName} -- . ${DIFF_EXCLUDE_SPECS}`);
+                            fixerDiffContent = [
+                                `[DIFF TOO LARGE — ${fixerDiff.length} chars. Showing file summary instead]\n`,
+                                fixerDiffStat,
+                                `\nUse "git_diff_file" to review individual files.`,
+                            ].join('\n');
+                        }
+                        const finalReviewMsg = [
+                            `## Final Review — Pull Request #${ghPr.number}: ${prTitle}`,
+                            `\n## Base Branch: ${baseBranch} (already applied to all diff tools — never pass a baseBranch argument yourself)`,
+                            `\n## PR Description\n\n${prBody.slice(0, 2000)}`,
+                            `\n## Diff\n\n${fixerDiffContent}`,
+                            `\n## Context: This is a final review after a strong model fixer has addressed all review comments.`,
+                            fixerGateReport ? `\n## Quality Gate Results\n${gateReportToMarkdown(fixerGateReport)}` : '',
+                        ].join('\n');
+
+                        try {
+                            const finalRevModel = getModelForRank(finalReviewerEntry.rank as DevRank);
+                            const { outcome: finalOutcome, tokenUsage: finalRevTokenUsage } = await invokeReviewerAgent(
+                                finalReviewer, finalReviewMsg, `strong-fixer-review-${finalReviewerId}-pr${ghPr.number}`,
+                                `${finalReviewerId}-reviewer`, finalRevModel,
+                            );
+                            if (finalRevTokenUsage) allTokenUsage.push(finalRevTokenUsage);
+                            allOutcomes.push(finalOutcome);
+
+                            const finalReviewOutput: ReviewOutput = finalOutcome.kind === 'abstained'
+                                ? { status: 'changes_requested', summary: `Final reviewer abstained: ${finalOutcome.detail}`, comments: [], criteriaVerdicts: [] }
+                                : finalOutcome.output;
+
+                            finalReviewerLog.info(`Final review decision: ${finalOutcome.kind} (${finalReviewOutput.comments?.length ?? 0} comments)`);
+                            for (const c of finalReviewOutput.comments ?? []) {
+                                finalReviewerLog.info(`  ${c.filePath}${c.line ? ':' + c.line : ''} — [${(c.severity ?? 'info').toUpperCase()}] ${c.body}`);
+                            }
+
+                            const reviewIterForFixer = (allReviews.reduce((m, r) => Math.max(m, r.iteration), 0)) + 1;
+                            allReviews.push({
+                                reviewerId: finalReviewerId,
+                                status: finalOutcome.kind === 'approved' ? 'approved' : 'changes_requested',
+                                comments: (finalReviewOutput.comments ?? []).map((c: any, idx: number) => ({
+                                    id: `${finalReviewerId}-strong-fixer-${idx}`,
+                                    reviewerId: finalReviewerId,
+                                    filePath: c.filePath ?? '',
+                                    line: c.line,
+                                    body: c.body ?? '',
+                                    severity: c.severity ?? 'info',
+                                    resolved: false,
+                                })),
+                                iteration: reviewIterForFixer,
+                            });
+
+                            // Post the final review comment on the PR
+                            try {
+                                const statusTag = finalReviewOutput.status === 'approved' ? 'APPROVED' : 'CHANGES_REQUESTED';
+                                const commentBody = [
+                                    `[REVIEW: ${statusTag} by ${finalReviewerEntry.name} (${finalReviewerEntry.id})] — strong-fixer final review`,
+                                    '',
+                                    `**Summary:** ${finalReviewOutput.summary}`,
+                                    ...(finalReviewOutput.comments ?? []).map((c: any) =>
+                                        `- **\`${c.filePath}\`${c.line ? `:${c.line}` : ''}** — **[${(c.severity ?? 'INFO').toUpperCase()}]** ${c.body}`
+                                    ),
+                                ].join('\n');
+                                await octokit.issues.createComment({
+                                    owner: ghOwner, repo: ghRepo,
+                                    issue_number: ghPr.number, body: commentBody,
+                                });
+                            } catch (commentErr: any) {
+                                log.warn(`Failed to post strong-fixer review comment: ${commentErr.message}`);
+                            }
+
+                            if (finalOutcome.kind === 'approved') {
+                                log.info(`Final reviewer approved PR #${ghPr.number} after strong fixer`);
+                                prStatus = 'approved';
+                            } else {
+                                log.warn(`Final reviewer still requested changes for PR #${ghPr.number} after strong fixer — leaving as-is`);
+                                allTranscript.push(msg('conductor', `Strong fixer final review: still requesting changes — PR left open`));
+                            }
+                        } catch (finalRevErr: any) {
+                            log.error(`Strong fixer final review failed: ${finalRevErr.message}`);
+                        }
+                    } else {
+                        log.warn('No reviewer available for strong fixer final review — leaving PR as-is');
+                    }
+                } catch (fixerErr: any) {
+                    log.error(`Strong fixer failed: ${fixerErr.message}`);
+                    allTranscript.push(msg('conductor', `Strong fixer failed: ${fixerErr.message}`));
+                } finally {
+                    // Sub-Plan 06 §2: commit strong fixer work in finally
+                    commitWorktree(worktreeWorkspace, branchName, projectSlug, primaryStoryId, 'fix',
+                        `strong fixer pass (model: ${STRONG_FIXER_MODEL || PRINCIPAL_DEV_MODEL})`, gitContext);
                 }
             }
         }

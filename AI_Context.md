@@ -30,7 +30,7 @@
 | Layer | Technology |
 |-------|-----------|
 | Orchestration | LangGraph (`StateGraph`, `Annotation`, conditional edges, HITL interrupts) |
-| Agent Framework | LangChain (`createReactAgent`, `ChatOpenAI`, structured output) |
+| Agent Framework | LangChain (`createReactAgent`, multi-provider: `ChatOpenAI`, `ChatAnthropic`, `ChatGoogleGenerativeAI`, structured output) |
 | GitHub Integration | Octokit REST + local bare-repo stand-in for offline mode |
 | Schema Validation | Zod v4 (20+ schemas for all domain entities) |
 | Runtime | Node.js 20+ with TypeScript (tsx, no build step in dev) |
@@ -80,6 +80,7 @@ src/
     registry.ts                    # Master 20-agent registry (id, name, tag, color)
     _shared/
       agent-factory.ts             # buildAgent() wrapper for createReactAgent
+      llm-provider.ts              # Multi-provider LLM factory (OpenAI, Anthropic, Google)
       persona.ts                   # Developer prompt builder (rank/domain/languages)
       artifact.ts                  # Mission report writer (docs/agents/*.md)
       tool-loop-guard.ts           # Prevents infinite tool-call loops
@@ -175,7 +176,7 @@ dashboard/                         # Angular 19 standalone web UI
 tests/                             # Jest test suite (ts-jest)
   setup.ts                         # Polyfill crypto, load env, validate vars
   utils.ts                         # Spec discovery helpers
-  *.test.ts                        # 25+ test files
+  *.test.ts                        # 65+ test files
 
 Plans/                             # 17 historical plan documents (01-16.1)
 specs/
@@ -275,12 +276,18 @@ intake -> [codebase-analyzer] -> architect -> product-manager -> dba -> team-lea
 
 All agents are built via `buildAgent()` in `src/agents/_shared/agent-factory.ts`:
 
-1. Creates a `ChatOpenAI` instance with the configured model, temperature, and OAuth-wrapped fetch
-2. Appends the JSON schema instruction to the system prompt if `responseFormat` is provided
-3. Wraps all tools with `withLoopGuard()` for infinite-loop prevention
-4. Returns a `createReactAgent()` instance with its own `MemorySaver`
+1. Detects the LLM provider from the model name via `detectProvider()` in `src/agents/_shared/llm-provider.ts`
+2. Creates the appropriate chat model via `createChatModel()`:
+   - **OpenAI** (default, covers `gpt-*`, `o1-*`, `llama-*`, `mistral-*`, `gemma-*`): `ChatOpenAI` with OAuth-wrapped fetch chain
+   - **Anthropic** (model matches `/claude|anthropic/i`): `ChatAnthropic` with `ANTHROPIC_API_KEY`
+   - **Google** (model matches `/gemini/i`): `ChatGoogleGenerativeAI` with `GOOGLE_API_KEY`
+3. Appends the JSON schema instruction to the system prompt if `responseFormat` is provided
+4. Wraps all tools with `withLoopGuard()` for infinite-loop prevention
+5. Returns a `createReactAgent()` instance with its own `MemorySaver`
 
-The fetch chain is: `oauthFetch` -> `cassetteFetch` (if recording/replaying) -> `throttledFetch`
+The OAuth fetch chain (`oauthFetch` -> `cassetteFetch` -> `throttledFetch`) is OpenAI-specific.
+Anthropic and Google use their own HTTP handling with direct API keys.
+Set `LLM_PROVIDER_DETECTION=openai` to force all models through the OpenAI-compatible endpoint (escape hatch for proxies).
 
 ---
 
@@ -329,16 +336,27 @@ The development phase uses a sophisticated PR workflow for each branch:
 8. **Fix cycle** -- Dev agent fixes review comments; no-progress detection after 2 unchanged iterations
 9. **Escalation** -- Unresolved CRITICALs escalate to higher-rank dev agent. `selectEscalationCandidate()`
    guarantees a candidate via cross-domain fallback (Sub-Plan 07). Wrapped in `try/finally`.
-10. **Evidence-based merge decision (Sub-Plan 07)** -- `decideMerge()` evaluates gate report, integrity
+   Guarded by `PR_EXHAUSTION_STRATEGY`: skipped when `'fix-only'`.
+10. **Strong Model Fixer (Sub-Plan 20)** -- When `STRONG_FIXER_ENABLED` and PR is still open after
+    escalation (or instead of it for `'fix-only'`), a dedicated powerful model (`STRONG_FIXER_MODEL`,
+    defaults to `PRINCIPAL_DEV_MODEL`) gets comprehensive context: original task, ALL review comments
+    from all iterations, full diff, quality gate results, and integrity findings. Single pass — one fix
+    attempt, one final review. Uses `buildStrongFixerAgent()` (principal persona, higher tool budget
+    `STRONG_FIXER_MAX_TOOL_CALLS=40`). After fix, runs quality gates and a final review. If approved,
+    proceeds to merge. If not, PR remains open. Guarded by `PR_EXHAUSTION_STRATEGY`:
+    - `'escalate-then-fix'` (default): escalation first, then strong fixer if still unresolved
+    - `'fix-only'`: skip escalation, go straight to strong fixer
+    - `'escalate-only'`: no strong fixer (backward-compatible)
+11. **Evidence-based merge decision (Sub-Plan 07)** -- `decideMerge()` evaluates gate report, integrity
     findings, layout violations, blocking review comments, file change count, and quorum before allowing
     merge. Policy modes: `strict` (default, all evidence required), `permissive` (hard blockers only),
     `legacy` (pre-Plan-19 unconditional merge). Blocked PRs get status `'blocked'` and a `pr:blocked` event.
-11. **Merge ladder** -- `git merge origin/<base> --no-edit` (not rebase). On conflict: auto-resolve lockfiles
+12. **Merge ladder** -- `git merge origin/<base> --no-edit` (not rebase). On conflict: auto-resolve lockfiles
     and `package.json` via `resolveKnownConflicts()`; hand remaining conflicts to dev agent for
     `MERGE_CONFLICT_FIX_ATTEMPTS`; if still unresolved, salvage branch and report `pr:conflict`.
-12. **Evidence-based completion** -- After merge, compute `CompletionEvidence` (real file changes,
+13. **Evidence-based completion** -- After merge, compute `CompletionEvidence` (real file changes,
     declared modules present, gate passed). Assignments that merge without evidence go back to pending.
-13. **Worktree disposal** -- On success: remove worktree + delete remote branch. On failure: move worktree
+14. **Worktree disposal** -- On success: remove worktree + delete remote branch. On failure: move worktree
     to `.worktrees-failed/` for salvage, export `git format-patch` to `<outputPath>/salvage/`, do NOT
     delete remote branch. Cap retained failed worktrees at `WORKTREE_SALVAGE_MAX`.
 
@@ -874,6 +892,7 @@ The system evolved through 16+ iteration plans. Key milestones:
 | 14 | Pipeline stability, rate limiting, quality gates |
 | 15 | Coding conventions integration |
 | 16 | Correctness, verification, cost, observability, offline determinism |
+| 20 | Multi-provider LLM support (Anthropic, Google alongside OpenAI) and strong model PR fixer |
 
 When referenced in code comments, these plans are cited as "fixes A1", "fixes A2", etc. (referring to sub-plans within Plan 16).
 

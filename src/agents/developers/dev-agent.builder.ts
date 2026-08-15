@@ -10,7 +10,7 @@ import { DeveloperOutputSchema } from './schemas/dev-output.schema';
 import { createWorkspaceTools } from '../../tools/fs/workspace-tools';
 import { createGitTools } from '../../tools/git/git-tools';
 import { createShellTool } from '../../tools/shell/shell-tools';
-import { PRINCIPAL_DEV_MODEL, SENIOR_DEV_MODEL, JUNIOR_DEV_MODEL, DEV_GIT_TOOLS_ENABLED } from '../../config';
+import { PRINCIPAL_DEV_MODEL, SENIOR_DEV_MODEL, JUNIOR_DEV_MODEL, DEV_GIT_TOOLS_ENABLED, STRONG_FIXER_MODEL, STRONG_FIXER_MAX_TOOL_CALLS } from '../../config';
 import type { GitContext } from '../_shared/base-schemas';
 import type { DevAgentEntry } from './registry';
 
@@ -75,5 +75,57 @@ export function buildDevAgent(
         model: getModelForRank(entry.rank),
         phase: 'development',
         maxToolCalls,
+    });
+}
+
+/**
+ * Build a strong fixer agent — a principal-rank dev agent using a dedicated
+ * powerful model (STRONG_FIXER_MODEL) to fix PRs that exhausted their review
+ * iterations (Sub-Plan 20).
+ *
+ * Uses the principal persona for maximum capability, workspace + shell tools
+ * (same as regular dev agents), and a higher tool-call budget.
+ *
+ * @param apiKey          LLM access token
+ * @param workspaceRoot   The generated-project workspace directory
+ * @param gitContext      Git context for tools
+ * @param baseBranch      Base branch for git tools
+ * @param conventionFiles Convention files to inject into the prompt
+ * @param isMaintainMode  When true, appends maintain-mode instructions
+ */
+export function buildStrongFixerAgent(
+    apiKey: string,
+    workspaceRoot: string,
+    gitContext?: GitContext | null,
+    baseBranch?: string,
+    conventionFiles?: string[],
+    isMaintainMode?: boolean,
+) {
+    const fixerModel = STRONG_FIXER_MODEL || PRINCIPAL_DEV_MODEL;
+
+    const systemPrompt = buildDevPersona({
+        rank: 'principal',
+        domain: 'fullstack',
+        languages: ['typescript', 'javascript', 'python', 'java', 'go'],
+        tag: '[STRONG-FIXER]',
+        conventionFiles,
+        isMaintainMode,
+    });
+
+    const tools = [
+        ...createWorkspaceTools(workspaceRoot),
+        ...(DEV_GIT_TOOLS_ENABLED ? createGitTools(workspaceRoot, gitContext, baseBranch) : []),
+        createShellTool(workspaceRoot),
+    ];
+
+    return buildAgent(apiKey, {
+        id: 'strong-fixer',
+        systemPrompt,
+        tools,
+        responseFormat: DeveloperOutputSchema,
+        temperature: 0.2,
+        model: fixerModel,
+        phase: 'development',
+        maxToolCalls: STRONG_FIXER_MAX_TOOL_CALLS,
     });
 }
