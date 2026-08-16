@@ -455,7 +455,27 @@ export async function dispatchDevelopers(
         }
     }
 
-    log.info(`Dispatch complete: ${fileChanges.length} total file changes, ${pullRequests.length} PRs, ${artifacts.length} artifacts, ${newlyCompletedIds.length} completed assignments`);
+    // Merged vs skipped matters: a `PR-SKIPPED-*` placeholder is recorded for every
+    // branch whose dev agent produced no commits, so a raw PR count can read "16 PRs"
+    // for a round that delivered nothing at all (Plan 21, E3).
+    const mergedPrs = pullRequests.filter(pr => pr.status === 'merged').length;
+    const skippedPrs = pullRequests.filter(pr => pr.id.startsWith('PR-SKIPPED-')).length;
+    log.info(`Dispatch complete: ${fileChanges.length} total file changes, ${pullRequests.length} PRs (${mergedPrs} merged, ${skippedPrs} skipped), ${artifacts.length} artifacts, ${newlyCompletedIds.length} completed assignments`);
+
+    // Systemic failure: every branch in the round produced nothing. Individually these
+    // surface only as per-branch WARNs, which is how 34 identical provider 400s scrolled
+    // past unnoticed. Escalate to ERROR + transcript so runaway detection can halt.
+    const allEmpty = pullRequests.length > 0 && mergedPrs === 0 && fileChanges.length === 0;
+    if (allEmpty) {
+        log.error(`ALL ${pullRequests.length} branch(es) in this dispatch round produced zero commits and zero merged PRs — developer agents are systemically failing (check provider errors above)`);
+        transcript.push({
+            timestamp: new Date().toISOString(),
+            agentId: 'dispatcher',
+            phase: 'development' as PhaseName,
+            message: `Zero-output dispatch round: ${pullRequests.length} branch(es), 0 merged PRs, 0 file changes`,
+        });
+    }
+
     return {
         fileChanges, artifacts, transcript, pullRequests, tokenUsage,
         completedAssignmentIds: newlyCompletedIds,

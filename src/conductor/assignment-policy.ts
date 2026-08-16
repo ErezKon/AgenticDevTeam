@@ -158,6 +158,71 @@ export function namespaceBugfixAssignments(
     }));
 }
 
+// ─── Story-id Sanitisation (Plan 21, E5) ────────────────────────────────────
+
+/** Matches synthetic QA bug ids that embed a real story id, e.g. `QA-story-untested-US-001`. */
+const QA_BUG_ID_WITH_STORY = /^QA-.*?-(US-\d+)$/;
+
+/**
+ * Force every assignment's `storyId` / `additionalStoryIds` to reference a real
+ * user story.
+ *
+ * Test-sufficiency bugs get synthetic ids (`QA-no-tests`, `QA-story-untested-US-001`)
+ * and bug-fix triage hands them to the Team Leader, which copies the BUG id into
+ * `assignment.storyId`. The developer then silently receives no acceptance
+ * criteria while the prompt claims it has them.
+ *
+ * Resolution ladder per id:
+ *  1. known story id                      -> keep
+ *  2. matches a bug that carries `storyId` -> remap to the bug's story
+ *  3. matches `QA-…-US-NNN` and that story exists -> remap (belt for pre-existing state)
+ *  4. otherwise                            -> drop (`storyId` becomes `''`) and warn
+ *
+ * Dropping beats keeping a phantom: callers filter falsy ids, so the story
+ * section is omitted entirely instead of claiming criteria that do not exist.
+ *
+ * @returns the sanitised assignments plus the unresolvable ids (for logging).
+ */
+export function sanitizeAssignmentStoryIds(
+    assignments: Assignment[],
+    userStories: Array<{ id: string }>,
+    bugs: Bug[],
+): { assignments: Assignment[]; dropped: string[] } {
+    const validIds = new Set(userStories.map(s => s.id));
+    const bugStoryIds = new Map<string, string>();
+    for (const b of bugs) {
+        if (b.storyId && validIds.has(b.storyId)) bugStoryIds.set(b.id, b.storyId);
+    }
+
+    const dropped: string[] = [];
+
+    const resolve = (id: string | undefined): string | null => {
+        if (!id) return null;
+        if (validIds.has(id)) return id;
+
+        const fromBug = bugStoryIds.get(id);
+        if (fromBug) return fromBug;
+
+        const m = QA_BUG_ID_WITH_STORY.exec(id);
+        if (m && validIds.has(m[1])) return m[1];
+
+        dropped.push(id);
+        return null;
+    };
+
+    const sanitized = assignments.map(a => {
+        const primary = resolve(a.storyId);
+        const extras = [...new Set(
+            (a.additionalStoryIds ?? [])
+                .map(resolve)
+                .filter((id): id is string => id !== null && id !== primary),
+        )];
+        return { ...a, storyId: primary ?? '', additionalStoryIds: extras };
+    });
+
+    return { assignments: sanitized, dropped: [...new Set(dropped)] };
+}
+
 // ─── Bug Deduplication ──────────────────────────────────────────────────────
 
 /**

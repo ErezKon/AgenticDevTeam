@@ -272,6 +272,46 @@ describe('detectUnrecoverable', () => {
         expect(unrecoverable).toBe(false);
     });
 
+    // Plan 21, E3: developmentNode now writes dispatchRounds with MERGED PR
+    // counts only. A `PR-SKIPPED-*` placeholder is not progress.
+    it('does not count skipped PR placeholders as progress', () => {
+        const state = makeMinimalState({
+            phase: 'intake' as any,
+            dispatchRounds: [
+                { fileChanges: 0, prs: 0, completed: 0 },
+                { fileChanges: 0, prs: 0, completed: 0 },
+            ],
+            pullRequests: [
+                { id: 'PR-SKIPPED-feat/a', prNumber: 0, status: 'closed', branchName: 'feat/a', assignmentIds: ['A'] } as any,
+            ],
+        });
+        const { unrecoverable, reason } = detectUnrecoverable(state);
+        expect(unrecoverable).toBe(true);
+        expect(reason).toContain('consecutive dispatch rounds');
+    });
+
+    it('resets when a round lands a merged PR', () => {
+        const state = makeMinimalState({
+            phase: 'intake' as any,
+            dispatchRounds: [
+                { fileChanges: 0, prs: 0, completed: 0 },
+                { fileChanges: 0, prs: 1, completed: 1 },
+            ],
+        });
+        expect(detectUnrecoverable(state).unrecoverable).toBe(false);
+    });
+
+    it('resets when a round lands file changes', () => {
+        const state = makeMinimalState({
+            phase: 'intake' as any,
+            dispatchRounds: [
+                { fileChanges: 3, prs: 0, completed: 0 },
+                { fileChanges: 0, prs: 0, completed: 0 },
+            ],
+        });
+        expect(detectUnrecoverable(state).unrecoverable).toBe(false);
+    });
+
     it('detects sourceless workspace after development', () => {
         const state = makeMinimalState({
             phase: 'qa' as any,

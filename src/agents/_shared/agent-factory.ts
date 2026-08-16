@@ -6,12 +6,12 @@ import { MemorySaver } from '@langchain/langgraph';
 import { createAgent, createMiddleware } from 'langchain';
 import type { StructuredToolInterface } from '@langchain/core/tools';
 import { z } from 'zod';
-import { LLM_BASE_URL, LLM_MODEL, RESPONSE_SCHEMA_COMPACT, RESPONSE_SCHEMA_STRIP_ALL_DESCRIPTIONS, HISTORY_COMPACTION_ENABLED, LLM_JSON_MODE, LLM_MAX_OUTPUT_TOKENS, LLM_REQUEST_TIMEOUT_MS, OPENAI_API_KEY } from '../../config';
+import { LLM_BASE_URL, LLM_MODEL, RESPONSE_SCHEMA_COMPACT, RESPONSE_SCHEMA_STRIP_ALL_DESCRIPTIONS, HISTORY_COMPACTION_ENABLED, SANITIZE_STREAM_BLOCKS, LLM_JSON_MODE, LLM_MAX_OUTPUT_TOKENS, LLM_REQUEST_TIMEOUT_MS, OPENAI_API_KEY } from '../../config';
 import { getAccessToken } from '../../utils/oauth-auth.util';
 import { throttledFetch } from '../../utils/llm-throttle';
 import { cassetteFetch, LLM_CASSETTE_MODE } from '../../utils/llm-cassette';
 import { withLoopGuard } from './tool-loop-guard';
-import { compactHistory, recordCompaction } from './history-compactor';
+import { compactHistory, recordCompaction, sanitizeStreamingContentBlocks } from './history-compactor';
 import { TokenUsageCallbackHandler } from '../../utils/token-callback';
 import { createChatModel, detectProvider } from './llm-provider';
 import { getLogger } from '../../utils/logger';
@@ -112,6 +112,8 @@ export function buildAgent(apiKey: string, cfg: AgentConfig) {
         baseURL: LLM_BASE_URL,
         customFetch,
         jsonMode: useJsonMode,
+        topP: cfg.topP,
+        topK: cfg.topK,
     });
 
     if (useJsonMode) {
@@ -145,8 +147,19 @@ export function buildAgent(apiKey: string, cfg: AgentConfig) {
     // only what the LLM sees — the persisted graph state keeps the full history.
     const historyCompaction = createMiddleware({
         name: 'history-compaction',
+        // Also runs the streaming-residue sanitiser (Plan 21, A2) — hence it is
+        // registered whenever EITHER feature flag is on.
         wrapModelCall: (request, handler) => {
-            const { messages, stats } = compactHistory(request.messages);
+            let incoming = request.messages;
+            if (SANITIZE_STREAM_BLOCKS) {
+                const sanitized = sanitizeStreamingContentBlocks(incoming);
+                if (sanitized.blocksDropped > 0) {
+                    factoryLog.warn(`${cfg.id}: dropped ${sanitized.blocksDropped} streaming residue content block(s) before the LLM call`);
+                }
+                incoming = sanitized.messages;
+            }
+            if (!HISTORY_COMPACTION_ENABLED) return handler({ ...request, messages: incoming });
+            const { messages, stats } = compactHistory(incoming);
             recordCompaction(stats);
             if (stats.originalChars !== stats.compactedChars) {
                 factoryLog.debug(
@@ -163,7 +176,7 @@ export function buildAgent(apiKey: string, cfg: AgentConfig) {
         checkpointer,
         systemPrompt: prompt,
         tools: guardedTools,
-        middleware: HISTORY_COMPACTION_ENABLED ? [historyCompaction] : [],
+        middleware: (HISTORY_COMPACTION_ENABLED || SANITIZE_STREAM_BLOCKS) ? [historyCompaction] : [],
     });
 
     // Expose isCeilingReached and setInvocationId on the agent so callers

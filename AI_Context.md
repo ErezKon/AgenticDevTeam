@@ -71,7 +71,7 @@ src/
     quality-gates.ts               # Multi-language build/lint/test gates
     security-gates.ts              # Secret scan + dependency audit + licence check
     workspace-sync.ts              # Git sync after squash merges
-    assignment-policy.ts           # Prevent re-dispatch of completed assignments
+    assignment-policy.ts           # Prevent re-dispatch of completed assignments + sanitizeAssignmentStoryIds
     review-policy.ts               # Fail-closed review: ReviewOutcome, decideMerge, escalation, quorum (Sub-Plan 07)
     devops-verify.ts               # Real Docker build/run/health-check
     file-checkpointer.ts           # Persistent checkpoints for crash recovery
@@ -81,6 +81,7 @@ src/
     _shared/
       agent-factory.ts             # buildAgent() wrapper for createAgent
       llm-provider.ts              # Multi-provider LLM factory (OpenAI, Anthropic, Google)
+      history-compactor.ts         # ReAct history compaction + streaming-residue sanitiser
       persona.ts                   # Developer prompt builder (rank/domain/languages)
       artifact.ts                  # Mission report writer (docs/agents/*.md)
       tool-loop-guard.ts           # Prevents infinite tool-call loops
@@ -98,7 +99,7 @@ src/
         file-change.schema.ts      # FileChange
         db-design.schema.ts        # DbDesign (entities, ERD)
         testing.schema.ts          # TestPlan, TestReport, TestCase
-        bug.schema.ts              # Bug (severity, steps)
+        bug.schema.ts              # Bug (severity, steps, optional storyId)
         devops-plan.schema.ts      # DevOpsPlan
         approval.schema.ts         # Approval (HITL)
         artifact-ref.schema.ts     # ArtifactRef
@@ -147,12 +148,12 @@ src/
     structured-output.ts           # JSON extraction + Zod validation + repair
     event-bus.ts                   # Typed singleton event bus (12 event types)
     token-tracker.ts               # Token consumption tracker (singleton)
-    token-callback.ts              # LangChain callback for token recording
-    token-usage-extractor.ts       # Extract usage from AIMessage metadata
+    token-callback.ts              # LangChain callback for token recording (two-tier provider lookup)
+    token-usage-extractor.ts       # Shared usage normalisation (normaliseUsage/sumUsageMetadata) + per-invocation aggregation
     token-report.ts                # HTML + JSON token usage report generator
     cost.ts                        # USD cost estimation per model
     run-snapshot.ts                # state.json + run-manifest.json writer
-    git-exec.ts                    # Centralized git command execution
+    git-exec.ts                    # Centralized git command execution (signal/exit-code diagnostics, network timeouts)
     coding-conventions.ts          # Convention file resolution + deployment
     traceability.ts                # Requirements traceability matrix
     codebase-analysis-writer.ts    # Write analysis markdown
@@ -176,9 +177,9 @@ dashboard/                         # Angular 19 standalone web UI
 tests/                             # Jest test suite (ts-jest)
   setup.ts                         # Polyfill crypto, load env, validate vars
   utils.ts                         # Spec discovery helpers
-  *.test.ts                        # 65+ test files
+  *.test.ts                        # 70+ test files
 
-Plans/                             # 17 historical plan documents (01-16.1)
+Plans/                             # Historical plan documents (01 … 21) + implementation reports
 specs/
   new/                             # Greenfield requirement specs (e.g. pacman.md)
   existing/                        # Maintain-mode specs (e.g. scientific-calculator.txt)
@@ -213,9 +214,9 @@ intake -> [codebase-analyzer] -> architect -> product-manager -> dba -> team-lea
 | 3 | **Product Manager** | `productManagerNode` | Convert architecture + epics into user stories (with acceptance criteria) and granular tasks |
 | 4 | **DBA** | `dbaNode` | Design database entities, relationships, indexes, migration scripts, ERD diagram |
 | 5 | **Team Leader** | `teamLeaderNode` | Assign tasks to developers with rank-based reviewer selection, branch naming, dependencies |
-| 6 | **Development** | `developmentNode` | Fan-out assignments to dev agents via `dispatchDevelopers` with topological sorting and concurrency control. Each branch goes through the full PR workflow |
+| 6 | **Development** | `developmentNode` | Fan-out assignments to dev agents via `dispatchDevelopers` with topological sorting and concurrency control. Each branch goes through the full PR workflow. Appends one `DispatchRound` to `state.dispatchRounds` counting **merged** PRs only, so `detectUnrecoverable()` can see a zero-output round |
 | 7 | **QA** | `qaNode` | QA Lead creates test plan -> QA Unit writes tests -> **Real test runner** parses runner output (authoritative signal; agent self-report is advisory) -> Test sufficiency gate (min counts, coverage floor, per-story coverage) -> Quality gates (deterministic build/lint/test) -> Security gates (secrets, deps, licences) -> AC coverage gate. QA crash synthesises a bug; testReports is never empty after qaNode. |
-| 8 | **Bug-fix Triage** | `bugfixTriageNode` | Team Leader re-assigns critical/major bugs; namespaced IDs prevent collision |
+| 8 | **Bug-fix Triage** | `bugfixTriageNode` | Runs `detectUnrecoverable()` first (halts the QA→triage→dev loop under `RUN_FAIL_POLICY=halt`); Team Leader re-assigns critical/major bugs; namespaced IDs prevent collision; `sanitizeAssignmentStoryIds()` guarantees every `storyId` references a real user story |
 | 9 | **DevOps** | `devopsNode` | Generate Dockerfiles, compose, K8s manifests; fallback Dockerfile generator when agent fails (`DEVOPS_FALLBACK_ENABLED`); always overwrite agent claims with `verifyDeployment` result; synthesise `DEPLOY-BUILD-FAILED`/`DEPLOY-UNHEALTHY` bugs |
 | 9b | **E2E** | `e2eNode` | Playwright MCP browser tests with preflight check. `e2eStatus` state channel: `passed`/`failed`/`skipped-no-services`/`error`. Falls back to `runSmokeTest` when Playwright unavailable or no Docker services but a web root exists (`E2E_ALLOW_LOCAL_SERVER`). Catch path synthesises `E2E-INFRA-FAILED` bug. |
 | 10 | **Finalize** | `finalizeNode` | Tear down containers, write summary, token report (HTML + JSON), traceability matrix, state snapshot, run manifest |
@@ -284,6 +285,18 @@ All agents are built via `buildAgent()` in `src/agents/_shared/agent-factory.ts`
 3. Appends the JSON schema instruction to the system prompt if `responseFormat` is provided
 4. Wraps all tools with `withLoopGuard()` for infinite-loop prevention
 5. Returns a `createAgent()` instance with its own `MemorySaver` and a `history-compaction` middleware
+
+### Provider Transport Invariants (Plan 21)
+
+These are load-bearing. Changing any of them reintroduces a failure mode that is silent, total, and billable.
+
+| Invariant | Where | Why |
+|-----------|-------|-----|
+| `ChatAnthropic` is created **without** `streaming` | `llm-provider.ts` | Streamed chunk reassembly left `input_json_delta` residue in `AIMessage.content` -> `400 … tool_use.id: Field required` on the next turn (every dev/reviewer agent, zero files written). Non-streaming also restores `llmOutput.usage`. Nothing consumes a token stream. |
+| JSON mode uses `model.withConfig({ response_format })`, **never** `modelKwargs` | `llm-provider.ts` | `modelKwargs` is spread verbatim into the request body. `*codex*` / `gpt-5.x-pro` route through the OpenAI **Responses API**, which rejects top-level `response_format`. `withConfig` lets LangChain emit `response_format` (Chat Completions) or `text.format` (Responses). |
+| `sanitizeStreamingContentBlocks()` runs before `compactHistory()` on every call | `history-compactor.ts`, wired in `agent-factory.ts` | Defence-in-depth against corrupt histories, including ones restored from a checkpoint written by an older provider package. Operates on a copy; `tool_calls` is untouched (the adapter re-materialises `tool_use` blocks from it). Flag: `SANITIZE_STREAM_BLOCKS`. |
+| `handleLLMEnd` reads `llmOutput.{tokenUsage,token_usage,usage,estimatedTokenUsage}`, then falls back to `generations[].message.usage_metadata` | `token-callback.ts` + `token-usage-extractor.ts` | No single field covers every transport. Reading only tier 1 recorded 5 token records for a 60+ call run, silently disabling `MAX_RUN_COST_USD`. Tier 1 wins when present, so nothing is double-counted. Both paths share `normaliseUsage` / `sumUsageMetadata`. |
+| `AgentConfig.topP` / `topK` are forwarded to `createChatModel()` | `agent-factory.ts` | They were accepted by 10 agent builders and silently dropped. |
 
 OpenAI auth priority: `OPENAI_API_KEY` (direct API key, no custom fetch chain) > OAuth client-credentials flow (`oauthFetch` -> `cassetteFetch` -> `throttledFetch`).
 Anthropic and Google use their own HTTP handling with direct API keys.
@@ -537,7 +550,11 @@ Single deterministic function that evaluates whether the product is acceptable.
   (all required pass but optional fail), or `'inconclusive'` (some required criteria could not execute).
 - **`detectUnrecoverable(state)`** — detects when no further pipeline work can change the outcome:
   N consecutive zero-progress dispatch rounds, merge-conflict blocked branches, sourceless workspaces,
-  or bugs attempted 2+ times that remain unresolved.
+  or bugs attempted 2+ times that remain unresolved. Called at the **top of `bugfixTriageNode`** as
+  well as from the acceptance gate — otherwise `unrecoverable` is only ever set post-e2e and the
+  QA → triage → development loop can never halt itself (Plan 21, E3).
+  Its zero-progress check reads `state.dispatchRounds`, which **`developmentNode` must keep writing**;
+  `prs` there counts merged PRs only, never `PR-SKIPPED-*` placeholders.
 - **`haltIfUnrecoverable()`** — checked in developmentNode, qaNode, devopsNode to skip early under
   `RUN_FAIL_POLICY='halt'`.
 - **`acceptanceBlockersToBugs()`** — converts failed required criteria into `ACCEPT-*` bugs for the

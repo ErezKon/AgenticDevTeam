@@ -10,6 +10,7 @@ export const BugSchema = z.object({
     expectedBehavior: z.string().describe('What should happen'),
     actualBehavior: z.string().describe('What actually happens'),
     failingTestId: z.string().optional().describe('ID of the failing test that found this'),
+    storyId: z.string().optional().describe('ID of the user story this bug relates to (e.g. "US-001")'),
     suspectedArea: z.string().describe('Code area likely responsible'),
     suggestedAssignee: z.string().optional().describe('Suggested developer agent to fix'),
     reportedBy: z.string().describe('QA agent ID that reported it'),

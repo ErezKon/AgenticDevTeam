@@ -48,7 +48,7 @@ import { gitExec, gitPush, findGitRoot } from '../utils/git-exec';
 import { GITHUB_MODE } from '../utils/github-local';
 import { setLocalBareRepoPath } from './pr-workflow';
 import { syncWorkspaceToBranch, looksSourceless } from './workspace-sync';
-import { selectPendingAssignments, dedupeBugs, namespaceBugfixAssignments } from './assignment-policy';
+import { selectPendingAssignments, dedupeBugs, namespaceBugfixAssignments, sanitizeAssignmentStoryIds } from './assignment-policy';
 import { verifyDeployment, teardownDeployment } from './devops-verify';
 import { runQualityGates, gateReportToTestReport, synthesiseGateBugs, detectStackRoots } from './quality-gates';
 import { runProductVerification } from './product-verify';
@@ -90,7 +90,8 @@ import { startRunBudget, getBudgetStatus, getEffectiveLimits } from '../utils/ru
 import { emitRunEvent } from '../utils/event-bus';
 import { writeStateSnapshot, writeRunManifest } from '../utils/run-snapshot';
 import { buildTraceabilityReport, renderTraceabilityMarkdown } from '../utils/traceability';
-import { evaluateAcceptance, haltIfUnrecoverable, acceptanceBlockersToBugs, acceptanceReportToMarkdown } from './acceptance-gate';
+import { evaluateAcceptance, haltIfUnrecoverable, detectUnrecoverable, acceptanceBlockersToBugs, acceptanceReportToMarkdown } from './acceptance-gate';
+import type { DispatchRound } from './acceptance-gate';
 import { initLedger, appendLedger } from '../utils/run-ledger';
 import { generateRunReport } from '../utils/ledger-report';
 import { checkInvariants } from './run-invariants';
@@ -1295,9 +1296,24 @@ export async function developmentNode(state: ProjectStateType): Promise<Partial<
         }
     }
 
-    emitRunEvent('phase:end', { phase: 'development', nextPhase: 'qa', fileChanges: result.fileChanges.length, prs: result.pullRequests.length });
+    // Record this dispatch round so detectUnrecoverable() can spot a runaway
+    // zero-output loop. Only MERGED PRs count — `PR-SKIPPED-*` placeholders are
+    // recorded for no-commit branches and would otherwise mask total failure
+    // (Plan 21, E3: this channel was declared but never written).
+    const mergedPrCount = result.pullRequests.filter(pr => pr.status === 'merged').length;
+    const round: DispatchRound = {
+        fileChanges: result.fileChanges.length,
+        prs: mergedPrCount,
+        completed: result.completedAssignmentIds.length,
+    };
+    if (round.fileChanges === 0 && round.prs === 0) {
+        devLog.error(`Dispatch round produced no file changes and no merged PRs (${result.pullRequests.length} PR record(s), all skipped/unmerged)`);
+    }
+
+    emitRunEvent('phase:end', { phase: 'development', nextPhase: 'qa', fileChanges: result.fileChanges.length, prs: mergedPrCount });
     return {
         ...rerunUpdate,
+        dispatchRounds: [round],
         fileChanges: result.fileChanges,
         artifacts: result.artifacts,
         pullRequests: result.pullRequests,
@@ -1419,9 +1435,14 @@ export async function qaNode(state: ProjectStateType): Promise<Partial<ProjectSt
             }
         }
     } catch (err: any) {
-        qaLog.error(`QA Lead failed: ${err.message}`);
+        // Log the model name and the provider's error body on one line — the
+        // pacmanclaude run needed a package dive to work out that the 400
+        // "Unsupported parameter: 'response_format'" came from QA_MODEL routing
+        // through the OpenAI Responses API (Plan 21, E2).
+        const providerBody = err?.error ? JSON.stringify(err.error) : (err?.response?.data ? JSON.stringify(err.response.data) : '');
+        qaLog.error(`QA Lead failed [model=${QA_MODEL}${err?.status ? `, status=${err.status}` : ''}]: ${err.message}${providerBody ? ` | provider: ${providerBody}` : ''}`);
         if (err?.stack) qaLog.error(err.stack);
-        transcript.push(msg('qa-lead', 'qa', `QA Lead failed: ${err.message}`));
+        transcript.push(msg('qa-lead', 'qa', `QA Lead failed [model=${QA_MODEL}]: ${err.message}`));
     }
 
     // 7b. QA Unit — write & run unit/integration tests
@@ -1792,6 +1813,28 @@ export async function bugfixTriageNode(state: ProjectStateType): Promise<Partial
     const iteration = state.iteration.bugfix + 1;
     bugLog.info(`Bug-fix triage iteration ${iteration}/${getEffectiveLimits().maxBugfixIterations}`);
 
+    // ── Runaway guard (Plan 21, E3) ──────────────────────────────────────
+    // `unrecoverable` was previously only ever set after e2e, so the
+    // haltIfUnrecoverable() checks in development/qa/devops could never fire
+    // inside the QA -> triage -> development loop — which is exactly the loop
+    // that ran away. Detect here, at the loop's entry point.
+    const triageHalt = detectUnrecoverable(state);
+    if (triageHalt.unrecoverable) {
+        bugLog.error(`Run is unrecoverable: ${triageHalt.reason}`);
+        const update: Partial<ProjectStateType> = {
+            unrecoverable: { flag: true, reason: triageHalt.reason ?? 'unrecoverable' },
+            phase: 'bugfix-triage' as PhaseName,
+            transcript: [msg('conductor', 'bugfix-triage', `Unrecoverable: ${triageHalt.reason}`)],
+        };
+        if (RUN_FAIL_POLICY === 'halt') {
+            bugLog.warn('RUN_FAIL_POLICY=halt — skipping bug-fix triage, no new assignments will be dispatched');
+            emitRunEvent('phase:end', { phase: 'bugfix-triage', nextPhase: 'devops', skipped: true });
+            return { ...update, iteration: { bugfix: iteration } };
+        }
+        // Non-halt policies: flag it so downstream gates report truthfully, but continue.
+        bugLog.warn(`RUN_FAIL_POLICY=${RUN_FAIL_POLICY} — continuing triage despite unrecoverable state`);
+    }
+
     // ── Deduplicate and filter already-fixed bugs ────────────────────────
     const fixedSet = new Set(state.fixedBugIds ?? []);
     const openBugs = dedupeBugs(state.bugs)
@@ -1819,7 +1862,11 @@ export async function bugfixTriageNode(state: ProjectStateType): Promise<Partial
             { title: 'Open Bugs', body: JSON.stringify(openBugs, null, 2), priority: 1 },
             { title: 'Architecture', body: summariseArchitecture(state.architecture), priority: 2 },
             { title: 'Existing Assignments', body: state.assignments.map(a => `- ${a.id} [${a.devAgentId}]: ${a.description?.slice(0, 100)}`).join('\n'), priority: 3 },
+            // Without this the LLM copies the synthetic BUG id into `storyId` (Plan 21, E5).
+            { title: 'Valid Story IDs', body: (state.userStories ?? []).map(s => `- ${s.id}: ${s.iWant}`).join('\n') || '(no user stories)', priority: 1 },
             { title: 'Instructions', body: `Please create NEW assignments to fix these bugs. Assign each bug to the most appropriate developer.
+
+Every assignment's "storyId" MUST be one of the ids listed under "Valid Story IDs" above. NEVER put a bug id (e.g. "QA-no-tests", "BUG-003") in "storyId" — bug ids belong in the description.
 
 IMPORTANT: When triaging lint errors about "unused imports" or "defined but never used" in the application entry point file (main.ts, App.tsx, index.ts, server.ts, etc.):
 - If the unused imports are core application components (services, managers, UI components, controllers), the fix is NOT to remove them — it is to ADD the integration code that uses them (game loop, app bootstrap, route mounting, etc.)
@@ -1834,7 +1881,18 @@ IMPORTANT: When triaging lint errors about "unused imports" or "defined but neve
 
     // ── Namespace bugfix assignment ids to avoid collisions ──────────────
     const rawAssignments = output.assignments ?? [];
-    const namespacedAssignments = namespaceBugfixAssignments(rawAssignments, iteration);
+    const namespaced = namespaceBugfixAssignments(rawAssignments, iteration);
+
+    // ── Story-id integrity (Plan 21, E5) ─────────────────────────────────
+    // The prompt asks for real story ids; this is the guarantee. An unresolvable
+    // id is dropped, not passed through — a phantom id makes the developer prompt
+    // claim acceptance criteria that were never supplied.
+    const { assignments: namespacedAssignments, dropped } = sanitizeAssignmentStoryIds(
+        namespaced, state.userStories ?? [], state.bugs ?? [],
+    );
+    if (dropped.length > 0) {
+        bugLog.warn(`Dropped ${dropped.length} unresolvable storyId reference(s) from bugfix assignments: ${dropped.join(', ')}`);
+    }
     bugLog.info(`Created ${namespacedAssignments.length} bugfix assignments (iteration ${iteration})`);
 
     // Track which bugs are being attempted (not fixed — fix is verified later)

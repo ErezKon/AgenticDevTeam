@@ -118,6 +118,68 @@ function stubToolContent(m: ToolMessage): string {
     return `[${name} -> ${contentLen} chars, elided]`;
 }
 
+// ─── Streaming content-block sanitiser (Plan 21, E1) ────────────────────────
+
+/**
+ * True for content-block types that are streaming *deltas* and must never be
+ * re-sent to a provider (`input_json_delta`, `text_delta`, `thinking_delta`, …).
+ */
+function isDeltaBlock(type: unknown): boolean {
+    return typeof type === 'string' && type.endsWith('_delta');
+}
+
+/** Content-block types that carry a provider-assigned tool-call id. */
+const TOOL_USE_BLOCK_TYPES = new Set(['tool_use', 'server_tool_use']);
+
+/**
+ * Strip streaming residue from `AIMessage` content blocks.
+ *
+ * When `ChatAnthropic` runs with `streaming: true`, chunk reassembly can leave
+ * `input_json_delta` blocks — and `tool_use` blocks with an empty `id` — inside
+ * `AIMessage.content`. Older `@langchain/anthropic` re-sent those verbatim,
+ * producing `400 … messages.N.content.M.tool_use.id: Field required` on the
+ * *next* turn, which killed every dev and reviewer agent in the pacmanclaude run.
+ *
+ * `@langchain/anthropic@1.5.x` fixes this at the adapter level, but the failure
+ * mode is silent, total, and billable — and the adapter fix does not cover
+ * histories restored from a checkpoint that were corrupted by an older version.
+ * So we sanitise defensively on every model call.
+ *
+ * `tool_calls` is deliberately left untouched: the provider adapter
+ * re-materialises the `tool_use` blocks from it.
+ *
+ * Operates on a **copy** — the persisted graph state is never mutated.
+ */
+export function sanitizeStreamingContentBlocks(
+    messages: BaseMessage[],
+): { messages: BaseMessage[]; blocksDropped: number } {
+    let blocksDropped = 0;
+    const out = messages.map(m => {
+        if (!isAIMessage(m) || !Array.isArray(m.content)) return m;
+
+        const cleaned = (m.content as unknown[]).filter(block => {
+            if (block === null || typeof block !== 'object') return true;
+            const type = (block as { type?: unknown }).type;
+            if (isDeltaBlock(type)) { blocksDropped++; return false; }
+            if (typeof type === 'string' && TOOL_USE_BLOCK_TYPES.has(type)) {
+                const id = (block as { id?: unknown }).id;
+                if (typeof id !== 'string' || id.length === 0) { blocksDropped++; return false; }
+            }
+            return true;
+        });
+
+        if (cleaned.length === (m.content as unknown[]).length) return m;
+
+        return new AIMessage({
+            content: cleaned as any,
+            ...(m.tool_calls?.length ? { tool_calls: m.tool_calls } : {}),
+            id: m.id,
+        });
+    });
+
+    return { messages: blocksDropped > 0 ? out : messages, blocksDropped };
+}
+
 // ─── Main ───────────────────────────────────────────────────────────────────
 
 /**

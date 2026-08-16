@@ -16,6 +16,7 @@
 - [Git Branching & PR Workflow](#git-branching--pr-workflow)
 - [Multi-Repo Project Targeting](#multi-repo-project-targeting)
 - [Context Compaction & Token Optimization](#context-compaction--token-optimization)
+- [Provider Transport & Token Accounting](#provider-transport--token-accounting)
 - [Project Structure](#project-structure)
 - [Prerequisites](#prerequisites)
 - [Installation & Setup](#installation--setup)
@@ -521,6 +522,40 @@ The finalize summary includes a `History Compaction` block reporting total chars
 
 ---
 
+## Provider Transport & Token Accounting
+
+Mixed-provider runs (Claude + GPT + Gemini) exposed three transport-level failures that were silent, total, and billable. All three are now handled centrally in `src/agents/_shared/llm-provider.ts` and `src/utils/token-callback.ts`.
+
+### Anthropic: no streaming
+
+`ChatAnthropic` is constructed **without** `streaming`. Nothing in the pipeline consumes a token stream (every call site uses `agent.invoke()`), while streamed responses left `input_json_delta` residue in `AIMessage.content`, which the provider rejected on the next turn with `400 … tool_use.id: Field required`.
+
+As defence-in-depth — and to cover histories restored from a checkpoint that were written by an older provider package — the `history-compaction` middleware runs `sanitizeStreamingContentBlocks()` before every LLM call. It drops `*_delta` blocks and id-less `tool_use` / `server_tool_use` blocks from a **copy** of the history, leaving `tool_calls` (and the persisted state) untouched. Toggle with `SANITIZE_STREAM_BLOCKS`.
+
+### OpenAI: JSON mode works on both APIs
+
+`@langchain/openai` routes `*codex*` and `gpt-5.x-pro` models through the **Responses API**, which rejects a top-level `response_format`. JSON mode is therefore applied as a call option via `model.withConfig({ response_format: … })` rather than as a `modelKwargs` entry. LangChain then emits `response_format` on Chat Completions and `text: { format: … }` on Responses — one code path, no model-name sniffing.
+
+### Token usage: every provider reports
+
+`TokenUsageCallbackHandler.handleLLMEnd` uses a two-tier lookup, because no single field covers every transport:
+
+| Path | Where usage lands |
+|------|-------------------|
+| OpenAI Chat Completions | `llmOutput.tokenUsage` |
+| OpenAI Responses API | `llmOutput.estimatedTokenUsage` |
+| Anthropic, non-streaming | `llmOutput.usage` (cache tokens folded into input) |
+| Anthropic, streaming | `generations[…].message.usage_metadata` |
+| Google Gemini | `generations[…].message.usage_metadata` |
+
+Tier 1 (`llmOutput`) wins when present, so providers that populate both are never double-counted. When neither reports usage the handler logs a **WARN once per agent+model** — a silent zero here disables `MAX_RUN_COST_USD` for the entire run.
+
+### Runaway detection
+
+`developmentNode` records one `DispatchRound` per round counting **merged** PRs only (`PR-SKIPPED-*` placeholders are recorded for every no-commit branch and are not progress). `detectUnrecoverable()` is evaluated at the top of `bugfixTriageNode` as well as in the acceptance gate, so a QA → triage → development loop that produces nothing halts after `UNRECOVERABLE_ZERO_ROUNDS` (default 2) rounds under `RUN_FAIL_POLICY=halt`.
+
+---
+
 ## Project Structure
 
 ```
@@ -850,6 +885,8 @@ npm run build
 | `DASHBOARD_PORT` | `3000` | HTTP/WS server port |
 | `MAX_TOOL_RESULT_CHARS` | `6000` | Max characters any single tool result may contribute to agent history |
 | `HISTORY_COMPACTION_ENABLED` | `true` | Enable middleware-based ReAct history compaction |
+| `SANITIZE_STREAM_BLOCKS` | `true` | Strip streaming residue (`*_delta` blocks, id-less `tool_use` blocks) from AIMessage content before every LLM call |
+| `GIT_NETWORK_TIMEOUT_MS` | `120000` | Timeout for git subcommands that hit the network (`fetch`/`push`/`pull`/`clone`/`ls-remote`); local subcommands stay at 30 s |
 | `HISTORY_MAX_CHARS` | `40000` | Hard character ceiling for compacted ReAct history |
 | `CONVENTIONS_INLINE_DIGEST` | `true` | Inject conventions digest instead of read_file instructions |
 | `DEV_GIT_TOOLS_ENABLED` | `false` | Give dev agents git tools (PR workflow handles git) |

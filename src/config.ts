@@ -154,6 +154,12 @@ export const MAX_BUGFIX_ITERATIONS =
 export const WORKSPACE_SYNC_ALLOW_RESET =
     (process.env.WORKSPACE_SYNC_ALLOW_RESET ?? 'true') === 'true';
 
+/** Timeout (ms) for git subcommands that hit the network (fetch/push/clone).
+ *  The default 30 s local timeout is too tight for a GitHub fetch on a loaded
+ *  machine, and a SIGTERM'd git produces an empty error (Plan 21, E6). */
+export const GIT_NETWORK_TIMEOUT_MS =
+    parseInt(process.env.GIT_NETWORK_TIMEOUT_MS ?? '120000', 10);
+
 /**
  * LangGraph recursion limits per agent type.
  *
@@ -367,6 +373,12 @@ export const HISTORY_KEEP_RECENT_TOOL_RESULTS =
 /** Enable the middleware that compacts ReAct history before each LLM call. */
 export const HISTORY_COMPACTION_ENABLED =
     (process.env.HISTORY_COMPACTION_ENABLED ?? 'true') === 'true';
+
+/** Strip streaming residue (`*_delta` blocks, id-less `tool_use` blocks) from
+ *  AIMessage content before every LLM call. Guards against the Anthropic
+ *  `tool_use.id: Field required` 400 (Plan 21, E1), including on checkpoint resume. */
+export const SANITIZE_STREAM_BLOCKS =
+    (process.env.SANITIZE_STREAM_BLOCKS ?? 'true') === 'true';
 
 /** Hard character ceiling for the assembled ReAct history passed to the LLM.
  *  Was 30000 — raised to 60000.  With `growth 1.88x` observed, over-aggressive

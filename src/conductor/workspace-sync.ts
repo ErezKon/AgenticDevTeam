@@ -12,7 +12,7 @@
  * already pushed by commitAndPushArtifacts.
  */
 import { getLogger } from '../utils/logger';
-import { gitExec, gitPush } from '../utils/git-exec';
+import { gitExec, gitExecVerbose, gitPush } from '../utils/git-exec';
 import { WORKSPACE_SYNC_ALLOW_RESET } from '../config';
 import type { GitContext } from '../agents/_shared/base-schemas';
 
@@ -61,6 +61,42 @@ export function looksSourceless(relativePaths: string[]): boolean {
     });
 }
 
+// ─── Fetch with retry ───────────────────────────────────────────────────────
+
+/** Total fetch attempts (1 initial + 2 retries) before giving up. */
+export const GIT_FETCH_ATTEMPTS = 3;
+
+/** Base backoff between fetch retries; doubles each attempt. */
+const FETCH_RETRY_BASE_MS = 1_000;
+
+/** Busy-wait backoff — `syncWorkspaceToBranch` is synchronous by design. */
+function sleepSync(ms: number): void {
+    const until = Date.now() + ms;
+    while (Date.now() < until) { /* spin */ }
+}
+
+/**
+ * `git fetch origin <branch>` with bounded exponential backoff.
+ *
+ * Network fetches fail transiently (rate limits, DNS, a loaded machine hitting
+ * the timeout). A single attempt turned a blip into a failed sync, which left
+ * QA and DevOps reading a stale tree.
+ */
+export function fetchWithRetry(
+    gitRoot: string,
+    branch: string,
+    attempts = GIT_FETCH_ATTEMPTS,
+): { ok: boolean; stdout: string; stderr: string; code: number } {
+    let last = { ok: false, stdout: '', stderr: 'fetch not attempted', code: 1 };
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+        last = gitExecVerbose(gitRoot, `fetch origin ${branch}`);
+        if (last.ok) return last;
+        log.warn(`fetch origin/${branch} attempt ${attempt}/${attempts} failed [exit ${last.code}]: ${last.stderr}`);
+        if (attempt < attempts) sleepSync(FETCH_RETRY_BASE_MS * 2 ** (attempt - 1));
+    }
+    return last;
+}
+
 // ─── Main sync function ─────────────────────────────────────────────────────
 
 /**
@@ -90,11 +126,13 @@ export function syncWorkspaceToBranch(
         gitExec(gitRoot, 'commit -m "chore: pipeline artifacts (pre-sync auto-commit)"');
     }
 
-    // 3. Fetch origin/<branch>
-    const fetchResult = gitExec(gitRoot, `fetch origin ${branch}`);
-    if (fetchResult.startsWith('Error:')) {
-        log.error(`Failed to fetch origin/${branch}: ${fetchResult}`);
-        return { ok: false, headSha: '', details: `fetch failed: ${fetchResult}`, strategy: 'failed' };
+    // 3. Fetch origin/<branch> — network op, so use the verbose variant with
+    //    retries. A transient/SIGTERM'd fetch used to abort the whole sync with
+    //    the opaque message `Error:` and no exit code (Plan 21, E6).
+    const fetch = fetchWithRetry(gitRoot, branch);
+    if (!fetch.ok) {
+        log.error(`Failed to fetch origin/${branch} after ${GIT_FETCH_ATTEMPTS} attempt(s) [exit ${fetch.code}]: ${fetch.stderr}`);
+        return { ok: false, headSha: '', details: `fetch failed (exit ${fetch.code}): ${fetch.stderr}`, strategy: 'failed' };
     }
 
     // 4. Ensure we are on the correct branch

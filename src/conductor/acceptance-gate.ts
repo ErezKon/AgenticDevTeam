@@ -52,6 +52,8 @@ export interface AcceptanceReport {
 
 export interface DispatchRound {
     fileChanges: number;
+    /** **Merged** PRs only. `PR-SKIPPED-*` placeholders (status `closed`, prNumber 0)
+     *  are recorded for every no-commit branch and must never count as progress. */
     prs: number;
     completed: number;
 }

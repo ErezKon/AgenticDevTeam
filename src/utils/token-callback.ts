@@ -8,12 +8,21 @@
 import { BaseCallbackHandler } from '@langchain/core/callbacks/base';
 import type { LLMResult } from '@langchain/core/outputs';
 import { tokenTracker } from './token-tracker';
+import { normaliseUsage, sumUsageMetadata } from './token-usage-extractor';
 import { getLogger } from './logger';
 
 const log = getLogger('[TokenCallback]', 220);
 
 export class TokenUsageCallbackHandler extends BaseCallbackHandler {
     name = 'TokenUsageCallbackHandler';
+
+    /** `agentId::model` pairs already warned about, so the WARN fires once each. */
+    private static _warnedNoUsage = new Set<string>();
+
+    /** Clear the once-per-agent WARN dedupe (run start / tests). */
+    static resetUsageWarnings(): void {
+        TokenUsageCallbackHandler._warnedNoUsage.clear();
+    }
 
     private agentId: string;
     private model: string;
@@ -40,24 +49,46 @@ export class TokenUsageCallbackHandler extends BaseCallbackHandler {
     /**
      * Called at the end of every LLM call. Extracts token usage from
      * the provider response and records it in the global tracker.
+     *
+     * Two-tier lookup (Plan 21, D) — no single field covers every provider:
+     *
+     * | Path                                     | Where usage lands                       |
+     * |------------------------------------------|-----------------------------------------|
+     * | OpenAI Chat Completions                  | `llmOutput.tokenUsage`                  |
+     * | OpenAI Responses API (`*codex*`, `-pro`) | `llmOutput.estimatedTokenUsage`         |
+     * | Anthropic, non-streaming                 | `llmOutput.usage`                       |
+     * | Anthropic, streaming                     | `generations[…].message.usage_metadata` |
+     * | Google Gemini                            | `generations[…].message.usage_metadata` |
+     *
+     * Reading only tier 1 left `MAX_RUN_COST_USD` unenforceable for a whole run.
      */
     handleLLMEnd(output: LLMResult): void {
-        const usage = output.llmOutput?.tokenUsage
+        // Tier 1 — provider-level llmOutput.
+        let totals = normaliseUsage(
+            output.llmOutput?.tokenUsage
             ?? output.llmOutput?.token_usage
             ?? output.llmOutput?.usage
-            ?? null;
+            ?? output.llmOutput?.estimatedTokenUsage,
+        );
 
-        if (!usage) {
-            log.debug(`${this.agentId}: No token usage in llmOutput (provider may not report it)`);
-            return;
+        // Tier 2 — per-generation usage_metadata. Only consulted when tier 1 is
+        // absent, so providers that populate both are never double-counted.
+        if (!totals) {
+            const messages = (output.generations ?? [])
+                .flat()
+                .map((g: any) => g?.message)
+                .filter(Boolean);
+            totals = sumUsageMetadata(messages);
         }
 
-        // OpenAI-compatible format (promptTokens/completionTokens or prompt_tokens/completion_tokens)
-        const inputTokens = usage.promptTokens ?? usage.prompt_tokens ?? usage.input_tokens ?? 0;
-        const outputTokens = usage.completionTokens ?? usage.completion_tokens ?? usage.output_tokens ?? 0;
-        const totalTokens = usage.totalTokens ?? usage.total_tokens ?? (inputTokens + outputTokens);
-
-        if (totalTokens === 0) {
+        if (!totals) {
+            // Was DEBUG. A silent zero here disables the run cost ceiling for the
+            // whole run, so warn — but once per agent+model, not once per call.
+            const key = `${this.agentId}::${this.model}`;
+            if (!TokenUsageCallbackHandler._warnedNoUsage.has(key)) {
+                TokenUsageCallbackHandler._warnedNoUsage.add(key);
+                log.warn(`${this.agentId}: model "${this.model}" reported no token usage — cost tracking and MAX_RUN_COST_USD will under-count for this agent`);
+            }
             return;
         }
 
@@ -65,9 +96,9 @@ export class TokenUsageCallbackHandler extends BaseCallbackHandler {
             agentId: this.agentId,
             model: this.model,
             phase: this.phase,
-            inputTokens,
-            outputTokens,
-            totalTokens,
+            inputTokens: totals.inputTokens,
+            outputTokens: totals.outputTokens,
+            totalTokens: totals.totalTokens,
             timestamp: new Date().toISOString(),
             ...(this._invocationId && { invocationId: this._invocationId }),
         });

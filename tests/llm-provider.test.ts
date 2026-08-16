@@ -16,8 +16,17 @@ jest.mock('../src/utils/logger', () => ({
     setRunLogPath: jest.fn(),
 }));
 
+/** Records every `withConfig` call across all ChatOpenAI instances. */
+const withConfigCalls: any[] = [];
 const MockChatOpenAI = jest.fn().mockImplementation(function (this: any, opts: any) {
-    Object.assign(this, { _type: 'ChatOpenAI', ...opts });
+    Object.assign(this, {
+        _type: 'ChatOpenAI',
+        ...opts,
+        withConfig: jest.fn(function (this: any, cfg: any) {
+            withConfigCalls.push(cfg);
+            return Object.assign(Object.create(Object.getPrototypeOf(this)), this, { _configured: cfg });
+        }),
+    });
 });
 const MockChatAnthropic = jest.fn().mockImplementation(function (this: any, opts: any) {
     Object.assign(this, { _type: 'ChatAnthropic', ...opts });
@@ -114,6 +123,7 @@ describe('createChatModel', () => {
         MockChatOpenAI.mockClear();
         MockChatAnthropic.mockClear();
         MockChatGoogleGenerativeAI.mockClear();
+        withConfigCalls.length = 0;
     });
 
     function loadModule(overrides: Record<string, any> = {}) {
@@ -191,12 +201,34 @@ describe('createChatModel', () => {
         expect(args.configuration.baseURL).toBe('https://llm.example.com/v1');
     });
 
-    it('enables JSON mode for OpenAI models when jsonMode=true', () => {
+    // Plan 21, E2: `modelKwargs.response_format` is spread verbatim into the
+    // request body and is rejected by the OpenAI Responses API (`*codex*`,
+    // `gpt-5.x-pro`). It must be passed as a call option via `withConfig`.
+    it('enables JSON mode via withConfig, not modelKwargs, when jsonMode=true', () => {
         const { createChatModel } = loadModule();
         createChatModel({ ...baseOpts, modelName: 'gpt-4o', jsonMode: true });
 
         const args = MockChatOpenAI.mock.calls[0][0];
-        expect(args.modelKwargs).toEqual({ response_format: { type: 'json_object' } });
+        expect(args.modelKwargs).toBeUndefined();
+        expect(withConfigCalls).toEqual([{ response_format: { type: 'json_object' } }]);
+    });
+
+    it('uses withConfig for Responses-API models too (gpt-5.3-codex)', () => {
+        const { createChatModel } = loadModule();
+        createChatModel({ ...baseOpts, modelName: 'gpt-5.3-codex', jsonMode: true });
+
+        const args = MockChatOpenAI.mock.calls[0][0];
+        expect(args.modelKwargs).toBeUndefined();
+        expect(withConfigCalls).toEqual([{ response_format: { type: 'json_object' } }]);
+    });
+
+    it('preserves callbacks through withConfig (token attribution survives)', () => {
+        const { createChatModel } = loadModule();
+        const cb = { name: 'token-cb' } as any;
+        const model: any = createChatModel({ ...baseOpts, modelName: 'gpt-5.3-codex', jsonMode: true, callbacks: [cb] });
+
+        expect(MockChatOpenAI.mock.calls[0][0].callbacks).toEqual([cb]);
+        expect(model.callbacks).toEqual([cb]);
     });
 
     it('does not set JSON mode when jsonMode=false', () => {
@@ -205,6 +237,34 @@ describe('createChatModel', () => {
 
         const args = MockChatOpenAI.mock.calls[0][0];
         expect(args.modelKwargs).toBeUndefined();
+        expect(withConfigCalls).toHaveLength(0);
+    });
+
+    // Plan 21, E1/E4: streaming left `input_json_delta` residue in AIMessage
+    // content (400 tool_use.id) and hid usage from `llmOutput.usage`.
+    it('does NOT enable streaming on ChatAnthropic', () => {
+        const { createChatModel } = loadModule();
+        createChatModel({ ...baseOpts, modelName: 'claude-sonnet-4-20250514' });
+
+        const args = MockChatAnthropic.mock.calls[0][0];
+        expect(args.streaming).toBeUndefined();
+    });
+
+    // Plan 21, A3: topP/topK were accepted by every agent builder but never forwarded.
+    it('forwards topP/topK to ChatAnthropic', () => {
+        const { createChatModel } = loadModule();
+        createChatModel({ ...baseOpts, modelName: 'claude-opus-4-20250514', topP: 0.85, topK: 40 });
+
+        const args = MockChatAnthropic.mock.calls[0][0];
+        expect(args.topP).toBe(0.85);
+        expect(args.topK).toBe(40);
+    });
+
+    it('forwards topP to ChatOpenAI', () => {
+        const { createChatModel } = loadModule();
+        createChatModel({ ...baseOpts, modelName: 'gpt-4o', topP: 0.9 });
+
+        expect(MockChatOpenAI.mock.calls[0][0].topP).toBe(0.9);
     });
 
     it('passes ANTHROPIC_BASE_URL via clientOptions when set', () => {

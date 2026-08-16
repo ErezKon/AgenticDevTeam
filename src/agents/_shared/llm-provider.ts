@@ -93,7 +93,11 @@ export function createChatModel(opts: CreateModelOpts): BaseChatModel {
                 maxRetries: 0,
                 topK: opts?.topK ?? undefined,
                 topP: opts?.topP ?? undefined,
-                streaming: true,
+                // NOTE: streaming is deliberately NOT enabled (Plan 21, E1/E4).
+                // Nothing in this codebase consumes a token stream, and streamed
+                // responses left `input_json_delta` residue in AIMessage.content
+                // (400 "tool_use.id: Field required") and hid token usage from
+                // `llmOutput.usage`.
                 callbacks: opts.callbacks,
             });
         }
@@ -117,22 +121,29 @@ export function createChatModel(opts: CreateModelOpts): BaseChatModel {
         case 'openai':
         default: {
             log.debug(`Creating ChatOpenAI for model "${opts.modelName}"`);
-            return new ChatOpenAI({
+            const model = new ChatOpenAI({
                 model: opts.modelName,
                 temperature: opts.temperature,
                 maxRetries: 0,
                 maxTokens: opts.maxTokens,
                 timeout: opts.timeout,
                 apiKey: opts.apiKey,
+                topP: opts?.topP ?? undefined,
                 configuration: {
                     baseURL: opts.baseURL,
                     fetch: opts.customFetch,
                 },
                 callbacks: opts.callbacks,
-                ...(opts.jsonMode && {
-                    modelKwargs: { response_format: { type: 'json_object' } },
-                }),
             });
+
+            // JSON mode is passed as a CALL OPTION, not a model kwarg (Plan 21, E2).
+            // `modelKwargs.response_format` is spread verbatim into the request
+            // body, which the Responses API (used for `*codex*` / `gpt-5.x-pro`
+            // models) rejects with 400 "Unsupported parameter: 'response_format'".
+            // `withConfig` routes it through `_getResponseFormat()`, which emits
+            // `response_format` on Chat Completions and `text.format` on Responses.
+            if (!opts.jsonMode) return model;
+            return model.withConfig({ response_format: { type: 'json_object' } }) as unknown as BaseChatModel;
         }
     }
 }

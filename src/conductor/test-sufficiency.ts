@@ -164,6 +164,11 @@ export function sufficiencyViolationsToBugs(violations: SufficiencyViolation[]):
         stepsToReproduce: v.detail,
         expectedBehavior: getExpectedBehavior(v.kind),
         actualBehavior: v.detail,
+        // Carry the real story id as structured data. It used to live only in
+        // `suspectedArea` prose, so triage copied the synthetic BUG id into
+        // `assignment.storyId` and developers lost their acceptance criteria
+        // (Plan 21, E5).
+        ...(v.storyId && { storyId: v.storyId }),
         suspectedArea: v.storyId ? `Story ${v.storyId}` : 'Test suite',
         reportedBy: 'test-sufficiency',
     }));
