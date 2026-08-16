@@ -13,5 +13,7 @@ export const createArchitectAgent = (apiKey: string) => {
         model: ARCHITECT_MODEL,
         maxOutputTokens: PLANNING_MAX_OUTPUT_TOKENS,
         keepSchemaDescriptions: true,
+        topK: undefined,
+        topP: undefined
     });
 };

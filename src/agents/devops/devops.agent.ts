@@ -18,5 +18,7 @@ export const createDevOpsAgent = (apiKey: string, workspaceRoot: string, convent
         model: DEVOPS_MODEL,
         phase: 'devops',
         maxToolCalls: TOOL_PIPELINE_MAX_TOOL_CALLS,
+        topK: undefined,
+        topP: undefined
     });
 };

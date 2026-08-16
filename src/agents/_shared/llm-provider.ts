@@ -42,6 +42,8 @@ export interface CreateModelOpts {
     baseURL?: string;
     customFetch?: typeof fetch;
     jsonMode?: boolean;
+    topP?: number;
+    topK?: number;
 }
 
 // ─── Provider Detection ─────────────────────────────────────────────────────
@@ -89,6 +91,9 @@ export function createChatModel(opts: CreateModelOpts): BaseChatModel {
                 anthropicApiKey: ANTHROPIC_API_KEY,
                 ...(ANTHROPIC_BASE_URL && { clientOptions: { baseURL: ANTHROPIC_BASE_URL } }),
                 maxRetries: 0,
+                topK: opts?.topK ?? undefined,
+                topP: opts?.topP ?? undefined,
+                streaming: true,
                 callbacks: opts.callbacks,
             });
         }

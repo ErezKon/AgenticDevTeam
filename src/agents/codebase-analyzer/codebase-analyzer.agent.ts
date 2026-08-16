@@ -26,5 +26,7 @@ export const createCodebaseAnalyzerAgent = (apiKey: string, workspacePath: strin
         model: CODEBASE_ANALYZER_MODEL,
         phase: 'codebase-analyzer',
         maxToolCalls: TOOL_PIPELINE_MAX_TOOL_CALLS,
+        topK: undefined,
+        topP: undefined
     });
 };

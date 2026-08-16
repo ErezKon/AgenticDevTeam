@@ -42,6 +42,20 @@ export interface AgentConfig {
     /** If true, .describe() strings are preserved in the JSON Schema injected into the prompt.
      *  Planning agents need these for semantic guidance (P6). */
     keepSchemaDescriptions?: boolean;
+    /** Does nucleus sampling, in which we compute the
+     * cumulative distribution over all the options for each
+     * subsequent token in decreasing probability order and
+     * cut it off once it reaches a particular probability
+     * specified by top_p. Defaults to -1, which disables it.
+     * Note that you should either alter temperature or top_p,
+     * but not both.
+     */
+    topP?: number;
+    /** Only sample from the top K options for each subsequent
+     * token. Used to remove "long tail" low probability
+     * responses. Defaults to -1, which disables it.
+     */
+    topK?: number;
 }
 
 /**

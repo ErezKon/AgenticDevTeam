@@ -13,5 +13,7 @@ export const createDbaAgent = (apiKey: string) => {
         model: DBA_MODEL,
         maxOutputTokens: PLANNING_MAX_OUTPUT_TOKENS,
         keepSchemaDescriptions: true,
+        topK: undefined,
+        topP: undefined
     });
 };

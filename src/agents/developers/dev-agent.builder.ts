@@ -75,6 +75,8 @@ export function buildDevAgent(
         model: getModelForRank(entry.rank),
         phase: 'development',
         maxToolCalls,
+        topK: undefined,
+        topP: undefined
     });
 }
 
@@ -127,5 +129,7 @@ export function buildStrongFixerAgent(
         model: fixerModel,
         phase: 'development',
         maxToolCalls: STRONG_FIXER_MAX_TOOL_CALLS,
+        topK: undefined,
+        topP: undefined
     });
 }

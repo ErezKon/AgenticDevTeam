@@ -13,5 +13,7 @@ export const createProductManagerAgent = (apiKey: string) => {
         model: PRODUCT_MANAGER_MODEL,
         maxOutputTokens: PLANNING_MAX_OUTPUT_TOKENS,
         keepSchemaDescriptions: true,
+        topK: undefined,
+        topP: undefined
     });
 };

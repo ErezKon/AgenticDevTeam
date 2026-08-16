@@ -15,6 +15,8 @@ export const createQaLeadAgent = (apiKey: string) => {
         responseFormat: QaLeadOutputSchema,
         temperature: 0.2,
         model: QA_MODEL,
+        topK: undefined,
+        topP: undefined
     });
 };
 
@@ -31,6 +33,8 @@ export const createQaUnitAgent = (apiKey: string, workspaceRoot: string, convent
         model: QA_MODEL,
         phase: 'qa',
         maxToolCalls: TOOL_PIPELINE_MAX_TOOL_CALLS,
+        topK: undefined,
+        topP: undefined
     });
 };
 
@@ -50,5 +54,7 @@ export const createQaE2eAgent = (apiKey: string, mcpTools: any[], conventionFile
         model: QA_MODEL,
         phase: 'qa',
         maxToolCalls: TOOL_PIPELINE_MAX_TOOL_CALLS,
+        topK: undefined,
+        topP: undefined
     });
 };

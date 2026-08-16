@@ -77,5 +77,7 @@ export function buildReviewerAgent(
         model: getModelForRank(entry.rank),
         phase: 'review',
         maxToolCalls: REVIEWER_MAX_TOOL_CALLS,
+        topK: undefined,
+        topP: undefined
     });
 }
