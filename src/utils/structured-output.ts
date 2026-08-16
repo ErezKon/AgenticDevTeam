@@ -13,6 +13,50 @@ import { getLogger } from './logger';
 
 const log = getLogger('[structured-output]', 183);
 
+// ─── Content Block Normalisation ────────────────────────────────────────────
+
+/**
+ * Extract text from LangChain content blocks.
+ *
+ * Handles Anthropic streaming and OpenAI Responses API formats where
+ * `AIMessage.content` is an array of content blocks instead of a plain string.
+ * - Anthropic streaming: `[{ type: 'text', text: '...' }]`
+ * - OpenAI Responses API: `[{ type: 'text', text: '...', annotations: [...] }]`
+ *
+ * Returns the concatenated text, or `null` if no text blocks are found
+ * (e.g. the content is tool calls or other non-text data).
+ */
+export function extractTextFromContentBlocks(content: unknown): string | null {
+    if (!Array.isArray(content)) return null;
+    const textParts: string[] = [];
+    for (const block of content) {
+        if (typeof block === 'string') {
+            textParts.push(block);
+        } else if (typeof block === 'object' && block !== null && 'type' in block) {
+            const b = block as Record<string, unknown>;
+            if (b.type === 'text' && typeof b.text === 'string') {
+                textParts.push(b.text);
+            }
+        }
+    }
+    return textParts.length > 0 ? textParts.join('') : null;
+}
+
+/**
+ * Normalise AIMessage.content to a plain string.
+ *
+ * Priority:
+ *  1. Already a string → return as-is
+ *  2. Array of content blocks → extract text via `extractTextFromContentBlocks`
+ *  3. Fallback → `JSON.stringify(content)` (preserves old behaviour for unknown shapes)
+ */
+export function normaliseContentToString(content: unknown): string {
+    if (typeof content === 'string') return content;
+    const extracted = extractTextFromContentBlocks(content);
+    if (extracted !== null) return extracted;
+    return JSON.stringify(content);
+}
+
 // ─── JSON Extraction ────────────────────────────────────────────────────────
 
 export type ParseResult =

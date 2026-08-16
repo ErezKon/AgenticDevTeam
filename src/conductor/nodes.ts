@@ -65,7 +65,7 @@ import { getTruncationStats } from '../tools/_shared/truncate';
 import type { ContextSection } from './context-builder';
 import {
     parseAgentJson, validateAgentOutput, buildRepairMessage,
-    repairFieldViolations,
+    repairFieldViolations, extractTextFromContentBlocks,
     getValidationStats, logValidationStats,
     _recordValidated, _recordRepaired, _recordFailed,
 } from '../utils/structured-output';
@@ -374,13 +374,28 @@ async function invokeAgent(
         };
 
         const last = result.messages[result.messages.length - 1];
-        if (typeof last.content !== 'string') {
-            emitEnd();
-            return { output: last.content, tokenUsage };
+        // Normalise content: Anthropic streaming and OpenAI Responses API
+        // return AIMessage.content as an array of content blocks instead of
+        // a plain string.  Extract the text so JSON parsing can proceed.
+        let rawContent: string;
+        if (typeof last.content === 'string') {
+            rawContent = last.content;
+        } else {
+            const extracted = extractTextFromContentBlocks(last.content);
+            if (extracted === null) {
+                // No text blocks — genuine structured data (e.g. tool calls)
+                emitEnd();
+                return { output: last.content, tokenUsage };
+            }
+            invokeLog.debug(
+                `Extracted ${extracted.length} chars from ${Array.isArray(last.content) ? last.content.length : 1} ` +
+                `content block(s) for "${threadSuffix}"`,
+            );
+            rawContent = extracted;
         }
 
         // Extract JSON from the response using the shared parser
-        const raw = last.content.trim();
+        const raw = rawContent.trim();
         const parseResult = parseAgentJson(raw);
 
         const schema = opts?.schema;
@@ -455,8 +470,12 @@ async function invokeAgent(
                 continue;
             }
             const repairLast = repairResult.messages[repairResult.messages.length - 1];
-            if (typeof repairLast.content !== 'string') {
-                // Non-string content — try validating it directly
+            // Normalise content blocks (same as main path above)
+            const repairRaw: string | null = typeof repairLast.content === 'string'
+                ? repairLast.content
+                : extractTextFromContentBlocks(repairLast.content);
+            if (repairRaw === null) {
+                // Non-text content — try validating it directly
                 const rv = validateAgentOutput(schema!, repairLast.content);
                 if (rv.ok) {
                     _recordRepaired();
@@ -466,7 +485,7 @@ async function invokeAgent(
                 }
                 continue;
             }
-            const repairParse = parseAgentJson(repairLast.content.trim());
+            const repairParse = parseAgentJson(repairRaw.trim());
             if (!repairParse.ok) continue;
             const rv = validateAgentOutput(schema!, repairParse.value);
             if (rv.ok) {

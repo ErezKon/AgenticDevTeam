@@ -62,7 +62,7 @@ import { GATE_INTEGRITY_MODE } from '../config';
 import { classifyPrFailure, isFatalPrFailure } from './pr-failure';
 import { resolveKnownConflicts, listConflictedFiles } from './merge-resolve';
 import type { CompletionEvidence } from './assignment-policy';
-import { parseAgentJson, validateAgentOutput } from '../utils/structured-output';
+import { parseAgentJson, validateAgentOutput, normaliseContentToString } from '../utils/structured-output';
 import { DeveloperOutputSchema } from '../agents/developers/schemas/dev-output.schema';
 import { ReviewOutputSchema } from '../agents/developers/schemas/review-output.schema';
 import type { GateReport } from './quality-gates';
@@ -416,7 +416,7 @@ function parseDevResult(
         return { output: { fileChanges: [], notes: 'Agent returned empty content.' }, tokenUsage };
     }
 
-    const raw = typeof last.content === 'string' ? last.content : JSON.stringify(last.content);
+    const raw = normaliseContentToString(last.content);
     const parseResult = parseAgentJson(raw);
     if (!parseResult.ok) {
         throw new Error(`Invalid JSON output from dev agent: ${parseResult.error}`);
@@ -579,7 +579,7 @@ async function invokeReviewerAgent(
             return { outcome: { kind: 'abstained' as const, reviewerId: agentId, reason: 'empty-output' as const, detail: 'Reviewer returned empty content' }, tokenUsage };
         }
 
-        const raw = typeof last.content === 'string' ? last.content : JSON.stringify(last.content);
+        const raw = normaliseContentToString(last.content);
         const parseResult = parseAgentJson(raw);
         if (!parseResult.ok) {
             throw new Error(`Invalid JSON output from reviewer agent: ${parseResult.error}`);
