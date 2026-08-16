@@ -526,11 +526,13 @@ The finalize summary includes a `History Compaction` block reporting total chars
 
 Mixed-provider runs (Claude + GPT + Gemini) exposed three transport-level failures that were silent, total, and billable. All three are now handled centrally in `src/agents/_shared/llm-provider.ts` and `src/utils/token-callback.ts`.
 
-### Anthropic: no streaming
+### Anthropic: streaming with sanitiser guard
 
-`ChatAnthropic` is constructed **without** `streaming`. Nothing in the pipeline consumes a token stream (every call site uses `agent.invoke()`), while streamed responses left `input_json_delta` residue in `AIMessage.content`, which the provider rejected on the next turn with `400 … tool_use.id: Field required`.
+`ChatAnthropic` is constructed **with** `streaming: true` — Anthropic's HTTP endpoint times out after ~10 minutes on non-streaming requests, which kills long agent runs. Streamed chunk reassembly can leave `input_json_delta` residue in `AIMessage.content`, which the provider would reject on the next turn with `400 … tool_use.id: Field required`. This is neutralised by the `history-compaction` middleware, which runs `sanitizeStreamingContentBlocks()` before every LLM call. It drops `*_delta` blocks and id-less `tool_use` / `server_tool_use` blocks from a **copy** of the history, leaving `tool_calls` (and the persisted state) untouched. Toggle with `SANITIZE_STREAM_BLOCKS`.
 
-As defence-in-depth — and to cover histories restored from a checkpoint that were written by an older provider package — the `history-compaction` middleware runs `sanitizeStreamingContentBlocks()` before every LLM call. It drops `*_delta` blocks and id-less `tool_use` / `server_tool_use` blocks from a **copy** of the history, leaving `tool_calls` (and the persisted state) untouched. Toggle with `SANITIZE_STREAM_BLOCKS`.
+### Anthropic: adaptive-only model guard
+
+Adaptive-only models (`claude-opus-4-7+`, `claude-opus-4-8+`, `claude-opus-5+`, `claude-fable-5+`, `claude-mythos-*`) reject `temperature`, `topK`, and `topP` at call time via `@langchain/anthropic`'s `validateInvocationParamCompatibility()`. The factory detects these models by prefix regex and omits all three sampling params from the constructor. Non-adaptive Claude models (e.g. `claude-sonnet-4-*`, `claude-opus-4-20250514`) continue to receive sampling params normally.
 
 ### OpenAI: JSON mode works on both APIs
 
@@ -544,8 +546,8 @@ As defence-in-depth — and to cover histories restored from a checkpoint that w
 |------|-------------------|
 | OpenAI Chat Completions | `llmOutput.tokenUsage` |
 | OpenAI Responses API | `llmOutput.estimatedTokenUsage` |
-| Anthropic, non-streaming | `llmOutput.usage` (cache tokens folded into input) |
-| Anthropic, streaming | `generations[…].message.usage_metadata` |
+| Anthropic (streaming, primary path) | `generations[…].message.usage_metadata` |
+| Anthropic, non-streaming (fallback) | `llmOutput.usage` (cache tokens folded into input) |
 | Google Gemini | `generations[…].message.usage_metadata` |
 
 Tier 1 (`llmOutput`) wins when present, so providers that populate both are never double-counted. When neither reports usage the handler logs a **WARN once per agent+model** — a silent zero here disables `MAX_RUN_COST_USD` for the entire run.

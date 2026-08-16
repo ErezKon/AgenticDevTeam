@@ -83,21 +83,37 @@ export function createChatModel(opts: CreateModelOpts): BaseChatModel {
             if (!ANTHROPIC_API_KEY) {
                 log.warn(`Model "${opts.modelName}" detected as Anthropic but ANTHROPIC_API_KEY is not set`);
             }
-            log.debug(`Creating ChatAnthropic for model "${opts.modelName}"`);
+
+            // Adaptive-only models (claude-opus-4-7+, claude-fable-5, claude-mythos-*)
+            // reject temperature, topK, and topP at call time via
+            // validateInvocationParamCompatibility in @langchain/anthropic.
+            // Must stay in sync with ADAPTIVE_ONLY_MODEL_PREFIXES in the SDK.
+            const adaptiveOnly = /^claude-(opus-4-[7-9]|opus-[5-9]|fable-5|mythos)/.test(opts.modelName);
+            if (adaptiveOnly) {
+                log.debug(`Model "${opts.modelName}" is adaptive-only — omitting temperature/topK/topP`);
+            } else {
+                log.debug(`Creating ChatAnthropic for model "${opts.modelName}"`);
+            }
+
             return new ChatAnthropic({
                 model: opts.modelName,
-                temperature: opts.temperature,
+                // Sampling params — omitted entirely for adaptive-only models.
+                ...(adaptiveOnly ? {} : {
+                    temperature: opts.temperature,
+                    ...(opts.topK !== undefined ? { topK: opts.topK } : {}),
+                    ...(opts.topP !== undefined ? { topP: opts.topP } : {}),
+                }),
                 maxTokens: opts.maxTokens,
                 anthropicApiKey: ANTHROPIC_API_KEY,
                 ...(ANTHROPIC_BASE_URL && { clientOptions: { baseURL: ANTHROPIC_BASE_URL } }),
                 maxRetries: 0,
-                topK: opts?.topK ?? undefined,
-                topP: opts?.topP ?? undefined,
-                // NOTE: streaming is deliberately NOT enabled (Plan 21, E1/E4).
-                // Nothing in this codebase consumes a token stream, and streamed
-                // responses left `input_json_delta` residue in AIMessage.content
-                // (400 "tool_use.id: Field required") and hid token usage from
-                // `llmOutput.usage`.
+                // Streaming is required — Anthropic's HTTP endpoint times out after
+                // ~10 minutes on non-streaming requests, killing long agent runs.
+                // The sanitizeStreamingContentBlocks() middleware (Plan 21 A2, wired
+                // in agent-factory.ts) strips `input_json_delta` residue from
+                // AIMessage.content before every LLM call to prevent 400
+                // "tool_use.id: Field required" errors.
+                streaming: true,
                 callbacks: opts.callbacks,
             });
         }

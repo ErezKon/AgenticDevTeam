@@ -240,24 +240,56 @@ describe('createChatModel', () => {
         expect(withConfigCalls).toHaveLength(0);
     });
 
-    // Plan 21, E1/E4: streaming left `input_json_delta` residue in AIMessage
-    // content (400 tool_use.id) and hid usage from `llmOutput.usage`.
-    it('does NOT enable streaming on ChatAnthropic', () => {
+    // Streaming is required — Anthropic's HTTP endpoint times out after ~10
+    // minutes on non-streaming requests. The sanitizer (Plan 21 A2) handles residue.
+    it('enables streaming on ChatAnthropic', () => {
         const { createChatModel } = loadModule();
         createChatModel({ ...baseOpts, modelName: 'claude-sonnet-4-20250514' });
 
         const args = MockChatAnthropic.mock.calls[0][0];
-        expect(args.streaming).toBeUndefined();
+        expect(args.streaming).toBe(true);
     });
 
     // Plan 21, A3: topP/topK were accepted by every agent builder but never forwarded.
-    it('forwards topP/topK to ChatAnthropic', () => {
+    it('forwards topP/topK to non-adaptive ChatAnthropic models', () => {
         const { createChatModel } = loadModule();
         createChatModel({ ...baseOpts, modelName: 'claude-opus-4-20250514', topP: 0.85, topK: 40 });
 
         const args = MockChatAnthropic.mock.calls[0][0];
         expect(args.topP).toBe(0.85);
         expect(args.topK).toBe(40);
+    });
+
+    // Adaptive-only models reject temperature/topK/topP via validateInvocationParamCompatibility.
+    it.each([
+        'claude-opus-4-7-20260101',
+        'claude-opus-4-8-20260301',
+        'claude-opus-5-20260601',
+        'claude-fable-5-20260601',
+        'claude-mythos-5-20260101',
+        'claude-mythos-preview-20260101',
+    ])('omits temperature/topK/topP for adaptive-only model "%s"', (modelName) => {
+        const { createChatModel } = loadModule();
+        createChatModel({ ...baseOpts, modelName, temperature: 0.2, topP: 0.85, topK: 40 });
+
+        const args = MockChatAnthropic.mock.calls[0][0];
+        expect(args.temperature).toBeUndefined();
+        expect(args.topP).toBeUndefined();
+        expect(args.topK).toBeUndefined();
+        // Streaming and other params still present
+        expect(args.streaming).toBe(true);
+        expect(args.maxTokens).toBe(baseOpts.maxTokens);
+        expect(args.model).toBe(modelName);
+    });
+
+    it('passes temperature/topP/topK for non-adaptive Claude models', () => {
+        const { createChatModel } = loadModule();
+        createChatModel({ ...baseOpts, modelName: 'claude-sonnet-4-20250514', topP: 0.9, topK: 30 });
+
+        const args = MockChatAnthropic.mock.calls[0][0];
+        expect(args.temperature).toBe(0.3);
+        expect(args.topP).toBe(0.9);
+        expect(args.topK).toBe(30);
     });
 
     it('forwards topP to ChatOpenAI', () => {
