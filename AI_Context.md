@@ -38,7 +38,7 @@
 | E2E Testing | Playwright MCP (Model Context Protocol) |
 | Server | Express 5 + WebSocket (`ws`) |
 | Dashboard | Angular 19 (standalone components) |
-| Authentication | OAuth2 client-credentials flow with token caching |
+| Authentication | Direct API keys (OpenAI, Anthropic, Google) with OAuth2 client-credentials fallback for OpenAI |
 | Logging | ANSI 256-color per-agent console logging + file capture |
 
 ### Entry Points
@@ -278,14 +278,14 @@ All agents are built via `buildAgent()` in `src/agents/_shared/agent-factory.ts`
 
 1. Detects the LLM provider from the model name via `detectProvider()` in `src/agents/_shared/llm-provider.ts`
 2. Creates the appropriate chat model via `createChatModel()`:
-   - **OpenAI** (default, covers `gpt-*`, `o1-*`, `llama-*`, `mistral-*`, `gemma-*`): `ChatOpenAI` with OAuth-wrapped fetch chain
+   - **OpenAI** (default, covers `gpt-*`, `o1-*`, `llama-*`, `mistral-*`, `gemma-*`): `ChatOpenAI` with `OPENAI_API_KEY` (direct) or OAuth-wrapped fetch chain (fallback)
    - **Anthropic** (model matches `/claude|anthropic/i`): `ChatAnthropic` with `ANTHROPIC_API_KEY`
    - **Google** (model matches `/gemini/i`): `ChatGoogleGenerativeAI` with `GOOGLE_API_KEY`
 3. Appends the JSON schema instruction to the system prompt if `responseFormat` is provided
 4. Wraps all tools with `withLoopGuard()` for infinite-loop prevention
 5. Returns a `createReactAgent()` instance with its own `MemorySaver`
 
-The OAuth fetch chain (`oauthFetch` -> `cassetteFetch` -> `throttledFetch`) is OpenAI-specific.
+OpenAI auth priority: `OPENAI_API_KEY` (direct API key, no custom fetch chain) > OAuth client-credentials flow (`oauthFetch` -> `cassetteFetch` -> `throttledFetch`).
 Anthropic and Google use their own HTTP handling with direct API keys.
 Set `LLM_PROVIDER_DETECTION=openai` to force all models through the OpenAI-compatible endpoint (escape hatch for proxies).
 

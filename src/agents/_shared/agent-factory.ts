@@ -8,7 +8,7 @@ import type { StructuredToolInterface } from '@langchain/core/tools';
 import { z } from 'zod';
 import type { BaseMessage } from '@langchain/core/messages';
 import { RunnableLambda } from '@langchain/core/runnables';
-import { LLM_BASE_URL, LLM_MODEL, RESPONSE_SCHEMA_COMPACT, RESPONSE_SCHEMA_STRIP_ALL_DESCRIPTIONS, HISTORY_COMPACTION_ENABLED, LLM_JSON_MODE, LLM_MAX_OUTPUT_TOKENS, LLM_REQUEST_TIMEOUT_MS } from '../../config';
+import { LLM_BASE_URL, LLM_MODEL, RESPONSE_SCHEMA_COMPACT, RESPONSE_SCHEMA_STRIP_ALL_DESCRIPTIONS, HISTORY_COMPACTION_ENABLED, LLM_JSON_MODE, LLM_MAX_OUTPUT_TOKENS, LLM_REQUEST_TIMEOUT_MS, OPENAI_API_KEY } from '../../config';
 import { getAccessToken } from '../../utils/oauth-auth.util';
 import { throttledFetch } from '../../utils/llm-throttle';
 import { cassetteFetch, LLM_CASSETTE_MODE } from '../../utils/llm-cassette';
@@ -64,20 +64,29 @@ export function buildAgent(apiKey: string, cfg: AgentConfig) {
     // JSON mode via response_format is only supported by OpenAI-compatible APIs.
     const useJsonMode = LLM_JSON_MODE && !!cfg.responseFormat && cfg.tools.length === 0 && provider === 'openai';
 
-    // OAuth fetch chain is only used for OpenAI-compatible endpoints.
-    // Anthropic and Google use their own API keys and HTTP handling.
+    // When OPENAI_API_KEY is set, use it directly — no OAuth fetch chain needed.
+    // When absent, fall back to the OAuth client-credentials flow.
+    // Anthropic and Google always use their own API keys and HTTP handling.
     let customFetch: typeof fetch | undefined;
+    let effectiveApiKey = apiKey;
     if (provider === 'openai') {
-        const oauthFetch: typeof globalThis.fetch = async (url, init) => {
-            const freshToken = await getAccessToken();
-            const headers = new Headers(init?.headers);
-            headers.set('Authorization', `Bearer ${freshToken}`);
-            return globalThis.fetch(url, { ...init, headers });
-        };
-        // Cassette sits inside throttledFetch: recordings capture real responses,
-        // replays skip both the OAuth token fetch and the throttle's cooldowns.
-        const base = LLM_CASSETTE_MODE === 'off' ? oauthFetch : cassetteFetch(oauthFetch);
-        customFetch = throttledFetch(base);
+        if (OPENAI_API_KEY) {
+            // Direct API key — ChatOpenAI handles auth natively, no custom fetch needed.
+            effectiveApiKey = OPENAI_API_KEY;
+            factoryLog.debug(`${cfg.id}: using OPENAI_API_KEY (direct API key, no OAuth)`);
+        } else {
+            // OAuth fetch chain — token is refreshed on every request.
+            const oauthFetch: typeof globalThis.fetch = async (url, init) => {
+                const freshToken = await getAccessToken();
+                const headers = new Headers(init?.headers);
+                headers.set('Authorization', `Bearer ${freshToken}`);
+                return globalThis.fetch(url, { ...init, headers });
+            };
+            // Cassette sits inside throttledFetch: recordings capture real responses,
+            // replays skip both the OAuth token fetch and the throttle's cooldowns.
+            const base = LLM_CASSETTE_MODE === 'off' ? oauthFetch : cassetteFetch(oauthFetch);
+            customFetch = throttledFetch(base);
+        }
     }
 
     const model = createChatModel({
@@ -87,7 +96,7 @@ export function buildAgent(apiKey: string, cfg: AgentConfig) {
         timeout: cfg.timeout ?? LLM_REQUEST_TIMEOUT_MS,
         callbacks: [tokenCallback],
         // OpenAI-specific options (ignored by Anthropic/Google)
-        apiKey,
+        apiKey: effectiveApiKey,
         baseURL: LLM_BASE_URL,
         customFetch,
         jsonMode: useJsonMode,

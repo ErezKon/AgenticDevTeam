@@ -102,6 +102,11 @@ export const MODEL_PRICING: Record<string, { inputPer1k: number; outputPer1k: nu
 
 // ─── Multi-Provider LLM (Sub-Plan 20) ───────────────────────────────────────
 
+/** API key for OpenAI models. When set, used directly instead of OAuth client-credentials flow.
+ *  If empty, OpenAI agents fall back to the OAuth token from OAUTH_TOKEN_URL. */
+export const OPENAI_API_KEY =
+    process.env.OPENAI_API_KEY ?? '';
+
 /** API key for Anthropic models (Claude). Required when any agent model matches /claude|anthropic/i. */
 export const ANTHROPIC_API_KEY =
     process.env.ANTHROPIC_API_KEY ?? '';

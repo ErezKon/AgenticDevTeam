@@ -810,6 +810,7 @@ npm run build
 | `JUNIOR_DEV_MODEL` | `llama-3-2-3b-instruct` | Junior developer agents model (boilerplate, utilities, minor fixes) |
 | `QA_MODEL` | `gpt-oss-20b` | QA agents model (test plans, unit/integration/E2E tests) |
 | **Multi-Provider LLM (Plan 20)** | | |
+| `OPENAI_API_KEY` | — | API key for OpenAI models. When set, used directly instead of OAuth. Falls back to OAuth if empty |
 | `ANTHROPIC_API_KEY` | — | API key for Anthropic (Claude) models |
 | `GOOGLE_API_KEY` | — | API key for Google (Gemini) models |
 | `ANTHROPIC_BASE_URL` | — | Optional base URL override for Anthropic (proxy support) |
