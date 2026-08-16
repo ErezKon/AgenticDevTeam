@@ -22,6 +22,27 @@ export interface UsageTotals {
     inputTokens: number;
     outputTokens: number;
     totalTokens: number;
+    /** Input tokens served from the provider's prompt cache (Plan 22, D2). */
+    cacheReadTokens?: number;
+    /** Input tokens written to the provider's prompt cache (Plan 22, D2). */
+    cacheCreationTokens?: number;
+}
+
+/**
+ * Extract cache-token counts from any provider usage shape (Plan 22, D2).
+ *
+ * These numbers were already present on every Anthropic response and were being
+ * discarded, so a total cache miss — 2.32M billed input tokens in the pacmanclaude
+ * run with `cache_read: 0` on all 227 calls — was invisible.
+ */
+function extractCacheTokens(usage: any): { cacheReadTokens: number; cacheCreationTokens: number } {
+    const details = usage.input_token_details ?? usage.inputTokenDetails ?? {};
+    return {
+        cacheReadTokens:
+            usage.cache_read_input_tokens ?? details.cache_read ?? details.cacheRead ?? 0,
+        cacheCreationTokens:
+            usage.cache_creation_input_tokens ?? details.cache_creation ?? details.cacheCreation ?? 0,
+    };
 }
 
 /**
@@ -55,7 +76,7 @@ export function normaliseUsage(usage: any): UsageTotals | null {
     const totalTokens = usage.totalTokens ?? usage.total_tokens ?? (inputTokens + outputTokens);
     if (totalTokens === 0) return null;
 
-    return { inputTokens, outputTokens, totalTokens };
+    return { inputTokens, outputTokens, totalTokens, ...extractCacheTokens(usage) };
 }
 
 /**
@@ -70,6 +91,8 @@ export function sumUsageMetadata(messages: any[] | undefined): UsageTotals | nul
     let inputTokens = 0;
     let outputTokens = 0;
     let totalTokens = 0;
+    let cacheReadTokens = 0;
+    let cacheCreationTokens = 0;
     let found = false;
 
     for (const msg of messages) {
@@ -79,9 +102,13 @@ export function sumUsageMetadata(messages: any[] | undefined): UsageTotals | nul
         inputTokens += totals.inputTokens;
         outputTokens += totals.outputTokens;
         totalTokens += totals.totalTokens;
+        cacheReadTokens += totals.cacheReadTokens ?? 0;
+        cacheCreationTokens += totals.cacheCreationTokens ?? 0;
     }
 
-    return found ? { inputTokens, outputTokens, totalTokens } : null;
+    return found
+        ? { inputTokens, outputTokens, totalTokens, cacheReadTokens, cacheCreationTokens }
+        : null;
 }
 
 // ─── Per-invocation aggregation ─────────────────────────────────────────────
@@ -115,6 +142,8 @@ export function extractTokenUsageFromMessages(
         inputTokens: totals.inputTokens,
         outputTokens: totals.outputTokens,
         totalTokens: totals.totalTokens,
+        cacheReadTokens: totals.cacheReadTokens,
+        cacheCreationTokens: totals.cacheCreationTokens,
         timestamp: new Date().toISOString(),
     };
 }

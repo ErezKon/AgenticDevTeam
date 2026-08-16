@@ -10,6 +10,16 @@
  * - Cached responses are FREE — they do not consume any budget counter.
  * - Budget exhaustion injects a terminal guidance message instead of
  *   silently poisoning everything.
+ *
+ * Plan 22 (A1–A4) — parallel-tool-call models:
+ * - Anthropic models emit up to 11 tool calls in a SINGLE turn.  A ceiling
+ *   denominated in tool *calls* therefore gives Claude 5 turns where it gives
+ *   an OpenAI model 26.  A separate `maxTurns` ceiling makes budget behaviour
+ *   identical regardless of parallel fan-out (A2).
+ * - Budget pressure is surfaced on every tool result once usage crosses 60%,
+ *   so the agent can plan its landing instead of crashing into the ceiling (A3).
+ * - `isTerminationDemanded()` lets the agent factory strip tools from the next
+ *   model call, ending the post-exhaustion spin (A4).
  */
 import type { StructuredToolInterface } from '@langchain/core/tools';
 import { tool } from '@langchain/core/tools';
@@ -24,6 +34,19 @@ const MAX_REPEATED_TOOL_CALLS = 2;   // 1st call runs, 2nd returns cached/warns
 
 /** Extra identical attempts tolerated after the warning before blocking. */
 const LOOP_TOLERANCE = 1;
+
+/** Fraction of any budget above which a soft-pressure footer is appended. */
+const PRESSURE_WARN_RATIO = 0.6;
+
+/** Fraction of any budget above which the footer escalates to CRITICAL. */
+const PRESSURE_CRITICAL_RATIO = 0.85;
+
+/**
+ * Calls arriving within this window of the first call of a batch are treated as
+ * belonging to the same model turn.  Only used when the framework does not
+ * expose a turn identifier (see `turnKeyFromConfig`).
+ */
+const TURN_BATCH_WINDOW_MS = 250;
 
 // ─── Tool classification ────────────────────────────────────────────────────
 
@@ -49,38 +72,86 @@ function classifyTool(name: string): ToolCategory {
     return 'read';
 }
 
+// ─── Errors ─────────────────────────────────────────────────────────────────
+
+/**
+ * Thrown by `assertNotExhausted()` — never from inside a tool, because
+ * LangGraph's ToolNode converts tool errors into ToolMessages and the loop
+ * would continue regardless.  Callers use `isTerminationDemanded()` instead.
+ */
+export class ToolBudgetExhaustedError extends Error {
+    constructor(agentId: string, public readonly usage: BudgetUsage) {
+        super(`Agent "${agentId}" exhausted its tool budget (${describeUsage(usage)})`);
+        this.name = 'ToolBudgetExhaustedError';
+    }
+}
+
 // ─── Per-rank budget defaults ───────────────────────────────────────────────
 
 export interface ToolBudgets {
     reads: number;
     writes: number;
     shell: number;
+    /** Max model turns (Plan 22 A2). Optional for backward compatibility. */
+    turns?: number;
 }
 
-const DEFAULT_BUDGETS: Record<string, ToolBudgets> = {
-    principal: { reads: 30, writes: 25, shell: 10 },
-    senior:    { reads: 25, writes: 20, shell: 8 },
-    junior:    { reads: 20, writes: 15, shell: 8 },
-    default:   { reads: 25, writes: 20, shell: 8 },
+/**
+ * Plan 22 A1: retuned for models that batch tool calls.
+ *
+ * Reads are the cheap, batched category and were the binding constraint in the
+ * pacmanclaude run (28 reads / 1 write in a 26-call flat ceiling).  Writes are
+ * what the pipeline actually needs to survive, so they get their own pool that
+ * reconnaissance can no longer drain.  `turns` is the real cost driver.
+ */
+const DEFAULT_BUDGETS: Record<string, Required<ToolBudgets>> = {
+    principal: { reads: 60, writes: 30, shell: 14, turns: 28 },
+    senior:    { reads: 50, writes: 25, shell: 12, turns: 24 },
+    junior:    { reads: 40, writes: 20, shell: 12, turns: 20 },
+    default:   { reads: 50, writes: 25, shell: 12, turns: 24 },
 };
 
 /**
  * Resolve per-rank budgets, with optional JSON override from config.
+ *
+ * The override may specify a subset of fields; missing fields fall back to the
+ * built-in defaults for that rank so a partial override cannot accidentally
+ * zero out a category.
  */
-export function resolveToolBudgets(rank: string, jsonOverride?: string): ToolBudgets {
-    if (jsonOverride) {
-        try {
-            const parsed = JSON.parse(jsonOverride);
-            if (parsed[rank]) return parsed[rank];
-        } catch { /* use defaults */ }
+export function resolveToolBudgets(rank: string, jsonOverride?: string): Required<ToolBudgets> {
+    const base = DEFAULT_BUDGETS[rank] ?? DEFAULT_BUDGETS.default;
+    if (!jsonOverride) return { ...base };
+    try {
+        const parsed = JSON.parse(jsonOverride);
+        const entry = parsed?.[rank];
+        if (entry && typeof entry === 'object') return { ...base, ...entry };
+    } catch {
+        guardLog.warn(`TOOL_BUDGETS_JSON is not valid JSON — using defaults for rank "${rank}"`);
     }
-    return DEFAULT_BUDGETS[rank] ?? DEFAULT_BUDGETS.default;
+    return { ...base };
 }
 
 // ─── Guard implementation ───────────────────────────────────────────────────
 
+export interface BudgetUsage {
+    reads: number; maxReads: number;
+    writes: number; maxWrites: number;
+    shell: number; maxShell: number;
+    turns: number; maxTurns: number;
+    total: number;
+}
+
+function describeUsage(u: BudgetUsage): string {
+    return `reads ${u.reads}/${fmt(u.maxReads)}, writes ${u.writes}/${fmt(u.maxWrites)}, `
+        + `shell ${u.shell}/${fmt(u.maxShell)}, turns ${u.turns}/${fmt(u.maxTurns)}`;
+}
+
+function fmt(n: number): string {
+    return Number.isFinite(n) ? String(n) : '∞';
+}
+
 export interface LoopGuardOptions {
-    /** Per-category budgets (reads / writes / shell). */
+    /** Per-category budgets (reads / writes / shell / turns). */
     budgets?: ToolBudgets;
     /** Legacy total-calls ceiling (used when budgets is not provided). */
     maxTotalCalls?: number;
@@ -88,6 +159,10 @@ export interface LoopGuardOptions {
     progressBonus?: number;
     /** Absolute hard ceiling for all calls combined. */
     hardCeiling?: number;
+    /** Model turns allowed. Overrides `budgets.turns` when set. */
+    maxTurns?: number;
+    /** Terminal-guidance responses tolerated before termination is demanded. */
+    maxPostExhaustionCalls?: number;
 }
 
 /**
@@ -98,24 +173,42 @@ export interface LoopGuardResult {
     tools: StructuredToolInterface[];
     /** Returns true once the guard has exhausted all budgets or hit the hard ceiling. */
     isCeilingReached: () => boolean;
+    /**
+     * True once the agent has been told the budget is gone `maxPostExhaustionCalls`
+     * times and is still calling tools.  The agent factory strips tools from the
+     * next model call so the ReAct loop must terminate (Plan 22 A4).
+     */
+    isTerminationDemanded: () => boolean;
+    /** Current budget usage — used for handoff summaries and diagnostics. */
+    getUsage: () => BudgetUsage;
+    /** Throws `ToolBudgetExhaustedError` when the ceiling has been reached. */
+    assertNotExhausted: () => void;
 }
 
 /**
  * Wrap tools with a loop-detection guard.
  *
- * Key changes from the pre-Sub-Plan-08 implementation:
+ * Key properties:
  * 1. Repeated identical calls block ONLY the offending tool, not all tools.
  * 2. Read/write/shell budgets are separate — exhausting reads cannot block writes.
  * 3. Cached responses are free — they do not increment any budget counter.
  * 4. Progress bonus: recent successful writes grant extra read budget.
- * 5. Terminal guidance message when budget is exhausted.
+ * 5. A model turn costs 1 turn regardless of how many tools it calls in parallel.
+ * 6. Budget pressure is reported before it becomes terminal.
  */
 export function withLoopGuard(
     tools: StructuredToolInterface[],
     agentId: string,
     opts?: number | LoopGuardOptions,
 ): LoopGuardResult {
-    if (tools.length === 0) return { tools, isCeilingReached: () => false };
+    const noop: LoopGuardResult = {
+        tools,
+        isCeilingReached: () => false,
+        isTerminationDemanded: () => false,
+        getUsage: () => emptyUsage(),
+        assertNotExhausted: () => { /* nothing to assert */ },
+    };
+    if (tools.length === 0) return noop;
 
     // Parse options: legacy number = maxTotalCalls, object = full options
     const options: LoopGuardOptions = typeof opts === 'number'
@@ -124,13 +217,19 @@ export function withLoopGuard(
 
     const budgets = options.budgets ?? null;
     const progressBonus = options.progressBonus ?? 10;
-    const hardCeiling = options.hardCeiling ?? 80;
+    const hardCeiling = options.hardCeiling ?? 140;
+    const maxPostExhaustionCalls = options.maxPostExhaustionCalls ?? 2;
 
     // ── Per-category counters ────────────────────────────────────────────
     let readCalls = 0;
     let writeCalls = 0;
     let shellCalls = 0;
     let totalCalls = 0;
+
+    // ── Turn tracking (Plan 22 A2) ───────────────────────────────────────
+    let turns = 0;
+    let lastTurnKey: string | null = null;
+    let lastTurnAt = 0;
 
     // Legacy mode: if no budgets, use maxTotalCalls as a flat ceiling
     const legacyMaxCalls = budgets ? null : (options.maxTotalCalls ?? 22);
@@ -139,46 +238,129 @@ export function withLoopGuard(
     let maxReads = budgets?.reads ?? Infinity;
     let maxWrites = budgets?.writes ?? Infinity;
     let maxShell = budgets?.shell ?? Infinity;
+    const maxTurns = options.maxTurns ?? budgets?.turns ?? Infinity;
 
     // ── Loop detection state ─────────────────────────────────────────────
     const callCounts = new Map<string, number>();
     const resultCache = new Map<string, string>();
     const blockedKeys = new Set<string>();   // per-(tool,args) blocks
     let allExhausted = false;
+    let postExhaustionCalls = 0;
     let recentWriteCount = 0;       // writes in the last N calls (progress tracking)
     let bonusGranted = 0;           // total bonus already granted
+
+    function emptyUsage(): BudgetUsage {
+        return {
+            reads: 0, maxReads: Infinity, writes: 0, maxWrites: Infinity,
+            shell: 0, maxShell: Infinity, turns: 0, maxTurns: Infinity, total: 0,
+        };
+    }
+
+    function usage(): BudgetUsage {
+        return {
+            reads: readCalls, maxReads,
+            writes: writeCalls, maxWrites,
+            shell: shellCalls, maxShell,
+            turns, maxTurns,
+            total: totalCalls,
+        };
+    }
 
     function isExhausted(): boolean {
         if (allExhausted) return true;
         if (totalCalls >= hardCeiling) return true;
+        if (turns >= maxTurns) return true;
         if (legacyMaxCalls !== null && totalCalls >= legacyMaxCalls) return true;
         // All categories exhausted (only when budgets are set)
         if (budgets && readCalls >= maxReads && writeCalls >= maxWrites && shellCalls >= maxShell) return true;
         return false;
     }
 
+    /**
+     * Register the model turn this call belongs to.
+     *
+     * LangGraph exposes a per-step identifier in `config.metadata.langgraph_step`;
+     * one ToolNode execution == one model turn, so it is an exact turn key.  When
+     * absent (direct `.invoke()` in tests, or a framework change) we fall back to
+     * time-window batching: parallel calls from one turn all arrive within a few
+     * milliseconds of each other.
+     */
+    function registerTurn(config: unknown): void {
+        const key = turnKeyFromConfig(config);
+        const now = Date.now();
+        if (key !== null) {
+            if (key !== lastTurnKey) { turns++; lastTurnKey = key; lastTurnAt = now; }
+            return;
+        }
+        if (lastTurnAt === 0 || now - lastTurnAt > TURN_BATCH_WINDOW_MS) {
+            turns++;
+            lastTurnKey = null;
+        }
+        lastTurnAt = now;
+    }
+
+    /** Soft-pressure footer appended to successful tool results (Plan 22 A3). */
+    function pressureFooter(): string {
+        if (!budgets) return '';
+        const ratios = [
+            maxReads === Infinity ? 0 : readCalls / maxReads,
+            maxWrites === Infinity ? 0 : writeCalls / maxWrites,
+            maxShell === Infinity ? 0 : shellCalls / maxShell,
+            maxTurns === Infinity ? 0 : turns / maxTurns,
+        ];
+        const worst = Math.max(...ratios);
+        if (worst < PRESSURE_WARN_RATIO) return '';
+        const state = `reads ${readCalls}/${fmt(maxReads)}, writes ${writeCalls}/${fmt(maxWrites)}, `
+            + `shell ${shellCalls}/${fmt(maxShell)}, turns ${turns}/${fmt(maxTurns)}`;
+        return worst >= PRESSURE_CRITICAL_RATIO
+            ? `\n\n[BUDGET CRITICAL: ${state} — write your remaining files and return your final JSON on the NEXT turn.]`
+            : `\n\n[BUDGET: ${state} — stop exploring and start writing files.]`;
+    }
+
+    /** Append the footer to a string result; leave non-string results alone. */
+    function withFooter(result: unknown): unknown {
+        const footer = pressureFooter();
+        if (!footer) return result;
+        if (typeof result === 'string') return result + footer;
+        return `${JSON.stringify(result)}${footer}`;
+    }
+
     // ── Terminal guidance message ────────────────────────────────────────
-    const EXHAUSTED_MSG = JSON.stringify({
-        error: `BUDGET EXHAUSTED: Agent "${agentId}" has used all available tool calls. ` +
-            'Return your JSON output now, listing exactly the files you actually wrote. ' +
-            'Do not claim files you did not write. ' +
-            'Produce your final JSON response matching the response schema.',
-    });
+    function exhaustedMessage(): string {
+        return JSON.stringify({
+            error: `BUDGET EXHAUSTED: Agent "${agentId}" has used all available tool calls `
+                + `(${describeUsage(usage())}). `
+                + 'Return your JSON output now, listing exactly the files you actually wrote. '
+                + 'Do not claim files you did not write. '
+                + 'Produce your final JSON response matching the response schema.',
+        });
+    }
 
     const wrappedTools = tools.map((originalTool) => {
-        const wrappedFn = async (args: Record<string, any>) => {
+        const wrappedFn = async (args: Record<string, any>, config?: unknown) => {
             const toolName = originalTool.name;
             const category = classifyTool(toolName);
             const argSig = JSON.stringify(args);
             const key = `${toolName}::${argSig}`;
 
+            registerTurn(config);
+
             // Fast path: if all budgets exhausted, return terminal guidance
             if (isExhausted()) {
                 if (!allExhausted) {
-                    guardLog.error(`${agentId}: all tool budgets exhausted (total=${totalCalls}) — returning terminal guidance`);
+                    guardLog.error(
+                        `${agentId}: all tool budgets exhausted (${describeUsage(usage())}) — returning terminal guidance`,
+                    );
                     allExhausted = true;
                 }
-                return EXHAUSTED_MSG;
+                postExhaustionCalls++;
+                if (postExhaustionCalls === maxPostExhaustionCalls) {
+                    guardLog.error(
+                        `${agentId}: still calling tools after ${postExhaustionCalls} exhaustion notices — `
+                        + 'demanding termination (tools will be withheld from the next model call)',
+                    );
+                }
+                return exhaustedMessage();
             }
 
             // ── Per-(tool,args) block check ──────────────────────────────
@@ -270,7 +452,7 @@ export function withLoopGuard(
                     // Check if ALL categories are now exhausted
                     if (readCalls >= maxReads && writeCalls >= maxWrites && shellCalls >= maxShell) {
                         allExhausted = true;
-                        return EXHAUSTED_MSG;
+                        return exhaustedMessage();
                     }
                     return JSON.stringify({
                         error: `Your ${category} tool budget is exhausted (${category === 'read' ? readCalls : category === 'write' ? writeCalls : shellCalls} calls used). ` +
@@ -287,14 +469,14 @@ export function withLoopGuard(
                     `${agentId}: exceeded ${legacyMaxCalls} total tool calls (${totalCalls}/${legacyMaxCalls})`,
                 );
                 allExhausted = true;
-                return EXHAUSTED_MSG;
+                return exhaustedMessage();
             }
 
             // Hard ceiling
             if (totalCalls >= hardCeiling) {
                 guardLog.error(`${agentId}: hit hard ceiling of ${hardCeiling} total calls`);
                 allExhausted = true;
-                return EXHAUSTED_MSG;
+                return exhaustedMessage();
             }
 
             // ── Increment category counter ───────────────────────────────
@@ -311,7 +493,7 @@ export function withLoopGuard(
                 resultCache.set(key, resultStr);
             }
 
-            return result;
+            return withFooter(result);
         };
 
         return tool(wrappedFn, {
@@ -324,5 +506,27 @@ export function withLoopGuard(
     return {
         tools: wrappedTools,
         isCeilingReached: () => isExhausted(),
+        isTerminationDemanded: () => postExhaustionCalls >= maxPostExhaustionCalls,
+        getUsage: () => usage(),
+        assertNotExhausted: () => {
+            if (isExhausted()) throw new ToolBudgetExhaustedError(agentId, usage());
+        },
     };
+}
+
+// ─── Helpers ────────────────────────────────────────────────────────────────
+
+/**
+ * Extract a per-model-turn identifier from the RunnableConfig LangGraph passes
+ * to a tool. Returns `null` when no usable key is present.
+ */
+function turnKeyFromConfig(config: unknown): string | null {
+    if (!config || typeof config !== 'object') return null;
+    const meta = (config as { metadata?: Record<string, unknown> }).metadata;
+    const step = meta?.langgraph_step;
+    if (typeof step === 'number' || typeof step === 'string') return `step:${step}`;
+    // `runId` is per model/tool run; ToolNode shares one parent run per turn.
+    const parent = (config as { parentRunId?: unknown }).parentRunId;
+    if (typeof parent === 'string' && parent.length > 0) return `parent:${parent}`;
+    return null;
 }

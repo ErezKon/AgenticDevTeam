@@ -484,11 +484,13 @@ Developer agents no longer receive git tool schemas (8 tools removed from every 
 
 When a developer agent hits its tool-call ceiling, instead of "poisoning" all tools (leaving the agent to flail with maximal context), the system:
 
-1. Extracts a **deterministic handoff summary** from the message history (files written, commands run, key findings) -- no extra LLM call
-2. Spawns a **fresh agent** with a clean `MemorySaver` and new `thread_id`
-3. Prepends the compact handoff (~1,200 chars) to the original task
+1. Extracts a **deterministic handoff summary** from the message history -- no extra LLM call
+2. Verifies it against the worktree (`git diff` + `git status --porcelain --untracked-files=all`), so files written, byte sizes and the tracked-file tree are **ground truth rather than the agent's claim**
+3. Carries forward what the predecessor already inspected (`filesRead`), a `git ls-files` tree snapshot, and the tool budget it spent -- so the successor does not restart reconnaissance from zero
+4. Spawns a **fresh agent** with a clean `MemorySaver` and new `thread_id`
+5. Prepends the compact handoff to the original task
 
-The successor starts at ~4K input tokens with better signal than the predecessor had at 15K. Up to `AGENT_RESPAWN_MAX_GENERATIONS` (default: 2) respawns are allowed per task.
+The successor starts at ~4K input tokens with better signal than the predecessor had at 15K. Up to `AGENT_RESPAWN_MAX_GENERATIONS` respawns are allowed per task, but a generation that neither writes a file nor gets a build/test command to pass is only retried **once** -- an agent that spends its whole budget exploring is stopped rather than respawned four times.
 
 #### 7. Aggressive Schema Stripping
 
@@ -506,7 +508,9 @@ All compaction features default to **on**. To disable any feature, set its envir
 |----------|---------|-------------------|
 | `HISTORY_COMPACTION_ENABLED` | `true` | Disables the compaction middleware; full history replayed on every call |
 | `MAX_TOOL_RESULT_CHARS` | `6000` | Set higher to allow longer tool results |
-| `HISTORY_KEEP_RECENT_TOOL_RESULTS` | `3` | Increase to keep more recent results verbatim |
+| `HISTORY_KEEP_RECENT_TOOL_RESULTS` | `4` | Increase to keep more recent results verbatim (lower bound) |
+| `HISTORY_KEEP_RECENT_TURNS` | `3` | Increase to keep more whole model turns verbatim |
+| `HISTORY_KEEP_RECENT_WRITE_ARGS` | `2` | Increase to keep more recent write arguments un-elided |
 | `HISTORY_MAX_CHARS` | `40000` | Raise the hard ceiling for compacted history |
 | `CONVENTIONS_INLINE_DIGEST` | `true` | Revert to agents reading convention files via `read_file` |
 | `DEV_GIT_TOOLS_ENABLED` | `false` | Set `true` to restore git tools for dev agents |
@@ -860,10 +864,14 @@ npm run build
 | `ANTHROPIC_BASE_URL` | — | Optional base URL override for Anthropic (proxy support) |
 | `GOOGLE_BASE_URL` | — | Optional base URL override for Google (proxy support) |
 | `LLM_PROVIDER_DETECTION` | `auto` | Provider detection: `auto` (detect from model name) or `openai` (force all through OpenAI endpoint) |
+| **Anthropic Prompt Caching (Plan 22)** | | |
+| `ANTHROPIC_PROMPT_CACHE_ENABLED` | `true` | Place `cache_control` breakpoints on the system prompt (also covers tool schemas), the task message and the stable history prefix. Without it the fixed ~6 kB preamble is re-billed on every call |
+| `SANITY_ASSERT_CACHE` | `true` | Log an ERROR when Anthropic reports zero cache reads — a cache that silently never engages is expensive and otherwise invisible |
+| `SANITY_ASSERT_CACHE_AFTER` | `20` | Number of Anthropic calls after which the zero-cache assertion fires |
 | **Strong Model PR Fixer (Plan 20)** | | |
 | `STRONG_FIXER_MODEL` | — | Model for the strong fixer agent (e.g. `claude-opus-4-20250514`). Empty uses `PRINCIPAL_DEV_MODEL` |
 | `STRONG_FIXER_ENABLED` | `true` | Enable/disable the strong model PR fixer |
-| `STRONG_FIXER_MAX_TOOL_CALLS` | `40` | Max tool calls for the strong fixer agent |
+| `STRONG_FIXER_MAX_TOOL_CALLS` | `40` | **Model-turn** ceiling for the strong fixer agent (Plan 22 changed the unit from tool calls to turns) |
 | `PR_EXHAUSTION_STRATEGY` | `escalate-then-fix` | PR exhaustion strategy: `escalate-then-fix`, `fix-only`, or `escalate-only` |
 | `OAUTH_TOKEN_URL` | — | OAuth2 token endpoint URL |
 | `OAUTH_CLIENT_ID` | — | OAuth2 client ID |
@@ -911,7 +919,9 @@ See [`.env.example`](.env.example) for the full template.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `MAX_TOOL_RESULT_CHARS` | `6000` | Max characters any single tool result may contribute to agent history |
-| `HISTORY_KEEP_RECENT_TOOL_RESULTS` | `3` | Number of most-recent tool results kept verbatim in ReAct history |
+| `HISTORY_KEEP_RECENT_TOOL_RESULTS` | `4` | Number of most-recent tool results kept verbatim in ReAct history (lower bound only) |
+| `HISTORY_KEEP_RECENT_TURNS` | `3` | Number of most-recent **model turns** whose tool results are kept verbatim. Primary recent-window control — counting individual results preserved only one turn when a model batches 8–11 calls (Plan 22) |
+| `HISTORY_KEEP_RECENT_WRITE_ARGS` | `2` | Number of most-recent write turns whose tool-call arguments are never elided (Plan 22) |
 | `HISTORY_COMPACTION_ENABLED` | `true` | Enable the middleware that compacts ReAct history before each LLM call |
 | `HISTORY_MAX_CHARS` | `40000` | Hard character ceiling for the assembled ReAct history passed to the LLM |
 | `CONVENTIONS_INLINE_DIGEST` | `true` | Inject a distilled conventions digest instead of agents reading convention files |
@@ -921,6 +931,12 @@ See [`.env.example`](.env.example) for the full template.
 | `AGENT_RESPAWN_MAX_GENERATIONS` | `2` | Max respawn generations per logical dev task |
 | `AGENT_RESPAWN_TOKEN_THRESHOLD` | `14000` | Input-token threshold that triggers a respawn |
 | `RESPONSE_SCHEMA_STRIP_ALL_DESCRIPTIONS` | `true` | Strip ALL descriptions from injected JSON Schema for maximum token savings |
+| **Tool Budgets (Plan 22)** | | |
+| `TOOL_BUDGETS_JSON` | — | Per-rank read/write/shell/**turn** budgets, merged over the built-in defaults (principal 60/30/14/28, senior 50/25/12/24, junior 40/20/12/20). A turn costs 1 regardless of how many tools the model calls in parallel |
+| `LOOP_GUARD_HARD_CEILING` | `140` | Absolute per-invocation tool-call ceiling across all categories |
+| `LOOP_GUARD_PROGRESS_BONUS` | `10` | Extra read calls granted once an agent has produced verified writes |
+| `MAX_POST_EXHAUSTION_CALLS` | `2` | Terminal-guidance responses tolerated before tools are withheld from the next model call, forcing the ReAct loop to end |
+| `AGENT_ARTIFACTS_IN_REPO` | `false` | Write mission reports into the product repo. Default off: they go to `outputs/<run>/agents/` and `docs/agents/` + `.agent/` are gitignored |
 | **Quality Gates** | | |
 | `QUALITY_GATES_ENABLED` | `true` | Enable multi-language quality gates (install/typecheck/build/lint/test) |
 | `QUALITY_GATE_STEPS` | `install,typecheck,build,lint,test` | Comma-separated gate steps to run |
@@ -937,7 +953,8 @@ See [`.env.example`](.env.example) for the full template.
 | **Gate Integrity (Plan 19 Sub-Plan 02)** | | |
 | `GATE_INTEGRITY_MODE` | `enforce` | Baseline-diff enforcement: `off` / `warn` / `enforce` |
 | `FS_CONFIG_PROTECTION` | `deny` | Protect config files from agent writes: `off` / `warn` / `deny` |
-| `REJECT_TRIVIAL_TESTS` | `true` | Reject tests whose subject is not reachable from an entry point |
+| `REJECT_TRIVIAL_TESTS` | `true` | Reject tests whose subject is not reachable from an entry point (Playwright/Cypress specs are exempt from the import-graph rules — Plan 22) |
+| `GATE_INTEGRITY_DELETE_TRIVIAL_TESTS` | `false` | Delete flagged trivial tests. Default off: only unambiguous findings are `critical`, and every deleted body is archived to `outputs/<run>/deleted-tests/` (Plan 22) |
 | **Architecture Contract (Plan 19 Sub-Plan 05)** | | |
 | `REPO_CONTRACT_MODE` | `enforce` | Enforce the Architect's repo contract: `off` / `warn` / `enforce` |
 | `REPO_CONTRACT_MAX_MODULES` | `60` | Cap on declared modules in the contract |

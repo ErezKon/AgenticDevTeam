@@ -79,22 +79,36 @@ describe('buildStrongFixerAgent', () => {
         expect(cfg.model).toBe('gpt-oss-120b');
     });
 
-    it('uses STRONG_FIXER_MAX_TOOL_CALLS for the tool budget', () => {
+    // Plan 22 A1/A2: the fixer now receives per-category budgets, and
+    // STRONG_FIXER_MAX_TOOL_CALLS bounds *model turns* rather than tool calls.
+    it('uses STRONG_FIXER_MAX_TOOL_CALLS as the turn ceiling', () => {
         const { buildStrongFixerAgent } = loadBuilder({
             STRONG_FIXER_MAX_TOOL_CALLS: 60,
         });
         buildStrongFixerAgent('test-key', '/tmp/workspace');
 
         const cfg = mockBuildAgent.mock.calls[0][1];
-        expect(cfg.maxToolCalls).toBe(60);
+        expect(cfg.maxToolCalls).toBeUndefined();
+        expect(cfg.toolBudgets.turns).toBe(60);
     });
 
-    it('defaults to 40 max tool calls', () => {
+    it('defaults to a 40-turn ceiling', () => {
         const { buildStrongFixerAgent } = loadBuilder();
         buildStrongFixerAgent('test-key', '/tmp/workspace');
 
         const cfg = mockBuildAgent.mock.calls[0][1];
-        expect(cfg.maxToolCalls).toBe(40);
+        expect(cfg.toolBudgets.turns).toBe(40);
+    });
+
+    it('gets more headroom than a principal dev in every category', () => {
+        const { buildStrongFixerAgent } = loadBuilder();
+        buildStrongFixerAgent('test-key', '/tmp/workspace');
+
+        const cfg = mockBuildAgent.mock.calls[0][1];
+        // principal defaults are { reads: 60, writes: 30, shell: 14 }
+        expect(cfg.toolBudgets.reads).toBe(80);
+        expect(cfg.toolBudgets.writes).toBe(40);
+        expect(cfg.toolBudgets.shell).toBe(20);
     });
 
     it('uses temperature 0.2', () => {
@@ -267,7 +281,7 @@ describe('buildDevAgent', () => {
         expect(cfg.model).toBe('llama-3-2-3b');
     });
 
-    it('has lower maxToolCalls than strong fixer', () => {
+    it('has lower tool budgets than the strong fixer', () => {
         const { buildDevAgent, buildStrongFixerAgent } = loadBuilder({
             STRONG_FIXER_MAX_TOOL_CALLS: 40,
         });
@@ -284,6 +298,8 @@ describe('buildDevAgent', () => {
         buildStrongFixerAgent('key', '/tmp/ws');
         const fixerCfg = mockBuildAgent.mock.calls[0][1];
 
-        expect(fixerCfg.maxToolCalls).toBeGreaterThan(devCfg.maxToolCalls);
+        expect(fixerCfg.toolBudgets.reads).toBeGreaterThan(devCfg.toolBudgets.reads);
+        expect(fixerCfg.toolBudgets.writes).toBeGreaterThan(devCfg.toolBudgets.writes);
+        expect(fixerCfg.toolBudgets.turns).toBeGreaterThan(devCfg.toolBudgets.turns);
     });
 });

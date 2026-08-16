@@ -39,6 +39,19 @@ export interface HandoffSummary {
     remainingWork: string;
     /** True when the handoff was verified against the worktree. */
     worktreeVerified: boolean;
+    /**
+     * Files the previous generation already inspected (Plan 22, C2).
+     *
+     * Without this, every respawn generation restarts reconnaissance from zero:
+     * dumps 019/020/021 of the pacmanclaude run each re-read the same 24 files
+     * and two of them exhausted their budget before writing anything.
+     */
+    filesRead: string[];
+    /** `git ls-files` snapshot of the worktree, so the successor never has to
+     *  spend read calls discovering the tree (Plan 22, C2). */
+    treeSnapshot: string[];
+    /** Tool budget the previous generation consumed (Plan 22, C2). */
+    budgetSpent?: { reads: number; writes: number; shell: number; turns: number };
 }
 
 // ─── Tool-call argument extractors ──────────────────────────────────────────
@@ -48,6 +61,15 @@ const FILE_WRITE_TOOLS = new Set(['write_file', 'edit_file', 'create_file']);
 
 /** Tool names that run shell commands. */
 const COMMAND_TOOLS = new Set(['run_command']);
+
+/** Tool names whose targets are worth listing as "already inspected". */
+const READ_TOOLS = new Set(['read_file', 'list_dir', 'search_code']);
+
+/** Max entries in the tree snapshot handed to the successor generation. */
+const MAX_TREE_SNAPSHOT_ENTRIES = 200;
+
+/** Max entries in the already-inspected list handed to the successor. */
+const MAX_FILES_READ_ENTRIES = 60;
 
 /**
  * Parse the exit code from a run_command tool result.
@@ -90,10 +112,13 @@ export function buildHandoff(
     generation: number,
     worktreeDir?: string,
     baseBranch?: string,
+    budgetSpent?: HandoffSummary['budgetSpent'],
 ): HandoffSummary {
     const filesWritten: HandoffFile[] = [];
     const commandsRun: { command: string; exitCode: number; tailOutput?: string }[] = [];
     const keyFindings: string[] = [];
+    const filesReadSet = new Set<string>();
+    let treeSnapshot: string[] = [];
     let remainingWork = '';
     let worktreeVerified = false;
 
@@ -130,6 +155,14 @@ export function buildHandoff(
                     filesWritten[existingIdx].action = action;
                 } else {
                     filesWritten.push({ path: filePath, action });
+                }
+            }
+
+            // Plan 22 C2: record what the previous generation already inspected.
+            if (READ_TOOLS.has(toolName)) {
+                const target = args.filePath ?? args.path ?? args.dirPath ?? args.query ?? null;
+                if (typeof target === 'string' && target.length > 0) {
+                    filesReadSet.add(toolName === 'search_code' ? `search: ${target}` : target);
                 }
             }
 
@@ -186,14 +219,27 @@ export function buildHandoff(
                 }).trim();
                 for (const f of diff.split('\n').filter(Boolean)) actualFiles.add(f);
             } catch { /* no commits yet */ }
-            // git status for uncommitted changes
+            // git status for uncommitted changes.
+            //
+            // `--untracked-files=all` is load-bearing: plain `git status --short`
+            // collapses a wholly-untracked directory into a single `?? src/` entry,
+            // so a generation that created `src/a.ts`, `src/b.ts`, … was recorded as
+            // having written the directory `src/`. That was invisible until Plan 22
+            // C1 actually enabled worktree verification.
             try {
-                const status = execSync('git status --short', {
+                const status = execSync('git status --porcelain --untracked-files=all', {
                     cwd: worktreeDir, encoding: 'utf-8', timeout: 5000,
                 }).trim();
                 for (const line of status.split('\n').filter(Boolean)) {
-                    const filePath = line.slice(3).trim();
-                    if (filePath) actualFiles.add(filePath);
+                    let filePath = line.slice(3).trim();
+                    // Renames/copies are reported as `old -> new`; keep the new path.
+                    const arrow = filePath.indexOf(' -> ');
+                    if (arrow >= 0) filePath = filePath.slice(arrow + 4).trim();
+                    // Quoted paths (non-ASCII / spaces) come wrapped in double quotes.
+                    if (filePath.startsWith('"') && filePath.endsWith('"')) {
+                        filePath = filePath.slice(1, -1);
+                    }
+                    if (filePath && !filePath.endsWith('/')) actualFiles.add(filePath);
                 }
             } catch { /* ignore */ }
 
@@ -210,6 +256,16 @@ export function buildHandoff(
                 }
                 worktreeVerified = true;
             }
+
+            // Plan 22 C2: a deterministic tree snapshot removes the successor's
+            // reconnaissance phase entirely. `git ls-files` is cheap and already
+            // excludes ignored build output.
+            try {
+                const listed = execSync('git ls-files', {
+                    cwd: worktreeDir, encoding: 'utf-8', timeout: 5000,
+                }).trim();
+                treeSnapshot = listed.split('\n').filter(Boolean).slice(0, MAX_TREE_SNAPSHOT_ENTRIES);
+            } catch { /* not a git worktree — no snapshot */ }
         } catch { /* worktree verification failed, use agent-claimed files */ }
     }
 
@@ -220,6 +276,9 @@ export function buildHandoff(
         keyFindings,
         remainingWork,
         worktreeVerified,
+        filesRead: [...filesReadSet].slice(0, MAX_FILES_READ_ENTRIES),
+        treeSnapshot,
+        budgetSpent,
     };
 }
 
@@ -263,6 +322,32 @@ export function renderHandoff(h: HandoffSummary): string {
         sections.push(`### Notes from your previous generation\n${h.keyFindings.join(' ')}`);
     }
 
+    // Plan 22 C2: already-inspected list + tree snapshot. Together these remove
+    // the reconnaissance phase that consumed the whole budget of three
+    // generations in the pacmanclaude run.
+    if (h.filesRead.length > 0) {
+        sections.push(
+            '### Already inspected by the previous generation (do NOT re-read unless you intend to change them)\n'
+            + h.filesRead.map(f => `- ${f}`).join('\n'),
+        );
+    }
+
+    if (h.treeSnapshot.length > 0) {
+        sections.push(
+            `### Files tracked in this worktree (${h.treeSnapshot.length} shown — this IS the tree, do not list_dir to discover it)\n`
+            + h.treeSnapshot.map(f => `- ${f}`).join('\n'),
+        );
+    }
+
+    if (h.budgetSpent) {
+        const b = h.budgetSpent;
+        sections.push(
+            `### Tool budget already spent by the previous generation\n`
+            + `reads ${b.reads}, writes ${b.writes}, shell ${b.shell}, turns ${b.turns}. `
+            + 'Reconnaissance is already paid for — spend your budget on writing code.',
+        );
+    }
+
     // Remaining work
     sections.push(`### What remains\n${h.remainingWork}`);
 
@@ -270,4 +355,20 @@ export function renderHandoff(h: HandoffSummary): string {
     sections.push('Do NOT re-read files you already wrote unless you need to change them.');
 
     return sections.join('\n');
+}
+
+/**
+ * Did a generation make progress worth another respawn? (Plan 22, C3)
+ *
+ * The old gate was `filesWritten.length > 0`. Two problems: (a) `filesWritten`
+ * was the agent's *claim* because `buildHandoff` was called without a worktree
+ * (C1), and (b) a generation that got the build green without writing files had
+ * plainly made progress yet was terminated. A successful build/test/lint command
+ * now counts.
+ */
+export function madeProgress(h: HandoffSummary): boolean {
+    if (h.filesWritten.length > 0) return true;
+    return h.commandsRun.some(c =>
+        c.exitCode === 0 && /\b(test|build|tsc|lint|vitest|jest|pytest|gradle|mvn|go\s+build)\b/i.test(c.command),
+    );
 }

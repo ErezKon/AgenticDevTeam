@@ -11,6 +11,11 @@
 jest.mock('../src/config', () => ({
     HISTORY_KEEP_RECENT_TOOL_RESULTS: 3,
     HISTORY_MAX_CHARS: 40000,
+    // Plan 22 B3/B4. `keepRecentTurns: 0` keeps the legacy tool-result-counted
+    // boundary as the default for this suite; the turn-aware behaviour is
+    // exercised explicitly in `compactHistory — parallel tool calls (Plan 22 B4)`.
+    HISTORY_KEEP_RECENT_TURNS: 0,
+    HISTORY_KEEP_RECENT_WRITE_ARGS: 0,
 }));
 
 import {
@@ -160,7 +165,7 @@ describe('compactHistory — keepRecent', () => {
         for (const tm of olderOnes) {
             expect(typeof tm.content).toBe('string');
             expect(tm.content.length).toBeLessThan(120);
-            expect(tm.content).toContain('elided');
+            expect(tm.content).toContain('ELIDED');
         }
         expect(stats.toolResultsStubbed).toBeGreaterThan(0);
     });
@@ -194,7 +199,7 @@ describe('compactHistory — tool result stubbing', () => {
         expect(oldToolMsg.content.length).toBeLessThan(120);
         expect(oldToolMsg.content).toContain('read_file');
         expect(oldToolMsg.content).toContain('20000');
-        expect(oldToolMsg.content).toContain('elided');
+        expect(oldToolMsg.content).toContain('ELIDED');
         expect(stats.toolResultsStubbed).toBe(1);
     });
 
@@ -252,7 +257,7 @@ describe('compactHistory — write arg elision', () => {
         // filePath should be preserved
         expect(writeCall.args.filePath).toBe('src/Board.tsx');
         // content should be elided
-        expect(writeCall.args.content).toContain('chars elided');
+        expect(writeCall.args.content).toContain('ORCHESTRATOR-ELIDED');
         expect(writeCall.args.content).toContain('5000');
         expect(stats.writeArgsStubbed).toBeGreaterThan(0);
     });

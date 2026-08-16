@@ -178,8 +178,11 @@ describe('shared normalisation helpers', () => {
     });
 
     it('normaliseUsage derives total when the provider omits it', () => {
+        // Plan 22 D2: cache counters are always reported (0 when the provider
+        // does not use a prompt cache) so a total cache miss is visible.
         expect(normaliseUsage({ input_tokens: 7, output_tokens: 3 })).toEqual({
             inputTokens: 7, outputTokens: 3, totalTokens: 10,
+            cacheReadTokens: 0, cacheCreationTokens: 0,
         });
     });
 

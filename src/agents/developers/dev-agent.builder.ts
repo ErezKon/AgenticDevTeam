@@ -10,7 +10,8 @@ import { DeveloperOutputSchema } from './schemas/dev-output.schema';
 import { createWorkspaceTools } from '../../tools/fs/workspace-tools';
 import { createGitTools } from '../../tools/git/git-tools';
 import { createShellTool } from '../../tools/shell/shell-tools';
-import { PRINCIPAL_DEV_MODEL, SENIOR_DEV_MODEL, JUNIOR_DEV_MODEL, DEV_GIT_TOOLS_ENABLED, STRONG_FIXER_MODEL, STRONG_FIXER_MAX_TOOL_CALLS } from '../../config';
+import { PRINCIPAL_DEV_MODEL, SENIOR_DEV_MODEL, JUNIOR_DEV_MODEL, DEV_GIT_TOOLS_ENABLED, STRONG_FIXER_MODEL, STRONG_FIXER_MAX_TOOL_CALLS, TOOL_BUDGETS_JSON } from '../../config';
+import { resolveToolBudgets } from '../_shared/tool-loop-guard';
 import type { GitContext } from '../_shared/base-schemas';
 import type { DevAgentEntry } from './registry';
 
@@ -58,13 +59,12 @@ export function buildDevAgent(
         createShellTool(workspaceRoot),
     ];
 
-    // Lowered ceilings since git ceremony calls are gone and history is
-    // now compacted. The respawn mechanism (Step 8) handles the case
-    // where an agent legitimately needs more calls — hitting the ceiling
-    // now triggers a clean respawn instead of poisoning.
-    const maxToolCalls = entry.rank === 'principal' ? 26
-        : entry.rank === 'senior' ? 22
-        : 18; // junior
+    // Plan 22 A1: separate read/write/shell pools plus a turn ceiling, instead of
+    // a single flat call ceiling (26/22/18). The flat ceiling was denominated in
+    // tool *calls*, so a Claude agent that batched 11 reads into one turn burned
+    // its whole budget in five turns and could no longer write anything —
+    // 3 of 6 dev generations in the pacmanclaude run produced zero writes.
+    const toolBudgets = resolveToolBudgets(entry.rank, TOOL_BUDGETS_JSON);
 
     return buildAgent(apiKey, {
         id: entry.id,
@@ -74,7 +74,7 @@ export function buildDevAgent(
         temperature: entry.temperature,
         model: getModelForRank(entry.rank),
         phase: 'development',
-        maxToolCalls,
+        toolBudgets,
         topK: undefined,
         topP: undefined
     });
@@ -120,6 +120,18 @@ export function buildStrongFixerAgent(
         createShellTool(workspaceRoot),
     ];
 
+    // Plan 22 A1: the fixer gets principal budgets with extra headroom in every
+    // category — it must read the whole diff AND fix it in one pass. Its turn
+    // ceiling is STRONG_FIXER_MAX_TOOL_CALLS, which now bounds model turns rather
+    // than individual tool calls (see config.ts).
+    const principalBudgets = resolveToolBudgets('principal', TOOL_BUDGETS_JSON);
+    const toolBudgets = {
+        reads: principalBudgets.reads + 20,
+        writes: principalBudgets.writes + 10,
+        shell: principalBudgets.shell + 6,
+        turns: STRONG_FIXER_MAX_TOOL_CALLS,
+    };
+
     return buildAgent(apiKey, {
         id: 'strong-fixer',
         systemPrompt,
@@ -128,7 +140,7 @@ export function buildStrongFixerAgent(
         temperature: 0.2,
         model: fixerModel,
         phase: 'development',
-        maxToolCalls: STRONG_FIXER_MAX_TOOL_CALLS,
+        toolBudgets,
         topK: undefined,
         topP: undefined
     });

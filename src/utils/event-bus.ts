@@ -24,6 +24,9 @@ export type RunEventType =
     | 'agent:start' | 'agent:end' | 'agent:respawn' | 'agent:budget-exhausted'
     | 'tool:call'
     | 'pr:opened' | 'pr:reviewed' | 'pr:merged' | 'pr:blocked' | 'pr:conflict' | 'pr:salvage' | 'pr:strong-fixer'
+    // Plan 22 G3: a branch is pushed long before its PR is opened. Without these
+    // a pushed-but-PR-less branch is indistinguishable from a crashed run.
+    | 'branch:pushed' | 'branch:pr-pending'
     | 'gate:result'
     | 'acceptance:result'
     | 'plan:coverage'

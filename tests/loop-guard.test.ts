@@ -86,9 +86,11 @@ describe('Tool Loop Guard', () => {
         const r2 = await guardedRead.invoke({ path: 'a' });
         expect(r2).toContain('CACHED');
 
-        // 3rd read with args B: consumes 2nd read budget — should still work
+        // 3rd read with args B: consumes 2nd read budget — should still work.
+        // Plan 22 A3 appends a budget-pressure footer once usage crosses 60%, so
+        // the payload is a prefix rather than the whole string.
         const r3 = await guardedRead.invoke({ path: 'b' });
-        expect(r3).toBe('content');
+        expect(r3).toContain('content');
         expect(readFile.getExecCount()).toBe(2);  // only 2 real executions
 
         // Not exhausted — cached call didn't count
@@ -243,22 +245,39 @@ describe('Tool Loop Guard', () => {
 });
 
 describe('resolveToolBudgets', () => {
+    // Plan 22 A1 retuned these for models that batch tool calls, and added a
+    // `turns` ceiling so budget behaviour no longer depends on parallel fan-out.
     it('returns default budgets for known ranks', () => {
         const principal = resolveToolBudgets('principal');
-        expect(principal).toEqual({ reads: 30, writes: 25, shell: 10 });
+        expect(principal).toEqual({ reads: 60, writes: 30, shell: 14, turns: 28 });
 
         const junior = resolveToolBudgets('junior');
-        expect(junior).toEqual({ reads: 20, writes: 15, shell: 8 });
+        expect(junior).toEqual({ reads: 40, writes: 20, shell: 12, turns: 20 });
     });
 
     it('falls back to default for unknown ranks', () => {
         const unknown = resolveToolBudgets('intern');
-        expect(unknown).toEqual({ reads: 25, writes: 20, shell: 8 });
+        expect(unknown).toEqual({ reads: 50, writes: 25, shell: 12, turns: 24 });
     });
 
-    it('parses JSON override', () => {
+    it('merges a partial JSON override over the rank defaults', () => {
         const override = JSON.stringify({ senior: { reads: 50, writes: 40, shell: 20 } });
         const senior = resolveToolBudgets('senior', override);
-        expect(senior).toEqual({ reads: 50, writes: 40, shell: 20 });
+        // reads/writes/shell overridden; `turns` retained from the defaults so a
+        // partial override cannot silently zero out a category.
+        expect(senior).toEqual({ reads: 50, writes: 40, shell: 20, turns: 24 });
+    });
+
+    it('lets an override set only the turn ceiling', () => {
+        const override = JSON.stringify({ junior: { turns: 40 } });
+        expect(resolveToolBudgets('junior', override)).toEqual({
+            reads: 40, writes: 20, shell: 12, turns: 40,
+        });
+    });
+
+    it('falls back to defaults when the override is not valid JSON', () => {
+        expect(resolveToolBudgets('principal', '{not json')).toEqual({
+            reads: 60, writes: 30, shell: 14, turns: 28,
+        });
     });
 });

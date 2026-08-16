@@ -134,9 +134,35 @@ function slugify(text: string): string {
 
 // ─── Scaffold barrier (Sub-Plan 06 §5a) ─────────────────────────────────────
 
+/**
+ * Matches a scaffold branch name with or without a project prefix.
+ *
+ * Plan 22 F1: the previous pattern was `/\/chore\/scaffold$/i`, which requires a
+ * leading slash. The Team Leader emits un-prefixed names like `chore/scaffold`
+ * (the dispatcher adds the `<project>/` prefix later), so the test failed and the
+ * scaffold barrier never fired in the pacmanclaude run — no `Scaffold barrier:`
+ * line appears in that log and the scaffold was dispatched as an ordinary
+ * serialised feature branch, so feature worktrees were not guaranteed to be cut
+ * from a merged scaffold.
+ */
+export const SCAFFOLD_BRANCH_RE = /(^|\/)chore\/scaffold$/i;
+
 /** Returns true when an assignment is part of the scaffold (chore/scaffold). */
-function isScaffoldAssignment(a: Assignment): boolean {
-    return a.taskType === 'chore' || /\/chore\/scaffold$/i.test(a.branchName ?? '');
+export function isScaffoldAssignment(a: Assignment): boolean {
+    return a.taskType === 'chore' || SCAFFOLD_BRANCH_RE.test(a.branchName ?? '');
+}
+
+/**
+ * Returns true when a *dispatch branch* is the scaffold branch.
+ *
+ * Classification is by branch name first, then by whether ANY assignment on the
+ * branch looks like scaffold work. The old rule required `every` assignment to
+ * match, so a single `refactor`-typed assignment sharing the scaffold branch
+ * silently disabled the barrier for the whole run.
+ */
+export function isScaffoldBranch(branch: string, assignments: Assignment[]): boolean {
+    if (SCAFFOLD_BRANCH_RE.test(branch)) return true;
+    return assignments.length > 0 && assignments.some(isScaffoldAssignment);
 }
 
 /**
@@ -325,11 +351,10 @@ export async function dispatchDevelopers(
 
         if (branchesToProcess.length === 0) continue;
 
-        // Sub-Plan 06 §5a: Identify scaffold branches in this layer
-        const scaffoldBranches = branchesToProcess.filter(branch => {
-            const branchAssignments = branchGroups.get(branch) ?? [];
-            return branchAssignments.every(isScaffoldAssignment);
-        });
+        // Sub-Plan 06 §5a / Plan 22 F1: Identify scaffold branches in this layer
+        const scaffoldBranches = branchesToProcess.filter(branch =>
+            isScaffoldBranch(branch, branchGroups.get(branch) ?? []),
+        );
         const featureBranches = branchesToProcess.filter(b => !scaffoldBranches.includes(b));
 
         // Sub-Plan 06 §5b: Serialise branches with overlapping modules
@@ -347,6 +372,17 @@ export async function dispatchDevelopers(
                 parallelFeatures.push(branch);
             }
         }
+
+        // Plan 22 F1: log the classification every time. Previously the only
+        // evidence that the barrier had fired was the presence of a log line, so
+        // its silent absence in the pacmanclaude run went unnoticed.
+        log.info(
+            `Branch classification: ${scaffoldBranches.length} scaffold `
+            + `[${scaffoldBranches.join(', ') || 'none'}], `
+            + `${parallelFeatures.length} parallel, `
+            + `${serialisedFeatures.length} serialised chain(s) `
+            + `(${serialisedFeatures.reduce((n, c) => n + c.length, 0)} branches)`,
+        );
 
         // Helper to run a batch of branches
         const runBranches = async (branches: string[]) => {

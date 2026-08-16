@@ -317,15 +317,17 @@ describe('createChatModel', () => {
         createChatModel({ ...baseOpts, modelName: 'claude-opus-4-20250514' });
 
         const args = MockChatAnthropic.mock.calls[0][0];
-        expect(args.clientOptions).toEqual({ baseURL: 'https://proxy.example.com' });
+        // Plan 22 D3: the request timeout now reaches Anthropic too — it used to
+        // be silently dropped, making LLM_REQUEST_TIMEOUT_MS OpenAI-only.
+        expect(args.clientOptions).toEqual({ baseURL: 'https://proxy.example.com', timeout: 30000 });
     });
 
-    it('does not set clientOptions when ANTHROPIC_BASE_URL is empty', () => {
+    it('sets clientOptions with only the timeout when ANTHROPIC_BASE_URL is empty', () => {
         const { createChatModel } = loadModule({ ANTHROPIC_BASE_URL: '' });
         createChatModel({ ...baseOpts, modelName: 'claude-sonnet-4-20250514' });
 
         const args = MockChatAnthropic.mock.calls[0][0];
-        expect(args.clientOptions).toBeUndefined();
+        expect(args.clientOptions).toEqual({ timeout: 30000 });
     });
 
     it('passes GOOGLE_BASE_URL via baseUrl when set', () => {

@@ -18,6 +18,8 @@ import {
 } from '@langchain/core/messages';
 import {
     HISTORY_KEEP_RECENT_TOOL_RESULTS,
+    HISTORY_KEEP_RECENT_TURNS,
+    HISTORY_KEEP_RECENT_WRITE_ARGS,
     HISTORY_MAX_CHARS,
 } from '../../config';
 
@@ -91,14 +93,29 @@ function messageChars(m: BaseMessage): number {
 const ELIDE_ARG_THRESHOLD = 400;
 
 /**
- * Replace any string arg value longer than ELIDE_ARG_THRESHOLD with
- * a `[N chars elided]` stub. Preserves short args (e.g. filePath) verbatim.
+ * Elision marker (Plan 22, B2).
+ *
+ * The old marker was `[1204 chars elided]`. In the pacmanclaude run a dev agent
+ * saw fifteen of those in its own compacted history and then emitted
+ * `write_file("src/persistence/SettingsStore.ts", "[770 chars elided]")` for
+ * three brand-new files — pattern imitation, not a state bug. Two properties fix
+ * that: the marker must not look like plausible source text, and it must carry
+ * its own instruction. `checkWritePayload()` in `workspace-tools.ts` is the
+ * belt-and-braces enforcement.
+ */
+function elisionMarker(chars: number, what: string): string {
+    return `⟪ORCHESTRATOR-ELIDED ${chars} chars of ${what} — already on disk; NEVER copy this marker into a file⟫`;
+}
+
+/**
+ * Replace any string arg value longer than ELIDE_ARG_THRESHOLD with an elision
+ * marker. Preserves short args (e.g. filePath) verbatim.
  */
 function elideBigArgs(args: Record<string, unknown>): Record<string, unknown> {
     const result: Record<string, unknown> = {};
     for (const [key, value] of Object.entries(args)) {
         if (typeof value === 'string' && value.length > ELIDE_ARG_THRESHOLD) {
-            result[key] = `[${value.length} chars elided]`;
+            result[key] = elisionMarker(value.length, `the "${key}" argument`);
         } else {
             result[key] = value;
         }
@@ -115,7 +132,7 @@ function stubToolContent(m: ToolMessage): string {
         ? m.content.length
         : JSON.stringify(m.content).length;
     const name = m.name ?? 'unknown_tool';
-    return `[${name} -> ${contentLen} chars, elided]`;
+    return elisionMarker(contentLen, `the ${name} result`);
 }
 
 // ─── Streaming content-block sanitiser (Plan 21, E1) ────────────────────────
@@ -157,18 +174,66 @@ export function sanitizeStreamingContentBlocks(
     const out = messages.map(m => {
         if (!isAIMessage(m) || !Array.isArray(m.content)) return m;
 
-        const cleaned = (m.content as unknown[]).filter(block => {
-            if (block === null || typeof block !== 'object') return true;
-            const type = (block as { type?: unknown }).type;
-            if (isDeltaBlock(type)) { blocksDropped++; return false; }
-            if (typeof type === 'string' && TOOL_USE_BLOCK_TYPES.has(type)) {
-                const id = (block as { id?: unknown }).id;
-                if (typeof id !== 'string' || id.length === 0) { blocksDropped++; return false; }
+        const blocks = m.content as unknown[];
+        // Plan 22 E1: `tool_use` blocks arrive with `input: ''` and the real
+        // arguments follow in sibling `input_json_delta` blocks. Reconstruct the
+        // input from those siblings so a repaired block is never sent with empty
+        // arguments — the model's own history was showing it calling `read_file`
+        // with no path at all.
+        const deltaInputByIndex = new Map<unknown, string>();
+        for (const block of blocks) {
+            if (block === null || typeof block !== 'object') continue;
+            const b = block as { type?: unknown; index?: unknown; input?: unknown };
+            if (b.type === 'input_json_delta' && typeof b.input === 'string') {
+                deltaInputByIndex.set(b.index, (deltaInputByIndex.get(b.index) ?? '') + b.input);
             }
-            return true;
-        });
+        }
 
-        if (cleaned.length === (m.content as unknown[]).length) return m;
+        const toolCallArgsById = new Map<string, unknown>();
+        for (const tc of m.tool_calls ?? []) {
+            if (tc.id) toolCallArgsById.set(tc.id, tc.args);
+        }
+
+        const cleaned: unknown[] = [];
+        for (const block of blocks) {
+            if (block === null || typeof block !== 'object') { cleaned.push(block); continue; }
+            const b = block as { type?: unknown; id?: unknown; index?: unknown; input?: unknown };
+
+            if (isDeltaBlock(b.type)) { blocksDropped++; continue; }
+
+            if (typeof b.type === 'string' && TOOL_USE_BLOCK_TYPES.has(b.type)) {
+                const id = b.id;
+                const hasId = typeof id === 'string' && id.length > 0;
+                const hasInput = b.input !== undefined && b.input !== '' && b.input !== null;
+
+                // No id — the provider adapter re-materialises the call from
+                // `tool_calls`, so the block is pure residue.
+                if (!hasId) { blocksDropped++; continue; }
+
+                if (!hasInput) {
+                    // Prefer the authoritative parsed args from `tool_calls`.
+                    const fromToolCalls = toolCallArgsById.get(id as string);
+                    if (fromToolCalls !== undefined) { blocksDropped++; continue; }
+
+                    // No matching tool_call: rebuild from the sibling deltas
+                    // rather than forwarding an argument-less tool_use.
+                    const raw = deltaInputByIndex.get(b.index);
+                    if (raw) {
+                        try {
+                            cleaned.push({ ...b, input: JSON.parse(raw) });
+                            blocksDropped++;    // the deltas were consumed
+                            continue;
+                        } catch { /* unparseable — fall through and drop */ }
+                    }
+                    blocksDropped++;
+                    continue;
+                }
+            }
+
+            cleaned.push(block);
+        }
+
+        if (cleaned.length === blocks.length) return m;
 
         return new AIMessage({
             content: cleaned as any,
@@ -178,6 +243,27 @@ export function sanitizeStreamingContentBlocks(
     });
 
     return { messages: blocksDropped > 0 ? out : messages, blocksDropped };
+}
+
+/**
+ * Normalise a freshly-returned `AIMessageChunk` into a clean `AIMessage`
+ * *before* it is persisted into graph state (Plan 22, E2).
+ *
+ * `sanitizeStreamingContentBlocks` deliberately works on a copy, so residue
+ * accumulates in the checkpoint and is re-scanned on every subsequent turn —
+ * which is why the pacmanclaude log shows `dropped 2 … dropped 31` growing
+ * monotonically within one invocation. Normalising at the state boundary makes
+ * that counter flat; the copy-based sanitiser stays as the checkpoint-resume
+ * safety net.
+ *
+ * Returns the input unchanged when there is nothing to normalise.
+ */
+export function normaliseAIMessageForState<T>(message: T): T {
+    const m = message as unknown as BaseMessage;
+    if (!isAIMessage(m) || !Array.isArray(m.content)) return message;
+    const { messages: [clean], blocksDropped } = sanitizeStreamingContentBlocks([m]);
+    if (blocksDropped === 0) return message;
+    return clean as unknown as T;
 }
 
 // ─── Main ───────────────────────────────────────────────────────────────────
@@ -202,9 +288,11 @@ export function sanitizeStreamingContentBlocks(
  */
 export function compactHistory(
     messages: BaseMessage[],
-    opts?: { keepRecent?: number; maxChars?: number },
+    opts?: { keepRecent?: number; maxChars?: number; keepRecentTurns?: number; keepRecentWriteArgs?: number },
 ): { messages: BaseMessage[]; stats: CompactionStats } {
     const keepRecent = opts?.keepRecent ?? HISTORY_KEEP_RECENT_TOOL_RESULTS;
+    const keepRecentTurns = opts?.keepRecentTurns ?? HISTORY_KEEP_RECENT_TURNS;
+    const keepRecentWriteArgs = opts?.keepRecentWriteArgs ?? HISTORY_KEEP_RECENT_WRITE_ARGS;
     const maxChars = opts?.maxChars ?? HISTORY_MAX_CHARS;
 
     const originalChars = messages.reduce((sum, m) => sum + messageChars(m), 0);
@@ -220,38 +308,20 @@ export function compactHistory(
     }
 
     // ── Identify the "recent" window ────────────────────────────────────
-    // Walk backwards counting ToolMessages until we've found `keepRecent`.
-    // Everything at index >= recentBoundary is kept verbatim.
-    let recentBoundary = messages.length; // default: everything is eligible for stubbing
-    if (keepRecent > 0) {
-        let toolResultsSeen = 0;
-        let foundBoundary = false;
-        for (let i = messages.length - 1; i >= 1; i--) { // skip index 0 (task msg)
-            if (isToolMessage(messages[i])) {
-                toolResultsSeen++;
-                if (toolResultsSeen >= keepRecent) {
-                    // Find the start of the group that contains this tool message.
-                    // Walk back to find the AIMessage that triggered it.
-                    recentBoundary = i;
-                    // Walk further back: the AIMessage with tool_calls that produced
-                    // this ToolMessage group should also be in the recent window.
-                    for (let j = i - 1; j >= 1; j--) {
-                        const candidate = messages[j];
-                        if (isAIMessage(candidate) && candidate.tool_calls?.length) {
-                            recentBoundary = j;
-                            break;
-                        }
-                    }
-                    foundBoundary = true;
-                    break;
-                }
-            }
-        }
-        // If total tool results < keepRecent, all messages are "recent"
-        if (!foundBoundary) {
-            recentBoundary = 1; // nothing is eligible for stubbing
-        }
-    }
+    // Plan 22 B4: the boundary is measured in *model turns*, not tool results.
+    // Counting tool results puts the boundary INSIDE the current turn when a
+    // model batches 8–11 parallel calls, so the compactor was stubbing results
+    // the model was about to reason over — which forced the re-reads that then
+    // exhausted the tool budget. `keepRecent` survives as a lower bound.
+    const turnBoundary = findTurnBoundary(messages, keepRecentTurns);
+    const resultBoundary = findToolResultBoundary(messages, keepRecent);
+    const recentBoundary = Math.min(turnBoundary, resultBoundary);
+
+    // Indices of AIMessages holding one of the last `keepRecentWriteArgs` write
+    // turns. Their arguments stay verbatim: the model needs to see its most
+    // recent writes to diff against them, and this is exactly the window where
+    // placeholder imitation was observed (Plan 22 B3).
+    const exemptWriteArgIndexes = findRecentWriteTurnIndexes(messages, keepRecentWriteArgs);
 
     // ── Build the compacted message array ────────────────────────────────
     const compacted: BaseMessage[] = [];
@@ -277,6 +347,10 @@ export function compactHistory(
 
         // Rule 3: Elide big args in older AIMessage tool calls
         if (isAIMessage(m) && m.tool_calls?.length) {
+            if (exemptWriteArgIndexes.has(i)) {
+                compacted.push(m);
+                continue;
+            }
             let anyElided = false;
             const elidedToolCalls = m.tool_calls.map(tc => {
                 const elidedArgs = elideBigArgs(tc.args as Record<string, unknown>);
@@ -350,6 +424,71 @@ export function compactHistory(
         messages: compacted,
         stats: { originalChars, compactedChars, toolResultsStubbed, writeArgsStubbed },
     };
+}
+
+// ─── Recent-window boundary helpers (Plan 22, B3/B4) ────────────────────────
+
+/** Tool names whose arguments carry file content worth protecting from elision. */
+const WRITE_TOOL_NAMES = new Set(['write_file', 'edit_file', 'create_file']);
+
+/** Indexes of every AIMessage that carries at least one tool call. */
+function turnIndexes(messages: BaseMessage[]): number[] {
+    const out: number[] = [];
+    for (let i = 1; i < messages.length; i++) {
+        const m = messages[i];
+        if (isAIMessage(m) && m.tool_calls?.length) out.push(i);
+    }
+    return out;
+}
+
+/**
+ * First index of the window containing the last `keepTurns` tool-calling AI
+ * turns. Everything at or after the returned index is kept verbatim, so a turn's
+ * results are never split from the turn that produced them.
+ */
+export function findTurnBoundary(messages: BaseMessage[], keepTurns: number): number {
+    if (keepTurns <= 0) return messages.length;
+    const turns = turnIndexes(messages);
+    if (turns.length === 0) return messages.length;
+    if (turns.length <= keepTurns) return 1;      // nothing old enough to stub
+    return turns[turns.length - keepTurns];
+}
+
+/**
+ * Legacy boundary: first index of the window containing the last `keepRecent`
+ * ToolMessages, extended back to the AI turn that produced them. Retained as a
+ * lower bound so `HISTORY_KEEP_RECENT_TOOL_RESULTS` still has an effect.
+ */
+export function findToolResultBoundary(messages: BaseMessage[], keepRecent: number): number {
+    if (keepRecent <= 0) return messages.length;
+    let seen = 0;
+    for (let i = messages.length - 1; i >= 1; i--) {
+        if (!isToolMessage(messages[i])) continue;
+        seen++;
+        if (seen < keepRecent) continue;
+        let boundary = i;
+        for (let j = i - 1; j >= 1; j--) {
+            const candidate = messages[j];
+            if (isAIMessage(candidate) && candidate.tool_calls?.length) { boundary = j; break; }
+        }
+        return boundary;
+    }
+    return 1;   // fewer tool results than keepRecent — everything is "recent"
+}
+
+/**
+ * Indexes of the AIMessages holding the last `keepWriteTurns` turns that
+ * contained a write tool call. Their arguments are exempt from elision.
+ */
+export function findRecentWriteTurnIndexes(messages: BaseMessage[], keepWriteTurns: number): Set<number> {
+    const exempt = new Set<number>();
+    if (keepWriteTurns <= 0) return exempt;
+    for (let i = messages.length - 1; i >= 1 && exempt.size < keepWriteTurns; i--) {
+        const m = messages[i];
+        if (!isAIMessage(m) || !m.tool_calls?.length) continue;
+        if (m.tool_calls.some(tc => WRITE_TOOL_NAMES.has(tc.name))) exempt.add(i);
+    }
+    return exempt;
 }
 
 /**

@@ -9,6 +9,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { getLogger } from '../../utils/logger';
 import { getAgentEntry } from '../registry';
+import { AGENT_ARTIFACTS_IN_REPO } from '../../config';
 import type { ArtifactRef } from './base-schemas';
 
 interface ArtifactOptions {
@@ -18,6 +19,12 @@ interface ArtifactOptions {
     colorCode: number;
     /** Root of the generated project workspace. */
     workspacePath: string;
+    /**
+     * Run output directory. When `AGENT_ARTIFACTS_IN_REPO` is false (the default)
+     * and this is provided, mission reports are written here instead of into the
+     * product repo (Plan 22, G4).
+     */
+    outputPath?: string;
     /** Artifact title (e.g. "Architect Mission Report"). */
     title: string;
     /** Markdown content (body of the report). */
@@ -40,7 +47,14 @@ export function writeArtifact(opts: ArtifactOptions): ArtifactRef {
         ? `${opts.agentId}-${opts.suffix}-mission.md`
         : `${opts.agentId}-mission.md`;
 
-    const docsDir = path.join(opts.workspacePath, 'docs', 'agents');
+    // Plan 22 G4: mission reports are pipeline telemetry, not product source.
+    // Writing them into the product repo produced six `chore: pipeline artifacts`
+    // commits on one feature branch and put docs/agents/*.md into every PR diff.
+    const inRepo = AGENT_ARTIFACTS_IN_REPO || !opts.outputPath;
+    const baseDir = inRepo ? opts.workspacePath : opts.outputPath!;
+    const docsDir = inRepo
+        ? path.join(baseDir, 'docs', 'agents')
+        : path.join(baseDir, 'agents');
     fs.mkdirSync(docsDir, { recursive: true });
     const filePath = path.join(docsDir, filename);
 
@@ -51,7 +65,7 @@ export function writeArtifact(opts: ArtifactOptions): ArtifactRef {
 
     return {
         agentId: opts.agentId,
-        filePath: path.relative(opts.workspacePath, filePath),
+        filePath: path.relative(baseDir, filePath),
         title: opts.title,
     };
 }

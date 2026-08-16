@@ -6,12 +6,13 @@ import { MemorySaver } from '@langchain/langgraph';
 import { createAgent, createMiddleware } from 'langchain';
 import type { StructuredToolInterface } from '@langchain/core/tools';
 import { z } from 'zod';
-import { LLM_BASE_URL, LLM_MODEL, RESPONSE_SCHEMA_COMPACT, RESPONSE_SCHEMA_STRIP_ALL_DESCRIPTIONS, HISTORY_COMPACTION_ENABLED, SANITIZE_STREAM_BLOCKS, LLM_JSON_MODE, LLM_MAX_OUTPUT_TOKENS, LLM_REQUEST_TIMEOUT_MS, OPENAI_API_KEY } from '../../config';
+import { LLM_BASE_URL, LLM_MODEL, RESPONSE_SCHEMA_COMPACT, RESPONSE_SCHEMA_STRIP_ALL_DESCRIPTIONS, HISTORY_COMPACTION_ENABLED, SANITIZE_STREAM_BLOCKS, LLM_JSON_MODE, LLM_MAX_OUTPUT_TOKENS, LLM_REQUEST_TIMEOUT_MS, OPENAI_API_KEY, ANTHROPIC_PROMPT_CACHE_ENABLED, MAX_POST_EXHAUSTION_CALLS, LOOP_GUARD_HARD_CEILING, LOOP_GUARD_PROGRESS_BONUS } from '../../config';
 import { getAccessToken } from '../../utils/oauth-auth.util';
 import { throttledFetch } from '../../utils/llm-throttle';
 import { cassetteFetch, LLM_CASSETTE_MODE } from '../../utils/llm-cassette';
-import { withLoopGuard } from './tool-loop-guard';
-import { compactHistory, recordCompaction, sanitizeStreamingContentBlocks } from './history-compactor';
+import { withLoopGuard, type ToolBudgets } from './tool-loop-guard';
+import { compactHistory, recordCompaction, sanitizeStreamingContentBlocks, normaliseAIMessageForState } from './history-compactor';
+import { withSystemCacheBreakpoint, withMessageCacheBreakpoints, MAX_CACHE_BREAKPOINTS } from './prompt-cache';
 import { TokenUsageCallbackHandler } from '../../utils/token-callback';
 import { createChatModel, detectProvider } from './llm-provider';
 import { getLogger } from '../../utils/logger';
@@ -37,6 +38,16 @@ export interface AgentConfig {
     phase?: string;
     /** Max total tool calls before the loop guard poisons all tools (default 22, dev agents should use higher). */
     maxToolCalls?: number;
+    /**
+     * Per-category read/write/shell/turn budgets (Plan 22, A1). When set, this
+     * takes priority over `maxToolCalls` and the guard runs in category mode, so
+     * an agent that has spent its read budget can still write files.
+     *
+     * Before Plan 22 the factory always passed `maxToolCalls` (a number), which
+     * selected the guard's legacy flat-ceiling path and left the whole category
+     * system as dead code.
+     */
+    toolBudgets?: ToolBudgets;
     /** Max output tokens for this agent (overrides LLM_MAX_OUTPUT_TOKENS). */
     maxOutputTokens?: number;
     /** If true, .describe() strings are preserved in the JSON Schema injected into the prompt.
@@ -141,14 +152,29 @@ export function buildAgent(apiKey: string, cfg: AgentConfig) {
         prompt += `\n\n<response_format>\nCRITICAL: Your final response MUST be a single valid JSON object matching this JSON schema:\n${jsonSchema}\n\nDo NOT wrap the JSON in markdown code blocks or backticks.\nDo NOT include any text, commentary, or markdown before or after the JSON object.\nYour ENTIRE response must be parseable by JSON.parse().\n</response_format>`;
     }
 
-    const { tools: guardedTools, isCeilingReached } = withLoopGuard(cfg.tools, cfg.id, cfg.maxToolCalls);
+    // Plan 22 A1: prefer per-category budgets; fall back to the legacy flat
+    // ceiling for pipeline/reviewer agents that have not been migrated.
+    const guard = withLoopGuard(cfg.tools, cfg.id, cfg.toolBudgets
+        ? {
+            budgets: cfg.toolBudgets,
+            hardCeiling: LOOP_GUARD_HARD_CEILING,
+            progressBonus: LOOP_GUARD_PROGRESS_BONUS,
+            maxPostExhaustionCalls: MAX_POST_EXHAUSTION_CALLS,
+        }
+        : cfg.maxToolCalls);
+    const { tools: guardedTools, isCeilingReached, isTerminationDemanded, getUsage } = guard;
+
+    const cacheEligible = ANTHROPIC_PROMPT_CACHE_ENABLED && provider === 'anthropic';
+    let cacheBreakpointsLogged = false;
 
     // History compaction runs inside wrapModelCall so the compacted messages are
     // only what the LLM sees — the persisted graph state keeps the full history.
     const historyCompaction = createMiddleware({
         name: 'history-compaction',
-        // Also runs the streaming-residue sanitiser (Plan 21, A2) — hence it is
-        // registered whenever EITHER feature flag is on.
+        // Also runs the streaming-residue sanitiser (Plan 21, A2), the tool
+        // withdrawal that ends a post-exhaustion spin (Plan 22, A4) and the
+        // Anthropic cache breakpoints (Plan 22, D1) — hence it is registered
+        // whenever ANY of those features is on.
         wrapModelCall: (request, handler) => {
             let incoming = request.messages;
             if (SANITIZE_STREAM_BLOCKS) {
@@ -158,16 +184,68 @@ export function buildAgent(apiKey: string, cfg: AgentConfig) {
                 }
                 incoming = sanitized.messages;
             }
-            if (!HISTORY_COMPACTION_ENABLED) return handler({ ...request, messages: incoming });
-            const { messages, stats } = compactHistory(incoming);
-            recordCompaction(stats);
-            if (stats.originalChars !== stats.compactedChars) {
-                factoryLog.debug(
-                    `${cfg.id}: history ${stats.originalChars} -> ${stats.compactedChars} chars ` +
-                    `(${stats.toolResultsStubbed} results, ${stats.writeArgsStubbed} write args stubbed)`,
-                );
+
+            if (HISTORY_COMPACTION_ENABLED) {
+                const { messages, stats } = compactHistory(incoming);
+                recordCompaction(stats);
+                if (stats.originalChars !== stats.compactedChars) {
+                    factoryLog.debug(
+                        `${cfg.id}: history ${stats.originalChars} -> ${stats.compactedChars} chars ` +
+                        `(${stats.toolResultsStubbed} results, ${stats.writeArgsStubbed} write args stubbed)`,
+                    );
+                }
+                incoming = messages;
             }
-            return handler({ ...request, messages });
+
+            const next: typeof request = { ...request, messages: incoming };
+
+            // ── Plan 22 A4: end the post-exhaustion spin ─────────────────
+            // The agent has been told twice that its budget is gone and is still
+            // calling tools. Withhold the tools so the model physically cannot
+            // emit another tool call and the ReAct loop must terminate with its
+            // final JSON. Throwing from a tool does not work: LangGraph's
+            // ToolNode converts tool errors into ToolMessages and carries on.
+            if (isTerminationDemanded()) {
+                factoryLog.warn(
+                    `${cfg.id}: withholding tools from this model call — budget exhausted (${JSON.stringify(getUsage())})`,
+                );
+                next.tools = [];
+                next.toolChoice = 'none';
+            }
+
+            // ── Plan 22 D1: Anthropic prompt-cache breakpoints ───────────
+            if (cacheEligible) {
+                next.systemMessage = withSystemCacheBreakpoint(request.systemMessage);
+                const systemBreakpoints = next.systemMessage === request.systemMessage ? 0 : 1;
+                const cached = withMessageCacheBreakpoints(
+                    next.messages, MAX_CACHE_BREAKPOINTS - systemBreakpoints,
+                );
+                next.messages = cached.messages;
+                if (!cacheBreakpointsLogged) {
+                    cacheBreakpointsLogged = true;
+                    factoryLog.debug(
+                        `${cfg.id}: anthropic prompt cache — ${systemBreakpoints + cached.breakpoints} breakpoint(s) `
+                        + `(system=${systemBreakpoints}, messages=${cached.breakpoints})`,
+                    );
+                }
+            }
+
+            return handler(next);
+        },
+
+        // ── Plan 22 E2: normalise before the message reaches state ───────
+        // `sanitizeStreamingContentBlocks` works on a copy by design, so residue
+        // otherwise accumulates in the checkpoint and is re-scanned every turn —
+        // the cause of the `dropped 2 … dropped 31` monotonic growth in the
+        // pacmanclaude log. Cleaning the fresh chunk here makes that counter flat.
+        afterModel: (state: any) => {
+            if (!SANITIZE_STREAM_BLOCKS) return undefined;
+            const messages = state?.messages;
+            if (!Array.isArray(messages) || messages.length === 0) return undefined;
+            const last = messages[messages.length - 1];
+            const clean = normaliseAIMessageForState(last);
+            if (clean === last) return undefined;
+            return { messages: [clean] };
         },
     });
 
@@ -176,13 +254,18 @@ export function buildAgent(apiKey: string, cfg: AgentConfig) {
         checkpointer,
         systemPrompt: prompt,
         tools: guardedTools,
-        middleware: (HISTORY_COMPACTION_ENABLED || SANITIZE_STREAM_BLOCKS) ? [historyCompaction] : [],
+        middleware: (HISTORY_COMPACTION_ENABLED || SANITIZE_STREAM_BLOCKS || cacheEligible || !!cfg.toolBudgets)
+            ? [historyCompaction]
+            : [],
     });
 
     // Expose isCeilingReached and setInvocationId on the agent so callers
     // (e.g. respawn logic, invocation tracking) can interact with the agent.
     return Object.assign(agent, {
         isCeilingReached,
+        isTerminationDemanded,
+        /** Live tool-budget usage — surfaced in the respawn handoff (Plan 22, C2). */
+        getToolUsage: getUsage,
         /** The fully-assembled system prompt (incl. the injected response schema).
          *  createAgent keeps it out of `result.messages`, so the full-response log
          *  reads it from here to record both halves of the conversation. */

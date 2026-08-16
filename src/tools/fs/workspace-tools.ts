@@ -39,6 +39,42 @@ const REFUSED_MESSAGE = `REFUSED: This is a protected configuration file during 
 You must fix the source code so the existing build and test commands pass.
 If a dependency is genuinely missing, add it to \`dependencies\` ONLY — do not change \`scripts\`.`;
 
+// ─── Elision-placeholder guard (Plan 22, B1) ────────────────────────────────
+
+/**
+ * Matches an orchestrator elision placeholder used as the ENTIRE payload of a
+ * write. Two shapes are recognised:
+ *   - the legacy `[1204 chars elided]` form (still present in checkpoints), and
+ *   - the current `⟪ORCHESTRATOR-ELIDED 1204 chars — …⟫` form.
+ *
+ * Why this exists: `compactHistory` replaces large `write_file` arguments in the
+ * agent's *visible* history with such a marker. In the pacmanclaude run the model
+ * saw 15 of them, imitated the pattern, and wrote three source files whose entire
+ * content was `[770 chars elided]`. Prompting cannot be relied on to prevent
+ * that — the write boundary is the only place the check cannot be bypassed.
+ */
+const ELISION_PLACEHOLDER_RE =
+    /^\s*(?:\[\d[\d,]* chars(?:,)? elided\]|⟪[^⟫]*ELIDED[^⟫]*⟫|\[[a-z_]+ -> \d[\d,]* chars, elided\])\s*$/i;
+
+/**
+ * Reject writes whose payload is an orchestrator artefact rather than real
+ * content. Returns the error string to hand back to the agent, or `null`.
+ *
+ * Deliberately narrow: only an exact, whole-payload elision marker is rejected.
+ * A "minimum plausible source file length" rule was tried and removed — a
+ * legitimate `export const x = 2;` is 19 characters, so the heuristic rejected
+ * real code while adding nothing: every observed corruption was the exact marker.
+ */
+export function checkWritePayload(filePath: string, content: string): string | null {
+    if (!ELISION_PLACEHOLDER_RE.test(content)) return null;
+
+    protLog.error(`REJECTED elision-placeholder write to ${filePath} (${content.length} chars)`);
+    return `REJECTED: the content you passed is an orchestrator elision placeholder, not file content.\n`
+        + `That marker means "this text was removed from your message history to save tokens" — it is NEVER `
+        + `something to write to disk. The real file content is already on disk (or was never written).\n`
+        + `If you need the current content, call read_file("${filePath}"). If this is a new file, write the actual code.`;
+}
+
 /**
  * Check if a file path is protected and return the refusal or null.
  */
@@ -77,6 +113,10 @@ export function createWorkspaceTools(
             // Protection check
             const refusal = checkProtection(filePath, protectionMode, protectedGlobs);
             if (refusal) return refusal;
+
+            // Plan 22 B1: never let an orchestrator elision marker reach disk
+            const payloadRefusal = checkWritePayload(filePath, content);
+            if (payloadRefusal) return payloadRefusal;
 
             fs.mkdirSync(path.dirname(resolved), { recursive: true });
             fs.writeFileSync(resolved, content, 'utf-8');
@@ -129,6 +169,11 @@ export function createWorkspaceTools(
             // Protection check
             const refusal = checkProtection(filePath, protectionMode, protectedGlobs);
             if (refusal) return refusal;
+
+            // Plan 22 B1: an elision marker as the replacement text would corrupt
+            // the file just as surely as a full-file write of the same marker.
+            const payloadRefusal = checkWritePayload(filePath, newString);
+            if (payloadRefusal) return payloadRefusal;
 
             if (!fs.existsSync(resolved)) {
                 return `Error: File not found: ${filePath}`;

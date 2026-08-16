@@ -119,6 +119,23 @@ export const GOOGLE_API_KEY =
 export const ANTHROPIC_BASE_URL =
     process.env.ANTHROPIC_BASE_URL ?? '';
 
+/** Place `cache_control` breakpoints on the Anthropic system prompt, tool schemas,
+ *  task message and stable history prefix (Plan 22, D1).
+ *
+ *  The pacmanclaude run reported `cache_read: 0` on all 227 Anthropic calls and
+ *  billed 2.32M input tokens against 99.7K output for one branch of fifteen. */
+export const ANTHROPIC_PROMPT_CACHE_ENABLED =
+    (process.env.ANTHROPIC_PROMPT_CACHE_ENABLED ?? 'true') === 'true';
+
+/** Log an ERROR when Anthropic reports zero cache reads after SANITY_ASSERT_CACHE_AFTER
+ *  calls (Plan 22, D2). A silent cache miss is expensive and otherwise invisible. */
+export const SANITY_ASSERT_CACHE =
+    (process.env.SANITY_ASSERT_CACHE ?? 'true') === 'true';
+
+/** Number of Anthropic calls after which the zero-cache assertion fires. */
+export const SANITY_ASSERT_CACHE_AFTER =
+    parseInt(process.env.SANITY_ASSERT_CACHE_AFTER ?? '20', 10);
+
 /** Optional base URL override for Google (for proxies). */
 export const GOOGLE_BASE_URL =
     process.env.GOOGLE_BASE_URL ?? '';
@@ -214,6 +231,16 @@ export const REVIEWER_MAX_TOOL_CALLS =
 /** @deprecated Use per-type limits (PIPELINE_RECURSION_LIMIT, DEV_RECURSION_LIMIT, REVIEWER_RECURSION_LIMIT). */
 export const AGENT_RECURSION_LIMIT =
     parseInt(process.env.AGENT_RECURSION_LIMIT ?? '30', 10);
+
+/**
+ * Terminal-guidance responses an agent may receive before the factory withholds
+ * tools from the next model call, forcing the ReAct loop to end (Plan 22, A4).
+ *
+ * The pacmanclaude run burned 3–4 further ~10k-token turns per generation after
+ * the budget was gone, because nothing stopped the loop.
+ */
+export const MAX_POST_EXHAUSTION_CALLS =
+    parseInt(process.env.MAX_POST_EXHAUSTION_CALLS ?? '2', 10);
 
 /** Max file-change entries injected into the dev context prompt.
  *  Lowered from 60 to 25 — summariseFileChanges now groups by directory
@@ -370,6 +397,23 @@ export const MAX_TOOL_RESULT_CHARS =
 export const HISTORY_KEEP_RECENT_TOOL_RESULTS =
     parseInt(process.env.HISTORY_KEEP_RECENT_TOOL_RESULTS ?? '4', 10);
 
+/** Number of most-recent *model turns* whose tool results are kept verbatim
+ *  (Plan 22, B4). This is the primary recent-window control;
+ *  HISTORY_KEEP_RECENT_TOOL_RESULTS acts as a lower bound.
+ *
+ *  Counting individual tool results is wrong for models that batch calls: with
+ *  8–11 parallel calls per turn, "keep the last 4 results" put the compaction
+ *  boundary *inside* the turn the model was about to reason over, so it re-read
+ *  files it had just read and exhausted its tool budget doing it. */
+export const HISTORY_KEEP_RECENT_TURNS =
+    parseInt(process.env.HISTORY_KEEP_RECENT_TURNS ?? '3', 10);
+
+/** Number of most-recent write turns whose tool-call arguments are NEVER elided
+ *  (Plan 22, B3). The model needs its last writes verbatim to diff against, and
+ *  this is the window where placeholder imitation was observed. */
+export const HISTORY_KEEP_RECENT_WRITE_ARGS =
+    parseInt(process.env.HISTORY_KEEP_RECENT_WRITE_ARGS ?? '2', 10);
+
 /** Enable the middleware that compacts ReAct history before each LLM call. */
 export const HISTORY_COMPACTION_ENABLED =
     (process.env.HISTORY_COMPACTION_ENABLED ?? 'true') === 'true';
@@ -464,6 +508,21 @@ export const PRODUCT_SMOKE_TIMEOUT_MS =
 /** Baseline-diff enforcement for gate tampering: 'off' | 'warn' | 'enforce'. */
 export const GATE_INTEGRITY_MODE =
     (process.env.GATE_INTEGRITY_MODE ?? 'enforce') as 'off' | 'warn' | 'enforce';
+
+/**
+ * Delete test files the integrity gate flags as trivial (Plan 22, F3).
+ *
+ * Default `false`. Trivial-test detection is a heuristic over an import graph and
+ * deleting source code on a heuristic is not proportionate: in the pacmanclaude
+ * run it removed four legitimate Playwright e2e specs plus one unit test, pushed
+ * the deletion, and the reviewer then filed `[MAJOR] No test files exist`.
+ *
+ * When `false`, findings are still recorded and surfaced to reviewers so the
+ * author fixes them. When `true`, only `critical` findings are deletable and every
+ * body is archived to `outputs/<run>/deleted-tests/` first.
+ */
+export const GATE_INTEGRITY_DELETE_TRIVIAL_TESTS =
+    (process.env.GATE_INTEGRITY_DELETE_TRIVIAL_TESTS ?? 'false') === 'true';
 
 /** Protect configuration files from agent writes: 'off' | 'warn' | 'deny'. Per-agent overrides apply. */
 export const FS_CONFIG_PROTECTION =
@@ -759,7 +818,12 @@ export const STRONG_FIXER_MODEL =
 export const STRONG_FIXER_ENABLED =
     (process.env.STRONG_FIXER_ENABLED ?? 'true') === 'true';
 
-/** Max tool calls for the strong fixer agent (default: 40). */
+/** Turn ceiling for the strong fixer agent (default: 40).
+ *
+ *  Plan 22 A2 changed the unit: this now bounds *model turns*, not individual
+ *  tool calls. Read/write/shell pools come from the principal budgets plus
+ *  headroom (see `buildStrongFixerAgent`). Under the old call-based ceiling a
+ *  Claude fixer that batched 9 reads into one turn spent 40 units in 5 turns. */
 export const STRONG_FIXER_MAX_TOOL_CALLS =
     parseInt(process.env.STRONG_FIXER_MAX_TOOL_CALLS ?? '40', 10);
 
@@ -778,22 +842,46 @@ export const PR_EXHAUSTION_STRATEGY =
 export const SNAPSHOT_MAX_FILES =
     parseInt(process.env.SNAPSHOT_MAX_FILES ?? '400', 10);
 
+/**
+ * Write agent mission reports and the architecture contract into the generated
+ * project repo (Plan 22, G4).
+ *
+ * Default `false`: they go to `outputs/<run>/agents/` instead, and `docs/agents/`
+ * + `.agent/` are gitignored in the product repo. Mission reports are pipeline
+ * telemetry — committing them produced six `chore: pipeline artifacts` commits on
+ * a single feature branch in the pacmanclaude run and put them in every PR diff.
+ */
+export const AGENT_ARTIFACTS_IN_REPO =
+    (process.env.AGENT_ARTIFACTS_IN_REPO ?? 'false') === 'true';
+
 /** Char budget for the injected workspace snapshot. */
 export const SNAPSHOT_MAX_CHARS =
     parseInt(process.env.SNAPSHOT_MAX_CHARS ?? '8000', 10);
 
-/** Extra tool calls granted when an agent is making verified progress (writes). */
+/** Extra read calls granted when an agent is making verified progress (writes). */
 export const LOOP_GUARD_PROGRESS_BONUS =
     parseInt(process.env.LOOP_GUARD_PROGRESS_BONUS ?? '10', 10);
 
-/** Absolute per-invocation tool-call ceiling. */
+/** Absolute per-invocation tool-call ceiling.
+ *  Was 80 — raised to 140 in Plan 22 because the per-category and per-turn
+ *  ceilings are now the binding constraints and 80 calls is only ~8 turns for a
+ *  model that batches 9–11 tool calls per turn. */
 export const LOOP_GUARD_HARD_CEILING =
-    parseInt(process.env.LOOP_GUARD_HARD_CEILING ?? '80', 10);
+    parseInt(process.env.LOOP_GUARD_HARD_CEILING ?? '140', 10);
 
 /**
- * Per-rank read/write/shell tool-call budgets (JSON override).
- * Format: `{"principal":{"reads":30,"writes":25,"shell":10},...}`
- * Empty string (default) uses built-in defaults.
+ * Per-rank read/write/shell/turn budgets for developer agents, as a JSON object
+ * keyed by rank. A partial entry is merged over the built-in defaults, so
+ * `{"junior":{"turns":26}}` changes only the junior turn ceiling.
+ *
+ * Built-in defaults (see `tool-loop-guard.ts`):
+ *   principal { reads: 60, writes: 30, shell: 14, turns: 28 }
+ *   senior    { reads: 50, writes: 25, shell: 12, turns: 24 }
+ *   junior    { reads: 40, writes: 20, shell: 12, turns: 20 }
+ *
+ * Until Plan 22 this variable — and the whole budget system it configures —
+ * was dead: `buildAgent()` always passed a single flat call ceiling to
+ * `withLoopGuard`, which selected the legacy code path.
  */
 export const TOOL_BUDGETS_JSON =
     process.env.TOOL_BUDGETS_JSON ?? '';

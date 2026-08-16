@@ -60,10 +60,39 @@ export interface TamperFinding {
     detail: string;
 }
 
+export type TrivialTestReason =
+    | 'tautological-assertion'
+    | 'no-product-import'
+    | 'subject-not-in-product'
+    | 'single-arithmetic-test'
+    | 'no-assertions';
+
 export interface TrivialTestFinding {
     file: string;
-    reason: 'tautological-assertion' | 'no-product-import' | 'subject-not-in-product' | 'single-arithmetic-test';
+    reason: TrivialTestReason;
     detail: string;
+}
+
+/**
+ * Reasons that unambiguously indicate the agent gamed the test gate. These stay
+ * `critical` and remain eligible for deletion.
+ */
+const UNAMBIGUOUS_TRIVIAL_REASONS: ReadonlySet<TrivialTestReason> = new Set([
+    'tautological-assertion', 'single-arithmetic-test', 'no-assertions',
+]);
+
+/**
+ * Severity for a trivial-test finding (Plan 22, F3).
+ *
+ * `no-product-import` and `subject-not-in-product` are *heuristic* import-graph
+ * results: a resolver miss on an extensionless TypeScript import, a path alias, or
+ * a browser-driven spec all trigger them. Deleting source code on a heuristic is
+ * not proportionate, so those are downgraded to `major` and reported rather than
+ * enforced. The pacmanclaude run produced five such findings and zero true
+ * positives, and the resulting deletion caused the review failure that followed.
+ */
+export function trivialTestSeverity(reason: TrivialTestReason): 'critical' | 'major' {
+    return UNAMBIGUOUS_TRIVIAL_REASONS.has(reason) ? 'critical' : 'major';
 }
 
 // ─── Constants ──────────────────────────────────────────────────────────────
@@ -619,14 +648,49 @@ function gitignoreMatches(pattern: string, filePath: string): boolean {
 
 // ─── 3. Trivial test detection ──────────────────────────────────────────────
 
+/** Path patterns that identify a browser-driven end-to-end spec. */
+const BROWSER_TEST_PATH_RE =
+    /(^|\/)(e2e|cypress|playwright)(\/|$)|\.(e2e|pw|cy)\.(spec|test)\.[tj]sx?$/i;
+
+/** Imports that identify a browser-driven end-to-end spec. */
+const BROWSER_TEST_IMPORT_RE =
+    /['"](@playwright\/test|playwright|playwright-core|cypress|@cucumber\/[^'"]+|selenium-webdriver|puppeteer|webdriverio|@wdio\/[^'"]+)['"]/;
+
+/** Browser-driver API surface that identifies a browser-driven spec. */
+const BROWSER_TEST_API_RE = /\b(page\.goto\(|page\.locator\(|browser\.|cy\.visit\(|cy\.get\()/;
+
+/**
+ * True when a test file drives the product through a browser rather than by
+ * importing it (Plan 22, F2).
+ *
+ * A Playwright/Cypress spec imports nothing from the product source tree **by
+ * construction** — it navigates to a URL and asserts on the rendered DOM. The
+ * `no-product-import` and `subject-not-in-product` rules are therefore
+ * meaningless for these files. In the pacmanclaude run they produced four
+ * CRITICAL findings, the gate deleted `tests/e2e/{accessibility,gameplay,offline,
+ * responsive}.spec.ts`, pushed the deletion, and the reviewer then filed
+ * `[MAJOR] No test files exist` — a failure the gate manufactured itself.
+ */
+export function isBrowserDrivenTest(relPath: string, content: string): boolean {
+    if (BROWSER_TEST_PATH_RE.test(relPath)) return true;
+    if (BROWSER_TEST_IMPORT_RE.test(content)) return true;
+    return BROWSER_TEST_API_RE.test(content);
+}
+
+/** Any assertion at all — used as the triviality rule for browser tests. */
+const ASSERTION_RE = /\b(expect|assert|should)\s*[.(]/;
+
 /**
  * Detect trivial / non-product tests that don't exercise real product code.
  *
  * Rules:
  *   1. no-product-import: test file imports nothing from the product source tree
+ *      — SKIPPED for browser-driven e2e specs (Plan 22, F2)
  *   2. tautological-assertion: every assertion is over literals only
  *   3. subject-not-in-product: the module under test is not reachable from any entry point
+ *      — SKIPPED for browser-driven e2e specs (Plan 22, F2)
  *   4. single-arithmetic-test: one test with a single numeric/string literal assertion
+ *   5. no-assertions: a browser-driven spec that asserts nothing (Plan 22, F2)
  */
 export function detectTrivialTests(
     workspacePath: string,
@@ -659,6 +723,19 @@ export function detectTrivialTests(
                 detail: 'file contains exactly one test with a single numeric/string literal assertion',
             });
             continue; // No need to check other rules
+        }
+
+        // Plan 22 F2: browser-driven specs exercise the product through a browser,
+        // so the import-graph rules do not apply. Only assert that they assert.
+        if (isBrowserDrivenTest(relTestFile, content)) {
+            if (!ASSERTION_RE.test(content)) {
+                findings.push({
+                    file: relTestFile,
+                    reason: 'no-assertions',
+                    detail: 'browser-driven spec contains no expect/assert call',
+                });
+            }
+            continue;
         }
 
         // Rule 1: no-product-import

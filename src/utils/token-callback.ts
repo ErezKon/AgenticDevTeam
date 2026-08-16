@@ -10,6 +10,7 @@ import type { LLMResult } from '@langchain/core/outputs';
 import { tokenTracker } from './token-tracker';
 import { normaliseUsage, sumUsageMetadata } from './token-usage-extractor';
 import { getLogger } from './logger';
+import { SANITY_ASSERT_CACHE, SANITY_ASSERT_CACHE_AFTER, ANTHROPIC_PROMPT_CACHE_ENABLED } from '../config';
 
 const log = getLogger('[TokenCallback]', 220);
 
@@ -19,9 +20,48 @@ export class TokenUsageCallbackHandler extends BaseCallbackHandler {
     /** `agentId::model` pairs already warned about, so the WARN fires once each. */
     private static _warnedNoUsage = new Set<string>();
 
+    // ── Prompt-cache sanity assertion (Plan 22, D2) ──────────────────────
+    // A cache that silently never engages is the single most expensive failure
+    // mode available: the pacmanclaude run billed 2.32M input tokens with
+    // `cache_read: 0` on every one of its 227 Anthropic calls, and nothing said so.
+    private static _cacheEligibleCalls = 0;
+    private static _cacheReadTotal = 0;
+    private static _cacheAssertionFired = false;
+
     /** Clear the once-per-agent WARN dedupe (run start / tests). */
     static resetUsageWarnings(): void {
         TokenUsageCallbackHandler._warnedNoUsage.clear();
+        TokenUsageCallbackHandler._cacheEligibleCalls = 0;
+        TokenUsageCallbackHandler._cacheReadTotal = 0;
+        TokenUsageCallbackHandler._cacheAssertionFired = false;
+    }
+
+    /**
+     * Track cache effectiveness for models that should be caching, and shout once
+     * if the cache is not engaging after `SANITY_ASSERT_CACHE_AFTER` calls.
+     */
+    private trackCacheEffectiveness(cacheRead: number): void {
+        if (!SANITY_ASSERT_CACHE || !ANTHROPIC_PROMPT_CACHE_ENABLED) return;
+        if (!/claude|anthropic/i.test(this.model)) return;
+
+        const cls = TokenUsageCallbackHandler;
+        cls._cacheEligibleCalls++;
+        cls._cacheReadTotal += cacheRead;
+
+        if (cls._cacheAssertionFired) return;
+        if (cls._cacheEligibleCalls < SANITY_ASSERT_CACHE_AFTER) return;
+
+        cls._cacheAssertionFired = true;
+        if (cls._cacheReadTotal === 0) {
+            log.error(
+                `Anthropic prompt cache is NOT engaging: 0 cache-read tokens after `
+                + `${cls._cacheEligibleCalls} calls. Every call is re-billing the full system prompt, `
+                + 'tool schemas and task context. Check ANTHROPIC_PROMPT_CACHE_ENABLED, the model\'s '
+                + 'minimum cacheable prefix, and that the system prompt is stable across calls.',
+            );
+        } else {
+            log.info(`Anthropic prompt cache active: ${cls._cacheReadTotal.toLocaleString()} cache-read tokens over ${cls._cacheEligibleCalls} calls`);
+        }
     }
 
     private agentId: string;
@@ -92,6 +132,8 @@ export class TokenUsageCallbackHandler extends BaseCallbackHandler {
             return;
         }
 
+        this.trackCacheEffectiveness(totals.cacheReadTokens ?? 0);
+
         tokenTracker.recordCall({
             agentId: this.agentId,
             model: this.model,
@@ -99,6 +141,8 @@ export class TokenUsageCallbackHandler extends BaseCallbackHandler {
             inputTokens: totals.inputTokens,
             outputTokens: totals.outputTokens,
             totalTokens: totals.totalTokens,
+            ...(totals.cacheReadTokens !== undefined && { cacheReadTokens: totals.cacheReadTokens }),
+            ...(totals.cacheCreationTokens !== undefined && { cacheCreationTokens: totals.cacheCreationTokens }),
             timestamp: new Date().toISOString(),
             ...(this._invocationId && { invocationId: this._invocationId }),
         });

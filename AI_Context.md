@@ -81,10 +81,11 @@ src/
     _shared/
       agent-factory.ts             # buildAgent() wrapper for createAgent
       llm-provider.ts              # Multi-provider LLM factory (OpenAI, Anthropic, Google)
+      prompt-cache.ts              # Anthropic cache_control breakpoints (Plan 22)
       history-compactor.ts         # ReAct history compaction + streaming-residue sanitiser
       persona.ts                   # Developer prompt builder (rank/domain/languages)
       artifact.ts                  # Mission report writer (docs/agents/*.md)
-      tool-loop-guard.ts           # Prevents infinite tool-call loops
+      tool-loop-guard.ts           # Read/write/shell/turn budgets + loop detection
       base-schemas.ts              # Barrel re-export of all schemas
       schemas/                     # 17 individual Zod schema files
         index.ts                   # Barrel export
@@ -287,12 +288,15 @@ All agents are built via `buildAgent()` in `src/agents/_shared/agent-factory.ts`
 4. Wraps all tools with `withLoopGuard()` for infinite-loop prevention
 5. Returns a `createAgent()` instance with its own `MemorySaver` and a `history-compaction` middleware
 
-### Provider Transport Invariants (Plan 21)
+### Provider Transport Invariants (Plans 21 & 22)
 
 These are load-bearing. Changing any of them reintroduces a failure mode that is silent, total, and billable.
 
 | Invariant | Where | Why |
 |-----------|-------|-----|
+| Anthropic requests carry `cache_control` breakpoints on the system message, the task message and a rolling history point | `prompt-cache.ts`, wired in `agent-factory.ts` | Anthropic serialises `tools` → `system` → `messages`, so the **system** breakpoint also caches the tool schemas and the injected response schema. Without breakpoints the ~6 kB fixed preamble is re-billed on every call: the pacmanclaude run reported `cache_read: 0` on all 227 Anthropic calls and billed **2.32M input / 99.7K output** (23:1) for one branch of fifteen. Max 4 breakpoints per request. Flag: `ANTHROPIC_PROMPT_CACHE_ENABLED`. |
+| `cacheReadTokens` / `cacheCreationTokens` are recorded on every `TokenCallRecord`, and a zero-cache run logs an ERROR | `token-usage-extractor.ts`, `token-callback.ts`, `token-report.ts` | These numbers were present on every Anthropic response and discarded, so a total cache miss was invisible. `SANITY_ASSERT_CACHE` fires once after `SANITY_ASSERT_CACHE_AFTER` (20) Anthropic calls with zero cache reads. |
+| `opts.timeout` reaches Anthropic (`clientOptions.timeout`) and Google (`timeout`) | `llm-provider.ts` | It was applied to `ChatOpenAI` only, so `LLM_REQUEST_TIMEOUT_MS` was silently OpenAI-exclusive. |
 | `ChatAnthropic` is created **with** `streaming: true` + A2 sanitiser guard | `llm-provider.ts` | Anthropic's HTTP endpoint times out after ~10 minutes on non-streaming requests, killing long agent runs. Streaming residue (`input_json_delta`, id-less `tool_use`) is stripped by `sanitizeStreamingContentBlocks()` before every LLM call. Token accounting for streaming uses the `usage_metadata` fallback (D's two-tier lookup). |
 | Adaptive-only Anthropic models omit `temperature`/`topK`/`topP` | `llm-provider.ts` | `claude-opus-4-7+`, `claude-opus-5+`, `claude-sonnet-5+`, `claude-fable-5+`, `claude-mythos-*` reject non-default sampling params. The regex is a deliberate **superset** of `ADAPTIVE_ONLY_MODEL_PREFIXES` in `@langchain/anthropic` and must **not** be narrowed to match it — the SDK list lags the API (it still omits `claude-sonnet-5` as of `1.5.6`, so the SDK sends `temperature` and the API returns `400 "temperature is deprecated for this model"`). Add new model families here as Anthropic ships them, without waiting for the SDK. |
 | JSON mode uses `model.withConfig({ response_format })`, **never** `modelKwargs` | `llm-provider.ts` | `modelKwargs` is spread verbatim into the request body. `*codex*` / `gpt-5.x-pro` route through the OpenAI **Responses API**, which rejects top-level `response_format`. `withConfig` lets LangChain emit `response_format` (Chat Completions) or `text.format` (Responses). |
@@ -398,18 +402,75 @@ The development phase uses a sophisticated PR workflow for each branch:
 
 ## Key Subsystems
 
-### Tool Loop Guard (`tool-loop-guard.ts`) — Sub-Plan 08
+### Tool Loop Guard (`tool-loop-guard.ts`) — Sub-Plan 08, retuned in Plan 22
 
 Prevents agents from infinite tool-call loops with per-tool scoping and split budgets:
 - Tracks total invocations per `toolName::args` key
 - **Read-only tools** (read_file, list_dir, search_code, git tools) cache results; duplicates return `[CACHED]` (free — no budget consumed)
 - **Mutating tools** (write_file, edit_file, etc.) clear all caches (workspace changed)
 - 3rd identical call blocks ONLY that specific `(tool, args)` — other tools keep working
-- **Split budgets**: separate read/write/shell ceilings per rank (principal: 30/25/10, senior: 25/20/8, junior: 20/15/8)
+- **Split budgets** (`TOOL_BUDGETS_JSON`): separate read/write/shell/turn ceilings per rank — principal 60/30/14/28, senior 50/25/12/24, junior 40/20/12/20
+- **Turn ceiling** (Plan 22 A2): a model turn costs 1 turn regardless of how many tools it calls in parallel. The turn key comes from `config.metadata.langgraph_step`, with time-window batching as a fallback
 - **Progress bonus**: agents that produce real writes get `LOOP_GUARD_PROGRESS_BONUS` (10) extra read calls
-- **Hard ceiling**: `LOOP_GUARD_HARD_CEILING` (80) absolute stop across all categories
+- **Hard ceiling**: `LOOP_GUARD_HARD_CEILING` (140) absolute stop across all categories
+- **Budget pressure footer** (Plan 22 A3): successful tool results carry `[BUDGET: …]` above 60 % usage and `[BUDGET CRITICAL: …]` above 85 %, so the agent can plan its landing
 - **Terminal guidance**: on exhaustion, injects "return your JSON now, do not claim files you did not write"
-- **Legacy mode**: numeric `maxTotalCalls` parameter still works for non-dev agents
+- **Forced termination** (Plan 22 A4): after `MAX_POST_EXHAUSTION_CALLS` (2) guidance responses, `isTerminationDemanded()` becomes true and the agent factory sets `tools: []` + `toolChoice: 'none'` on the next model call. Throwing from a tool does **not** work — LangGraph's ToolNode converts tool errors into ToolMessages and the loop continues
+- **Legacy mode**: numeric `maxTotalCalls` parameter still works for reviewer / pipeline agents
+
+> **Plan 22 A1 — load-bearing wiring.** `buildAgent()` must pass `cfg.toolBudgets` (an object)
+> to `withLoopGuard`, not `cfg.maxToolCalls` (a number). A number selects the legacy flat-ceiling
+> path, which leaves the entire category system — and `resolveToolBudgets()` — as dead code.
+> That was the state until Plan 22: a Claude dev agent that batched 9–11 reads into one turn spent
+> a 26-unit budget in 5 turns and could then write nothing, so 3 of 6 dev generations in the
+> pacmanclaude run produced zero writes. The budget must be denominated in turns and categories,
+> never in a single pool of tool calls.
+
+### History Compaction & the Write Boundary (Plan 22, B1–B4)
+
+`compactHistory()` shrinks the ReAct history the model sees. Three invariants keep it from
+corrupting the product:
+
+| Invariant | Where | Why |
+|-----------|-------|-----|
+| The elision marker is `⟪ORCHESTRATOR-ELIDED <n> chars of <what> — already on disk; NEVER copy this marker into a file⟫` | `history-compactor.ts` | The old marker was `[1204 chars elided]`. After seeing fifteen of those in its own compacted history, a dev agent emitted `write_file("src/persistence/SettingsStore.ts", "[770 chars elided]")` for **three brand-new files** — pattern imitation. The marker must not look like plausible source text and must carry its own instruction. |
+| `write_file` / `edit_file` **reject** a payload that is an elision marker | `checkWritePayload()` in `workspace-tools.ts` | The only enforcement that cannot be bypassed by prompting. Deliberately narrow: an exact, whole-payload marker match. A "minimum plausible source length" rule was tried and removed — `export const x = 2;` is 19 characters. |
+| The recent window is measured in **model turns** (`HISTORY_KEEP_RECENT_TURNS`, default 3), not tool results | `history-compactor.ts` | With 8–11 parallel calls per turn, "keep the last 4 results" preserved exactly ONE turn, so agents re-read files they had just read and exhausted their tool budget doing it. `HISTORY_KEEP_RECENT_TOOL_RESULTS` survives as a lower bound (`min()` of the two boundaries wins). |
+| The last `HISTORY_KEEP_RECENT_WRITE_ARGS` (2) write turns keep their arguments verbatim | `history-compactor.ts` | The model needs its most recent writes intact to diff against, and this is exactly the window where placeholder imitation was observed. |
+| Fresh `AIMessageChunk`s are normalised **before** they enter graph state | `normaliseAIMessageForState()`, `afterModel` middleware | `sanitizeStreamingContentBlocks()` works on a copy by design, so residue accumulated in the checkpoint and was re-scanned every turn — the cause of the `dropped 2 … dropped 31` monotonic growth in the run log. |
+
+### Respawn Handoff (`agent-respawn.ts`) — Sub-Plan 08, fixed in Plan 22
+
+When a dev agent hits its ceiling it is respawned with a fresh context plus a deterministic
+handoff (no extra LLM call). Plan 22 made the handoff actually useful:
+
+- **`buildHandoff` must be called with `worktreeDir` + `baseRef`** (C1). Without them
+  `worktreeVerified` is always false, byte sizes are absent, there is no tree snapshot, and
+  `filesWritten` is the agent's *claim* — which is how generations with committed work were
+  terminated for "zero writes". `pr-workflow.ts` passes `respawnCtx` at all 7 call sites.
+- **`filesRead` + `treeSnapshot` + `budgetSpent`** are carried forward (C2). Dumps 019/020/021 of
+  the pacmanclaude run each re-read the same 24 files; the successor now starts with an inventory.
+- **`madeProgress()`** counts a passing build/test/lint command as progress, not just writes (C3),
+  and consecutive no-progress generations are capped at `MAX_CONSECUTIVE_ZERO_WRITE_GENERATIONS` (1)
+  — `junior-react` previously burned 4 respawns and 882 k input tokens on reconnaissance.
+- `git status` is read with **`--porcelain --untracked-files=all`**: plain `--short` collapses a
+  wholly-untracked directory to a single `?? src/` entry, so a generation that created
+  `src/a.ts`, `src/b.ts`, … was recorded as having written the directory `src/`.
+
+### Integrity Gate Policy (Plan 22, F2/F3)
+
+- **Browser-driven specs are exempt from the import-graph rules.** A Playwright/Cypress spec
+  imports nothing from the product tree by construction. `isBrowserDrivenTest()` detects them by
+  path (`**/e2e/**`, `*.e2e.spec.*`, `cypress/**`), by import (`@playwright/test`, `cypress`,
+  `selenium-webdriver`, …) or by API use (`page.goto(`, `cy.visit(`). They are instead checked for
+  the presence of *any* assertion (`no-assertions`).
+- **Severity is split.** `tautological-assertion`, `single-arithmetic-test` and `no-assertions` are
+  unambiguous gate-gaming and stay `critical`. `no-product-import` and `subject-not-in-product` are
+  heuristic import-graph results and are downgraded to `major` (report only).
+- **Deletion is opt-in** (`GATE_INTEGRITY_DELETE_TRIVIAL_TESTS`, default `false`) and only ever
+  applies to `critical` findings; every body is archived to `outputs/<run>/deleted-tests/` first.
+  Previously the gate deleted four legitimate Playwright specs plus a unit test, pushed the
+  deletion, and the reviewer then filed `[MAJOR] No test files exist`.
 
 ### Workspace Snapshot (`workspace-snapshot.ts`) — Sub-Plan 08
 
@@ -929,6 +990,8 @@ The system evolved through 16+ iteration plans. Key milestones:
 | 15 | Coding conventions integration |
 | 16 | Correctness, verification, cost, observability, offline determinism |
 | 20 | Multi-provider LLM support (Anthropic, Google alongside OpenAI) and strong model PR fixer |
+| 21 | Claude run errors: Anthropic streaming corruption, Responses-API JSON mode, runaway detection, universal token accounting |
+| 22 | pacmanclaude forensics: tool-budget collapse under parallel tool calls, compaction placeholder corruption, blind respawn handoff, dead scaffold barrier, e2e integrity false positives, Anthropic prompt caching |
 
 When referenced in code comments, these plans are cited as "fixes A1", "fixes A2", etc. (referring to sub-plans within Plan 16).
 
@@ -939,7 +1002,11 @@ When referenced in code comments, these plans are cited as "fixes A1", "fixes A2
 1. **`env.ts` must be imported first** -- Before any module that reads `process.env`. Uses `override: true` so `.env` wins over shell vars.
 2. **Append vs Replace reducers** -- Arrays use append (data accumulates); scalars/objects use replace (last write wins). Returning `[]` for an append field adds nothing, not clears it.
 3. **Agent recursion limits differ by type** -- Pipeline agents: 15, tool-using pipeline agents: 120, dev agents: 140, reviewers: 40. (Sub-Plan 08: raised from 15/60/58/26 because the loop guard is now the binding constraint.)
-4. **Tool budgets are split by category (Sub-Plan 08)** -- Read/write/shell separate budgets per rank: principal 30/25/10, senior 25/20/8, junior 20/15/8. Reviewer: 14 total. Progress bonus grants 10 extra reads when writing. Hard ceiling: 80.
+4. **Tool budgets are split by category AND by turn (Sub-Plan 08 + Plan 22)** -- Read/write/shell/turn budgets per rank: principal 60/30/14/28, senior 50/25/12/24, junior 40/20/12/20. Reviewer: 14 total calls (legacy flat mode). Progress bonus grants 10 extra reads when writing. Hard ceiling: 140.
+   **The turn ceiling is the important one.** Claude emits up to 11 tool calls in a single turn, so a
+   budget denominated in tool calls gives it ~5 turns where it gives an OpenAI model 26. If you ever
+   see `buildAgent()` being handed `maxToolCalls` for a dev agent again, the whole category system is
+   silently disabled — that was the Plan 22 root cause.
 5. **`git_diff` was removed from reviewer tools** -- It showed empty results for committed code and caused llama-3-3-70b-instruct to loop. Use `git_merge_base_diff` instead.
 6. **`emitMermaidTool` removed from dev agents** -- Caused infinite loops. Only the Architect has it.
 7. **Worktree cleanup is critical** -- Stale worktrees break subsequent runs. Intake prunes them.

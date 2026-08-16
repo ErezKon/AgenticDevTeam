@@ -872,7 +872,7 @@ export async function codebaseAnalyzerNode(state: ProjectStateType): Promise<Par
     const artifact = writeArtifact({
         agentId: 'codebase-analyzer',
         colorCode: 147,
-        workspacePath: state.workspacePath,
+        workspacePath: state.workspacePath, outputPath: state.outputPath,
         title: 'Codebase Analyzer Mission Report',
         content: [
             `## Project: ${output.projectName} (${output.projectType})`,
@@ -960,7 +960,7 @@ export async function architectNode(state: ProjectStateType): Promise<Partial<Pr
     const artifact = writeArtifact({
         agentId: 'architect',
         colorCode: 39,
-        workspacePath: state.workspacePath,
+        workspacePath: state.workspacePath, outputPath: state.outputPath,
         title: 'Architect Mission Report',
         content: [
             `## Architecture Style\n\n${output.architecture?.style}`,
@@ -1030,7 +1030,7 @@ export async function productManagerNode(state: ProjectStateType): Promise<Parti
     const artifact = writeArtifact({
         agentId: 'product-manager',
         colorCode: 214,
-        workspacePath: state.workspacePath,
+        workspacePath: state.workspacePath, outputPath: state.outputPath,
         title: 'Product Manager Mission Report',
         content: [
             `## User Stories (${output.userStories?.length ?? 0})\n`,
@@ -1098,7 +1098,7 @@ export async function dbaNode(state: ProjectStateType): Promise<Partial<ProjectS
         agentId: 'dba',
         tag: '[DBA]',
         colorCode: 100,
-        workspacePath: state.workspacePath,
+        workspacePath: state.workspacePath, outputPath: state.outputPath,
         title: 'DBA Mission Report',
         content: [
             `## Database Engine: ${output.dbDesign?.engine}\n\n${output.dbDesign?.rationale}`,
@@ -1222,7 +1222,7 @@ export async function teamLeaderNode(state: ProjectStateType): Promise<Partial<P
     const artifact = writeArtifact({
         agentId: 'team-leader',
         colorCode: 213,
-        workspacePath: state.workspacePath,
+        workspacePath: state.workspacePath, outputPath: state.outputPath,
         title: 'Team Leader Mission Report',
         content: [
             `## Assignments (${assignments.length})\n`,
@@ -1436,7 +1436,7 @@ export async function qaNode(state: ProjectStateType): Promise<Partial<ProjectSt
         qaLog.info(`Test plan: ${leadOutput.testPlan?.unit?.length ?? 0} unit, ${leadOutput.testPlan?.e2e?.length ?? 0} e2e`);
 
         leadArtifact = writeArtifact({
-            agentId: 'qa-lead', colorCode: 198, workspacePath: state.workspacePath,
+            agentId: 'qa-lead', colorCode: 198, workspacePath: state.workspacePath, outputPath: state.outputPath,
             title: 'QA Lead — Test Plan',
             content: `## Test Plan\n\n${JSON.stringify(leadOutput.testPlan, null, 2)}`,
         });
@@ -1528,7 +1528,7 @@ export async function qaNode(state: ProjectStateType): Promise<Partial<ProjectSt
         if (unitOutput.bugs) allBugs.push(...unitOutput.bugs);
 
         unitArtifact = writeArtifact({
-            agentId: 'qa-unit', colorCode: 205, workspacePath: state.workspacePath,
+            agentId: 'qa-unit', colorCode: 205, workspacePath: state.workspacePath, outputPath: state.outputPath,
             title: 'QA Unit — Agent Report (advisory)',
             content: `## Results (agent self-report — advisory only)\n\n${JSON.stringify(unitOutput.testReport, null, 2)}`,
         });
@@ -1712,7 +1712,7 @@ export async function qaNode(state: ProjectStateType): Promise<Partial<ProjectSt
 
         // Write Security Report artifact
         writeArtifact({
-            agentId: 'security-gates', colorCode: 196, workspacePath: state.workspacePath,
+            agentId: 'security-gates', colorCode: 196, workspacePath: state.workspacePath, outputPath: state.outputPath,
             title: 'Security Report',
             content: `## Security Report\n\n${securityReportToMarkdown(securityReport)}`,
         });
@@ -2122,7 +2122,7 @@ export async function devopsNode(state: ProjectStateType): Promise<Partial<Proje
     }
 
     const artifact = writeArtifact({
-        agentId: 'devops', colorCode: 33, workspacePath: state.workspacePath,
+        agentId: 'devops', colorCode: 33, workspacePath: state.workspacePath, outputPath: state.outputPath,
         title: 'DevOps Mission Report',
         content: artifactContent.join('\n'),
     });
@@ -2321,7 +2321,7 @@ export async function e2eNode(state: ProjectStateType): Promise<Partial<ProjectS
         const e2eEvidenceData = { screenshots: [] as string[], consoleErrors: [] as string[], urlsVisited: [] as string[] };
 
         const e2eArtifact = writeArtifact({
-            agentId: 'qa-e2e', colorCode: 118, workspacePath: state.workspacePath,
+            agentId: 'qa-e2e', colorCode: 118, workspacePath: state.workspacePath, outputPath: state.outputPath,
             title: 'QA E2E — Test Report',
             content: `## Results\n\n${JSON.stringify(e2eReport, null, 2)}`,
         });
@@ -2403,7 +2403,7 @@ export async function acceptanceNode(state: ProjectStateType): Promise<Partial<P
         writeArtifact({
             agentId: 'acceptance-gate',
             colorCode: 214,
-            workspacePath: state.workspacePath,
+            workspacePath: state.workspacePath, outputPath: state.outputPath,
             title: 'Acceptance Report',
             content: reportMd,
         });
@@ -2626,7 +2626,7 @@ export async function finalizeNode(state: ProjectStateType): Promise<Partial<Pro
     writeArtifact({
         agentId: 'conductor',
         colorCode: 46,
-        workspacePath: state.workspacePath,
+        workspacePath: state.workspacePath, outputPath: state.outputPath,
         title: 'Run Summary',
         content: summaryText,
     });
@@ -2705,7 +2705,7 @@ export async function finalizeNode(state: ProjectStateType): Promise<Partial<Pro
     writeArtifact({
         agentId: 'conductor',
         colorCode: 220,
-        workspacePath: state.workspacePath,
+        workspacePath: state.workspacePath, outputPath: state.outputPath,
         title: 'Token Usage Report',
         content: usageReportLines.join('\n'),
     });
@@ -2716,7 +2716,7 @@ export async function finalizeNode(state: ProjectStateType): Promise<Partial<Pro
         writeArtifact({
             agentId: 'conductor',
             colorCode: 183,
-            workspacePath: state.workspacePath,
+            workspacePath: state.workspacePath, outputPath: state.outputPath,
             title: 'Requirements Traceability Matrix',
             content: traceMd,
         });

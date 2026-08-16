@@ -397,6 +397,20 @@ ${runStatus === 'in-progress'
         <div class="value">${summary.totalCalls}</div>
         <div class="label">LLM Calls</div>
     </div>
+    <!-- Plan 22 D2: prompt-cache effectiveness. A run sitting at 0% is re-billing
+         its system prompt, tool schemas and task context on every single call. -->
+    <div class="summary-card">
+        <div class="value">${(summary.cacheHitRate * 100).toFixed(1)}%</div>
+        <div class="label">Prompt Cache Hit Rate</div>
+    </div>
+    <div class="summary-card">
+        <div class="value">${formatNumber(summary.totalCacheReadTokens)}</div>
+        <div class="label">Cached Input Tokens</div>
+    </div>
+    <div class="summary-card">
+        <div class="value">${summary.totalOutputTokens > 0 ? (summary.totalInputTokens / summary.totalOutputTokens).toFixed(1) : '—'}:1</div>
+        <div class="label">Input : Output Ratio</div>
+    </div>
     <div class="summary-card">
         <div class="value">${agentRows.length}</div>
         <div class="label">Agents</div>

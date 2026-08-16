@@ -31,7 +31,8 @@ import {
     STRONG_FIXER_MODEL, STRONG_FIXER_ENABLED, STRONG_FIXER_MAX_TOOL_CALLS,
     PR_EXHAUSTION_STRATEGY,
 } from '../config';
-import { buildHandoff, renderHandoff } from './agent-respawn';
+import { buildHandoff, renderHandoff, madeProgress } from './agent-respawn';
+import { ensureProjectGitignore, getGitignoreEntriesForStack } from '../utils/workspace';
 import { getEffectiveLimits } from '../utils/run-budget';
 import { buildWorkspaceSnapshot } from './workspace-snapshot';
 import { reconcileFileChanges } from './file-change-reconciliation';
@@ -55,10 +56,10 @@ import { runProductVerification } from './product-verify';
 import { scanForSecrets, securityReportToMarkdown } from './security-gates';
 import {
     captureConfigBaseline, detectTampering, tamperFindingsToMarkdown,
-    detectTrivialTests, findTestFiles, findProductSourceFiles,
+    detectTrivialTests, findTestFiles, findProductSourceFiles, trivialTestSeverity,
     type ConfigBaseline, type TamperFinding,
 } from './gate-integrity';
-import { GATE_INTEGRITY_MODE } from '../config';
+import { GATE_INTEGRITY_MODE, GATE_INTEGRITY_DELETE_TRIVIAL_TESTS } from '../config';
 import { classifyPrFailure, isFatalPrFailure } from './pr-failure';
 import { resolveKnownConflicts, listConflictedFiles } from './merge-resolve';
 import type { CompletionEvidence } from './assignment-policy';
@@ -78,6 +79,35 @@ import { tokenTracker, type TokenCallRecord } from '../utils/token-tracker';
 import type { DevRank } from '../agents/_shared/persona';
 
 const log = getLogger('[PR-Workflow]', 135);
+
+/**
+ * Consecutive no-progress respawn generations tolerated before termination
+ * (Plan 22, C3). One retry is worth it — the handoff may unblock the agent;
+ * four are not: `junior-react` spent 4 respawns and 882k input tokens on
+ * reconnaissance in the pacmanclaude run.
+ */
+const MAX_CONSECUTIVE_ZERO_WRITE_GENERATIONS = 1;
+
+/**
+ * Archive a test file the integrity gate is about to delete (Plan 22, F3).
+ *
+ * Deleting source on the strength of a heuristic must never be unrecoverable.
+ * Never throws — a failed archive must not abort the gate.
+ */
+function archiveDeletedTest(
+    outputPath: string | undefined, branchName: string, relPath: string, absPath: string,
+): void {
+    if (!outputPath) return;
+    try {
+        const dir = path.join(outputPath, 'deleted-tests', branchName.replace(/[^a-zA-Z0-9._-]+/g, '-'));
+        const dest = path.join(dir, relPath.replace(/[\\/]/g, '__'));
+        fs.mkdirSync(dir, { recursive: true });
+        fs.copyFileSync(absPath, dest);
+        log.info(`  Archived before deletion: ${dest}`);
+    } catch (err: any) {
+        log.warn(`Could not archive ${relPath} before deletion: ${err.message}`);
+    }
+}
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -215,7 +245,17 @@ export function commitWorktree(
         gitExec(worktreeWorkspace, `commit -m "${commitMsg.replace(/"/g, '\\"')}"`);
         gitPush(worktreeWorkspace, branchName, gitContext);
         const sha = gitExec(worktreeWorkspace, 'rev-parse HEAD');
-        return sha.startsWith('Error:') ? null : sha;
+        const commit = sha.startsWith('Error:') ? null : sha.trim();
+
+        // Plan 22 G3: a branch is pushed as soon as an agent finishes, but its PR
+        // is only opened after every assignment on the branch completes and the
+        // gates run. In the pacmanclaude run that left 27 minutes in which the
+        // branch had code, no PR existed, and nothing said why — indistinguishable
+        // from a crash. Announce the push explicitly.
+        log.info(`Branch pushed: ${branchName} @ ${commit?.slice(0, 8) ?? '(unknown)'} — "${subject}" (PR not open yet)`);
+        emitRunEvent('branch:pushed', { branchName, commit, subject, type });
+
+        return commit;
     } catch (err: any) {
         log.warn(`commitWorktree failed (non-fatal): ${err.message}`);
         return null;
@@ -458,6 +498,14 @@ async function invokeDevAgent(
     agent: any, userMessage: string, threadSuffix: string,
     agentId: string, model: string,
     buildAgentFn?: () => any,
+    /**
+     * Worktree + base ref for ground-truth handoff verification (Plan 22, C1).
+     * Without it `buildHandoff` cannot verify anything: `worktreeVerified` stays
+     * false, byte sizes are absent, there is no tree snapshot, and `filesWritten`
+     * is the agent's claim rather than what is actually on disk — which is how
+     * generations that had committed real work were terminated for "zero writes".
+     */
+    respawnContext?: { worktreeDir: string; baseRef: string },
 ): Promise<{ output: DeveloperOutput; tokenUsage: TokenCallRecord | null; allTokenUsage?: TokenCallRecord[] }> {
     return retryWithBackoff(async () => {
         // Track the overall dev invocation (spans all respawn generations)
@@ -469,6 +517,7 @@ async function invokeDevAgent(
             let currentAgent = agent;
             let handoff: ReturnType<typeof buildHandoff> | null = null;
             let respawnCount = 0;
+            let consecutiveZeroWriteGenerations = 0;
 
             for (let gen = 0; gen <= AGENT_RESPAWN_MAX_GENERATIONS; gen++) {
                 // Build a fresh agent for generations > 0
@@ -508,13 +557,34 @@ async function invokeDevAgent(
                     };
                 }
 
-                // Build handoff for the next generation
-                handoff = buildHandoff(result.messages ?? [], gen + 1);
+                // Build handoff for the next generation.
+                // Plan 22 C1: pass the worktree so `filesWritten` is ground truth
+                // (git diff + git status), sizes are real, and the successor gets a
+                // tree snapshot instead of re-discovering the repo.
+                const budgetSpent = currentAgent.getToolUsage?.();
+                handoff = buildHandoff(
+                    result.messages ?? [], gen + 1,
+                    respawnContext?.worktreeDir, respawnContext?.baseRef,
+                    budgetSpent
+                        ? { reads: budgetSpent.reads, writes: budgetSpent.writes, shell: budgetSpent.shell, turns: budgetSpent.turns }
+                        : undefined,
+                );
 
-                // Sub-Plan 08 §4: progress-gated respawn — a generation that
-                // produced zero writes does not get another respawn
-                if (handoff.filesWritten.length === 0) {
-                    log.warn(`${agentId} generation ${gen} produced zero writes — terminating instead of respawning`);
+                // Plan 22 C3: progress-gated respawn — a generation that neither
+                // wrote a file nor got a build/test command to pass does not get
+                // another respawn. Consecutive zero-write generations are capped
+                // at one so a stuck agent cannot burn all AGENT_RESPAWN_MAX_GENERATIONS
+                // on reconnaissance (junior-react spent 4 respawns / 882k input
+                // tokens doing exactly that).
+                const progressed = madeProgress(handoff);
+                if (!progressed) consecutiveZeroWriteGenerations++;
+                else consecutiveZeroWriteGenerations = 0;
+
+                if (!progressed && consecutiveZeroWriteGenerations > MAX_CONSECUTIVE_ZERO_WRITE_GENERATIONS) {
+                    log.warn(
+                        `${agentId} generation ${gen} made no progress `
+                        + `(${consecutiveZeroWriteGenerations} consecutive) — terminating instead of respawning`,
+                    );
                     tokenTracker.endInvocation(invocationId, respawnCount > 0 ? respawnCount : undefined);
                     return {
                         output: parsed.output,
@@ -525,7 +595,10 @@ async function invokeDevAgent(
 
                 log.info(
                     `Respawning ${agentId} (generation ${gen + 1}): ` +
-                    `${handoff.filesWritten.length} files carried forward, handoff ${renderHandoff(handoff).length} chars`,
+                    `${handoff.filesWritten.length} files carried forward` +
+                    `${handoff.worktreeVerified ? ' (worktree-verified)' : ''}, ` +
+                    `${handoff.filesRead.length} already inspected, ` +
+                    `handoff ${renderHandoff(handoff).length} chars`,
                 );
                 emitRunEvent('agent:respawn', {
                     agentId,
@@ -720,6 +793,47 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
         gitExec(worktreeWorkspace, `fetch origin ${baseBranch}`);
         const baseRef = resolveBaseRef(worktreeWorkspace, baseBranch);
 
+        // Plan 22 C1: ground truth for every respawn handoff in this workflow.
+        const respawnCtx = { worktreeDir: worktreeWorkspace, baseRef };
+
+        /**
+         * Reconcile a fix/repair/escalation agent's claimed `fileChanges` against
+         * the worktree and return only what is really on disk (Plan 22, C4).
+         *
+         * The initial dev path already did this; the fix paths reported claims
+         * verbatim. In the pacmanclaude run a generation with zero `write_file`
+         * calls claimed three files and the log dutifully said
+         * `Fix complete: 3 changes` — a hallucinated fix that the review loop then
+         * treated as real work.
+         */
+        const reconcileClaims = (who: string, claimed?: FileChange[]): FileChange[] => {
+            if (!claimed?.length) return [];
+            if (!RECONCILE_FILE_CHANGES) return claimed;
+            const recon = reconcileFileChanges(worktreeWorkspace, claimed);
+            if (recon.phantoms.length > 0 || recon.unreported.length > 0) {
+                log.warn(
+                    `${who} claimed ${claimed.length} changes; ${recon.verified.length} verified, ` +
+                    `${recon.phantoms.length} phantom, ${recon.unreported.length} unreported`,
+                );
+                allPhantomFileChanges.push(...recon.phantoms);
+            }
+            return [...recon.verified, ...recon.unreported];
+        };
+
+        // ── 0b. Ensure the worktree carries the stack-aware .gitignore ────
+        // Plan 22 G2: ensureProjectGitignore only ever ran on the main workspace,
+        // so feature branches never received the Playwright/Vitest artifact
+        // entries. `junior-react` consequently committed 111 test-results/ files
+        // and 7 playwright-report/ files onto this branch.
+        try {
+            ensureProjectGitignore(worktreeWorkspace, [
+                ...getGitignoreEntriesForStack(techStack),
+                '.conventions/', '.worktrees/', '.worktrees-failed/', '.agent/',
+            ]);
+        } catch (giErr: any) {
+            log.warn(`Could not refresh .gitignore in worktree: ${giErr.message}`);
+        }
+
         // ── 0a. Capture per-branch config baseline for tamper detection ──
         let branchBaseline: ConfigBaseline | null = null;
         if (GATE_INTEGRITY_MODE !== 'off') {
@@ -804,7 +918,7 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
 
             try {
                 const devModel = getModelForRank(entry.rank as DevRank);
-                const { output, tokenUsage: devTokenUsage, allTokenUsage: devAllTokenUsage } = await invokeDevAgent(agent, message, `${entry.id}-${branchName}`, entry.id, devModel, buildAgentFn);
+                const { output, tokenUsage: devTokenUsage, allTokenUsage: devAllTokenUsage } = await invokeDevAgent(agent, message, `${entry.id}-${branchName}`, entry.id, devModel, buildAgentFn, respawnCtx);
                 if (devTokenUsage) allTokenUsage.push(devTokenUsage);
                 if (devAllTokenUsage) allTokenUsage.push(...devAllTokenUsage.slice(1)); // first already pushed above
 
@@ -827,6 +941,7 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                     agentId: entry.id,
                     colorCode: entry.colorCode,
                     workspacePath: worktreeWorkspace,
+                    outputPath,
                     title: `${entry.name} Mission Report`,
                     content: [
                         `## Branch: ${branchName}\n`,
@@ -858,6 +973,18 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
             gitExec(worktreeWorkspace, `commit -m "[${projectSlug}]-[${primaryStoryId}]-chore: final cleanup for ${branchName}"`);
         }
         gitPush(worktreeWorkspace, branchName, gitContext);
+
+        // Plan 22 G3: all assignments are done and the branch is fully pushed —
+        // the PR opens only after the gates below finish, which can take tens of
+        // minutes. Say so, so "branch has code, no PR" is never a mystery.
+        log.info(
+            `All ${assignments.length} assignment(s) complete on ${branchName} — running quality gates before opening the PR`,
+        );
+        emitRunEvent('branch:pr-pending', {
+            branchName,
+            assignments: assignments.length,
+            reason: 'quality-gates',
+        });
 
         // ── 1a. Post-development quality gate verification (fixes A6) ──
         // Run multi-language quality gates (install/build/lint/test) to detect
@@ -940,10 +1067,11 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                                 const repairModel = getModelForRank(primaryEntry.rank as DevRank);
                                 const { output: repairOutput, tokenUsage: repairTokenUsage } = await invokeDevAgent(
                                     repairAgent, repairMsg, `repair-${primaryEntry.id}-${branchName}`, primaryEntry.id, repairModel,
-                                    buildRepairAgentFn,
+                                    buildRepairAgentFn, respawnCtx,
                                 );
                                 if (repairTokenUsage) allTokenUsage.push(repairTokenUsage);
-                                if (repairOutput.fileChanges) allFileChanges.push(...repairOutput.fileChanges);
+                                const repairChanges = reconcileClaims(`${primaryEntry.id} (gate repair)`, repairOutput.fileChanges);
+                                allFileChanges.push(...repairChanges);
                             } catch (repairErr: any) {
                                 log.warn(`Quality gate repair attempt failed (non-fatal): ${repairErr.message}`);
                             } finally {
@@ -991,7 +1119,9 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                     if (!branchBaseline.testFiles.includes(tf.file)) {
                         integrityFindings.push({
                             kind: 'trivial-test-added',
-                            severity: 'critical',
+                            // Plan 22 F3: heuristic import-graph reasons are `major`
+                            // (report only); unambiguous gate-gaming stays `critical`.
+                            severity: trivialTestSeverity(tf.reason),
                             file: tf.file,
                             detail: `${tf.reason}: ${tf.detail}`,
                         });
@@ -1020,14 +1150,40 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                             }
                         }
 
-                        // Delete fabricated test files (in current but not baseline)
-                        for (const f of integrityFindings) {
-                            if (f.kind === 'trivial-test-added') {
+                        // Delete fabricated test files (in current but not baseline).
+                        //
+                        // Plan 22 F3: only CRITICAL trivial-test findings are eligible,
+                        // deletion is behind GATE_INTEGRITY_DELETE_TRIVIAL_TESTS
+                        // (default false), and every deleted body is archived to
+                        // outputs/<run>/deleted-tests/ so a false positive is
+                        // recoverable. Previously every `trivial-test-added` finding —
+                        // including the purely heuristic `no-product-import` — was
+                        // unlinked and the deletion pushed.
+                        const deletableTests = integrityFindings.filter(
+                            f => f.kind === 'trivial-test-added' && f.severity === 'critical',
+                        );
+                        const reportOnlyTests = integrityFindings.filter(
+                            f => f.kind === 'trivial-test-added' && f.severity !== 'critical',
+                        );
+                        if (reportOnlyTests.length > 0) {
+                            log.warn(
+                                `  ${reportOnlyTests.length} trivial-test finding(s) are heuristic — reported, not deleted: `
+                                + reportOnlyTests.map(f => f.file).join(', '),
+                            );
+                        }
+                        if (deletableTests.length > 0 && !GATE_INTEGRITY_DELETE_TRIVIAL_TESTS) {
+                            log.warn(
+                                `  ${deletableTests.length} fabricated test(s) left in place `
+                                + '(GATE_INTEGRITY_DELETE_TRIVIAL_TESTS=false) — reported to reviewers instead',
+                            );
+                        }
+                        if (deletableTests.length > 0 && GATE_INTEGRITY_DELETE_TRIVIAL_TESTS) {
+                            for (const f of deletableTests) {
                                 const absPath = path.join(worktreeWorkspace, f.file);
-                                if (fs.existsSync(absPath)) {
-                                    fs.unlinkSync(absPath);
-                                    log.info(`  Deleted fabricated test: ${f.file}`);
-                                }
+                                if (!fs.existsSync(absPath)) continue;
+                                archiveDeletedTest(outputPath, branchName, f.file, absPath);
+                                fs.unlinkSync(absPath);
+                                log.info(`  Deleted fabricated test: ${f.file}`);
                             }
                         }
 
@@ -1515,12 +1671,13 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                                         const { output: fixOutput, tokenUsage: fixTokenUsage } = await invokeDevAgent(
                                             fixAgent, fixMsg, `fix-${primaryEntry.id}-${reviewerId}-iter${iteration}`,
                                             primaryEntry.id, fixModel,
-                                            buildFixAgentFn,
+                                            buildFixAgentFn, respawnCtx,
                                         );
                                         if (fixTokenUsage) allTokenUsage.push(fixTokenUsage);
-                                        if (fixOutput.fileChanges) allFileChanges.push(...fixOutput.fileChanges);
-                                        devLog.info(`Fix complete: ${fixOutput.fileChanges?.length ?? 0} changes (from ${reviewerId})`);
-                                        allTranscript.push(msg(primaryDevId, `Fixed ${fixOutput.fileChanges?.length ?? 0} files from ${reviewerId}'s review`));
+                                        const fixChanges = reconcileClaims(`${primaryDevId} (fix for ${reviewerId})`, fixOutput.fileChanges);
+                                        allFileChanges.push(...fixChanges);
+                                        devLog.info(`Fix complete: ${fixChanges.length} verified change(s) (from ${reviewerId})`);
+                                        allTranscript.push(msg(primaryDevId, `Fixed ${fixChanges.length} files from ${reviewerId}'s review`));
                                     } catch (fixErr: any) {
                                         log.error(`Fix attempt for ${reviewerId}'s comments failed: ${fixErr.message}`);
                                         allTranscript.push(msg(primaryDevId, `Fix failed for ${reviewerId}: ${fixErr.message}`));
@@ -1626,11 +1783,12 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
 
                             try {
                                 const fixModel = getModelForRank(primaryEntry.rank as DevRank);
-                                const { output: fixOutput, tokenUsage: fixTokenUsage } = await invokeDevAgent(fixAgent, fixMsg, `fix-${primaryEntry.id}-iter${iteration}`, primaryEntry.id, fixModel, buildNoProgressFixFn);
+                                const { output: fixOutput, tokenUsage: fixTokenUsage } = await invokeDevAgent(fixAgent, fixMsg, `fix-${primaryEntry.id}-iter${iteration}`, primaryEntry.id, fixModel, buildNoProgressFixFn, respawnCtx);
                                 if (fixTokenUsage) allTokenUsage.push(fixTokenUsage);
-                                if (fixOutput.fileChanges) allFileChanges.push(...fixOutput.fileChanges);
-                                devLog.info(`Fix complete: ${fixOutput.fileChanges?.length ?? 0} changes`);
-                                allTranscript.push(msg(primaryDevId, `Fixed ${fixOutput.fileChanges?.length ?? 0} files based on review comments`));
+                                const fixChanges = reconcileClaims(`${primaryDevId} (no-progress fix)`, fixOutput.fileChanges);
+                                allFileChanges.push(...fixChanges);
+                                devLog.info(`Fix complete: ${fixChanges.length} verified change(s)`);
+                                allTranscript.push(msg(primaryDevId, `Fixed ${fixChanges.length} files based on review comments`));
                             } catch (err: any) {
                                 log.error(`Fix attempt failed: ${err.message}`);
                                 if (err.message?.includes('429') || err.message?.includes('rate limit') || err.message?.includes('Rate limit') || err.message?.includes('Request limit')) {
@@ -1724,10 +1882,11 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
 
                     try {
                         const escModel = getModelForRank(escalatedDevEntry.rank as DevRank);
-                        const { output: fixOutput, tokenUsage: escTokenUsage } = await invokeDevAgent(escalatedDev, escalationMsg, `escalation-${escalatedDevId}`, escalatedDevId, escModel, buildEscalatedFn);
+                        const { output: fixOutput, tokenUsage: escTokenUsage } = await invokeDevAgent(escalatedDev, escalationMsg, `escalation-${escalatedDevId}`, escalatedDevId, escModel, buildEscalatedFn, respawnCtx);
                         if (escTokenUsage) allTokenUsage.push(escTokenUsage);
-                        if (fixOutput.fileChanges) allFileChanges.push(...fixOutput.fileChanges);
-                        log.info(`Escalated dev ${escalatedDevId} completed fixes`);
+                        const escChanges = reconcileClaims(`${escalatedDevId} (escalation)`, fixOutput.fileChanges);
+                        allFileChanges.push(...escChanges);
+                        log.info(`Escalated dev ${escalatedDevId} completed fixes: ${escChanges.length} verified change(s)`);
                         allTranscript.push(msg(escalatedDevId, `Escalated dev fixes applied`));
 
                         // Find escalated reviewer (higher rank, not the originals)
@@ -1894,12 +2053,13 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                     const { output: fixerOutput, tokenUsage: fixerTokenUsage } = await invokeDevAgent(
                         fixerAgent, fixerMsg, `strong-fixer-pr${ghPr.number}`,
                         'strong-fixer', fixerModel,
-                        buildFixerFn,
+                        buildFixerFn, respawnCtx,
                     );
                     if (fixerTokenUsage) allTokenUsage.push(fixerTokenUsage);
-                    if (fixerOutput.fileChanges) allFileChanges.push(...fixerOutput.fileChanges);
-                    log.info(`Strong fixer completed: ${fixerOutput.fileChanges?.length ?? 0} file changes`);
-                    allTranscript.push(msg('strong-fixer', `Strong fixer applied ${fixerOutput.fileChanges?.length ?? 0} file changes`));
+                    const fixerChanges = reconcileClaims('strong-fixer', fixerOutput.fileChanges);
+                    allFileChanges.push(...fixerChanges);
+                    log.info(`Strong fixer completed: ${fixerChanges.length} verified file change(s)`);
+                    allTranscript.push(msg('strong-fixer', `Strong fixer applied ${fixerChanges.length} file changes`));
 
                     // Run quality gates after the fixer's changes
                     let fixerGateReport: GateReport | null = null;
@@ -2131,7 +2291,7 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
 
                                     const conflictModel = getModelForRank(primaryEntry.rank as DevRank);
                                     try {
-                                        await invokeDevAgent(conflictAgent, conflictMsg, `conflict-${primaryEntry.id}-${branchName}`, primaryEntry.id, conflictModel, buildConflictFn);
+                                        await invokeDevAgent(conflictAgent, conflictMsg, `conflict-${primaryEntry.id}-${branchName}`, primaryEntry.id, conflictModel, buildConflictFn, respawnCtx);
                                     } catch (devConflictErr: any) {
                                         log.warn(`Dev conflict resolution attempt ${attempt + 1} failed: ${devConflictErr.message}`);
                                     } finally {

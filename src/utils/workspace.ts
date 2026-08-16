@@ -1,6 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { GENERATED_PROJECTS_DIR, OUTPUTS_DIR } from '../config';
+import { GENERATED_PROJECTS_DIR, OUTPUTS_DIR, AGENT_ARTIFACTS_IN_REPO } from '../config';
 import { LogColors } from './log-colors.util';
 import {logToolAction} from './logger';
 import type { TechDecision } from '../agents/_shared/base-schemas';
@@ -98,9 +98,25 @@ export function getGitignoreEntriesForStack(techDecisions?: TechDecision[]): str
         'npm-debug.log*',
         '',
         '# Test & coverage',
+        // Plan 22 G1: `test-results/` and `playwright-report/` were missing, so a
+        // dev agent that ran Playwright committed 111 + 7 generated artifacts onto
+        // its feature branch and burned a CRITICAL review comment on them.
         'coverage/',
         '.nyc_output/',
+        'test-results/',
+        'playwright-report/',
+        'blob-report/',
+        '.playwright/',
+        '.vitest/',
+        'junit.xml',
     ];
+
+    // Plan 22 G4: pipeline telemetry is not product source. When mission reports
+    // go to outputs/<run>/agents/ instead of the repo, keep any stragglers (and
+    // the machine-readable repo contract) out of the PR diff.
+    if (!AGENT_ARTIFACTS_IN_REPO) {
+        common.push('', '# AgenticDevTeam pipeline artifacts', 'docs/agents/', '.agent/');
+    }
 
     // Tech-stack-specific additions based on architect decisions
     const extras: string[] = [];

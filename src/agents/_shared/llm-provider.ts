@@ -100,6 +100,12 @@ export function createChatModel(opts: CreateModelOpts): BaseChatModel {
                 log.debug(`Creating ChatAnthropic for model "${opts.modelName}"`);
             }
 
+            // Plan 22 D3: `opts.timeout` was silently dropped for Anthropic, so
+            // LLM_REQUEST_TIMEOUT_MS applied to OpenAI only.
+            const clientOptions: Record<string, unknown> = {};
+            if (ANTHROPIC_BASE_URL) clientOptions.baseURL = ANTHROPIC_BASE_URL;
+            if (opts.timeout !== undefined) clientOptions.timeout = opts.timeout;
+
             return new ChatAnthropic({
                 model: opts.modelName,
                 // Sampling params — omitted entirely for adaptive-only models.
@@ -110,7 +116,7 @@ export function createChatModel(opts: CreateModelOpts): BaseChatModel {
                 }),
                 maxTokens: opts.maxTokens,
                 anthropicApiKey: ANTHROPIC_API_KEY,
-                ...(ANTHROPIC_BASE_URL && { clientOptions: { baseURL: ANTHROPIC_BASE_URL } }),
+                ...(Object.keys(clientOptions).length > 0 ? { clientOptions } : {}),
                 maxRetries: 0,
                 // Streaming is required — Anthropic's HTTP endpoint times out after
                 // ~10 minutes on non-streaming requests, killing long agent runs.
@@ -134,6 +140,8 @@ export function createChatModel(opts: CreateModelOpts): BaseChatModel {
                 maxOutputTokens: opts.maxTokens,
                 apiKey: GOOGLE_API_KEY,
                 ...(GOOGLE_BASE_URL && { baseUrl: GOOGLE_BASE_URL }),
+                // Plan 22 D3: honour LLM_REQUEST_TIMEOUT_MS here too.
+                ...(opts.timeout !== undefined ? { timeout: opts.timeout } : {}),
                 maxRetries: 0,
                 callbacks: opts.callbacks,
             });

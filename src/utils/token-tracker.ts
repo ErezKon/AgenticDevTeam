@@ -23,6 +23,10 @@ export interface TokenCallRecord {
     inputTokens: number;
     outputTokens: number;
     totalTokens: number;
+    /** Input tokens served from the provider prompt cache (Plan 22, D2). */
+    cacheReadTokens?: number;
+    /** Input tokens written to the provider prompt cache (Plan 22, D2). */
+    cacheCreationTokens?: number;
     timestamp: string;
     /** Optional invocation ID for per-invocation attribution. */
     invocationId?: string;
@@ -44,6 +48,12 @@ export interface RunUsageSummary {
     totalOutputTokens: number;
     totalTokens: number;
     totalCalls: number;
+    /** Input tokens served from the provider prompt cache (Plan 22, D2). */
+    totalCacheReadTokens: number;
+    /** Input tokens written to the provider prompt cache (Plan 22, D2). */
+    totalCacheCreationTokens: number;
+    /** Share of input tokens served from cache, 0–1. The pacmanclaude run scored 0. */
+    cacheHitRate: number;
     byAgent: AgentUsageSummary[];
     byPhase: { phase: string; inputTokens: number; outputTokens: number; totalTokens: number; callCount: number }[];
     byModel: { model: string; inputTokens: number; outputTokens: number; totalTokens: number; callCount: number }[];
@@ -210,11 +220,17 @@ class TokenTracker {
             byModelMap.set(r.model, model);
         }
 
+        const totalInputTokens = this.ledger.reduce((s, r) => s + r.inputTokens, 0);
+        const totalCacheReadTokens = this.ledger.reduce((s, r) => s + (r.cacheReadTokens ?? 0), 0);
+
         return {
-            totalInputTokens: this.ledger.reduce((s, r) => s + r.inputTokens, 0),
+            totalInputTokens,
             totalOutputTokens: this.ledger.reduce((s, r) => s + r.outputTokens, 0),
             totalTokens: this.ledger.reduce((s, r) => s + r.totalTokens, 0),
             totalCalls: this.ledger.length,
+            totalCacheReadTokens,
+            totalCacheCreationTokens: this.ledger.reduce((s, r) => s + (r.cacheCreationTokens ?? 0), 0),
+            cacheHitRate: totalInputTokens > 0 ? totalCacheReadTokens / totalInputTokens : 0,
             byAgent: [...byAgentMap.values()].sort((a, b) => b.totalTokens - a.totalTokens),
             byPhase: [...byPhaseMap.values()].sort((a, b) => b.totalTokens - a.totalTokens),
             byModel: [...byModelMap.values()].sort((a, b) => b.totalTokens - a.totalTokens),
