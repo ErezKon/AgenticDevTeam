@@ -1,5 +1,5 @@
 import { LogColors } from './log-colors.util';
-import { OAUTH_TOKEN_URL, OAUTH_CLIENT_ID, OAUTH_CLIENT_SECRET } from '../config';
+import { OAUTH_TOKEN_URL, OAUTH_CLIENT_ID, OAUTH_CLIENT_SECRET, OPENAI_API_KEY, ANTHROPIC_API_KEY, GOOGLE_API_KEY } from '../config';
 import {logToolAction} from './logger';
 
 const TAG = `${LogColors.BRIGHT_MAGENTA}[oauth-auth]${LogColors.RESET}`;
@@ -14,6 +14,11 @@ let inflightPromise: Promise<string> | null = null;
  * Caches the token in-process and refreshes 60s before expiry.
  * Concurrent callers share the same in-flight request.
  *
+ * When direct API keys are configured (OPENAI_API_KEY, ANTHROPIC_API_KEY,
+ * or GOOGLE_API_KEY) and OAuth is not configured, returns a placeholder
+ * token. The agent factory overrides the apiKey with the direct key anyway,
+ * so the placeholder is never sent to any provider.
+ *
  * In LLM_CASSETTE_MODE=replay, returns a constant so replays work
  * without OAuth credentials (the cassette contains pre-recorded responses).
  */
@@ -22,6 +27,14 @@ export async function getAccessToken(): Promise<string> {
     // has all the LLM responses we need and no real network call is made.
     if (process.env.LLM_CASSETTE_MODE === 'replay') {
         return 'cassette-replay-token';
+    }
+
+    // When direct API keys are set and OAuth is not configured, return a
+    // placeholder. The agent factory (buildAgent in agent-factory.ts) uses
+    // OPENAI_API_KEY directly when set, and Anthropic/Google providers use
+    // their own API keys — so the OAuth token is never actually needed.
+    if (!OAUTH_TOKEN_URL && (OPENAI_API_KEY || ANTHROPIC_API_KEY || GOOGLE_API_KEY)) {
+        return 'direct-api-key-mode';
     }
 
     // Return cached token if still valid (with 60s safety margin)

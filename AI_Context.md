@@ -287,6 +287,7 @@ All agents are built via `buildAgent()` in `src/agents/_shared/agent-factory.ts`
 
 OpenAI auth priority: `OPENAI_API_KEY` (direct API key, no custom fetch chain) > OAuth client-credentials flow (`oauthFetch` -> `cassetteFetch` -> `throttledFetch`).
 Anthropic and Google use their own HTTP handling with direct API keys.
+When any direct API key is set (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or `GOOGLE_API_KEY`) and `OAUTH_TOKEN_URL` is not configured, the OAuth flow is skipped entirely — no OAuth env vars are required.
 Set `LLM_PROVIDER_DETECTION=openai` to force all models through the OpenAI-compatible endpoint (escape hatch for proxies).
 
 ---
