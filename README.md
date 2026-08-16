@@ -974,6 +974,9 @@ See [`.env.example`](.env.example) for the full template.
 | `EVENT_BUFFER_SIZE` | `5000` | Events kept in the ring buffer (was 500) |
 | `EVENT_PRIORITY_BUFFER_SIZE` | `500` | High-severity events retained regardless of ring eviction |
 | `RUN_LEDGER_ENABLED` | `true` | Write outputs/<run>/ledger.jsonl and run-report.md |
+| `FULL_RESPONSE_LOG_ENABLED` | `true` | Dump every agent's full LangGraph result to outputs/<run>/full-responses/ |
+| `FULL_RESPONSE_LOG_DIR_NAME` | `full-responses` | Directory name for the dumps under the run output dir |
+| `FULL_RESPONSE_LOG_MAX_CHARS` | `0` | Max characters per dump file (0 = unlimited) |
 | `RUN_INVARIANTS_MODE` | `warn` | Run-invariant enforcement: off/warn/strict |
 
 ### New variables (Plan 16)
@@ -1036,10 +1039,43 @@ generated-projects/<system-name>/    # (or the existing project in maintain mode
 ```
 outputs/<system-name>-<timestamp>/
 ├── run.log                 # Full console log (ANSI stripped)
+├── ledger.jsonl            # Append-only evidence ledger (every pipeline decision)
+├── full-responses/         # Verbatim agent responses — see below
+│   ├── index.jsonl         # One summary line per invocation (flow at a glance)
+│   └── 001-architect-architect.json
 ├── codebase-analysis.md    # (maintain mode) Snapshot of the analysis for this run
 ├── state.json              # Final ProjectState snapshot
 └── artifacts/              # Mission reports + diagrams
 ```
+
+### Full-Response Logs
+
+`run.log` records what the pipeline *decided*; `full-responses/` records what the
+models actually **said**. Every agent invocation — including repair re-asks —
+dumps its complete LangGraph result:
+
+```jsonc
+{
+  "meta": {                      // agent, phase, model, thread, duration
+    "textSource": "content-blocks",   // string | content-blocks | earlier-message | none
+    "finalContentBlocks": "text×1",   // block census of the final message
+    "truncatedByTokenLimit": false
+  },
+  "user_message": "…",           // the prompt that was sent
+  "model_request": {
+    "messages": [ /* LangChain-serialised HumanMessage / AIMessage / ToolMessage */ ],
+    "structuredResponse": { }    // present only when the provider returns one
+  }
+}
+```
+
+`index.jsonl` is the fast path: one line per invocation with the agent, phase,
+message count, where the payload text was found, and how many characters it had.
+`textSource: "none"` means the model returned no usable text at all (e.g. a
+reasoning-only response) — the single most useful signal when a phase looks empty.
+
+Controlled by `FULL_RESPONSE_LOG_ENABLED` (default on), `FULL_RESPONSE_LOG_DIR_NAME`,
+and `FULL_RESPONSE_LOG_MAX_CHARS`.
 
 ### Mission Reports
 

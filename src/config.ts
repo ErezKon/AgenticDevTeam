@@ -605,6 +605,20 @@ export const EVENT_PRIORITY_BUFFER_SIZE =
 export const RUN_LEDGER_ENABLED =
     (process.env.RUN_LEDGER_ENABLED ?? 'true') === 'true';
 
+/** Dump every agent's full LangGraph result to outputs/<run>/full-responses/.
+ *  This is the only record of what a model actually returned — without it an
+ *  unexpected response shape shows up as silently empty phase output. */
+export const FULL_RESPONSE_LOG_ENABLED =
+    (process.env.FULL_RESPONSE_LOG_ENABLED ?? 'true') === 'true';
+
+/** Directory name (under the run output dir) for full-response dumps. */
+export const FULL_RESPONSE_LOG_DIR_NAME =
+    process.env.FULL_RESPONSE_LOG_DIR_NAME ?? 'full-responses';
+
+/** Max characters per full-response dump file (0 = unlimited). */
+export const FULL_RESPONSE_LOG_MAX_CHARS =
+    parseInt(process.env.FULL_RESPONSE_LOG_MAX_CHARS ?? '0', 10);
+
 /** Run-invariant enforcement: 'off' | 'warn' | 'strict'. */
 export const RUN_INVARIANTS_MODE =
     (process.env.RUN_INVARIANTS_MODE ?? 'warn') as 'off' | 'warn' | 'strict';

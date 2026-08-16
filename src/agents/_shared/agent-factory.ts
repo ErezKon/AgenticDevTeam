@@ -183,6 +183,10 @@ export function buildAgent(apiKey: string, cfg: AgentConfig) {
     // (e.g. respawn logic, invocation tracking) can interact with the agent.
     return Object.assign(agent, {
         isCeilingReached,
+        /** The fully-assembled system prompt (incl. the injected response schema).
+         *  createAgent keeps it out of `result.messages`, so the full-response log
+         *  reads it from here to record both halves of the conversation. */
+        systemPromptText: prompt,
         /** Tag all subsequent LLM calls with an invocation ID for per-invocation attribution. */
         setInvocationId: (id: string | undefined) => tokenCallback.setInvocationId(id),
     });

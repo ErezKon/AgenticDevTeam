@@ -279,10 +279,19 @@ describe('buildRepairMessage', () => {
         expect(msg).toContain('Do not add commentary');
     });
 
-    test('does not include the original request in output', () => {
+    test('echoes the original request when there is no previous payload to correct', () => {
+        // Nothing came back (empty / reasoning-only response), so the repair runs
+        // on a fresh thread with no history — without the original request the
+        // model would answer from the system prompt alone.
         const msg = buildRepairMessage('- x: bad', 'do something');
-        // The original request is kept for reference but not echoed
-        expect(msg).not.toContain('do something');
+        expect(msg).toContain('Original request:');
+        expect(msg).toContain('do something');
+    });
+
+    test('omits the original request once previousRaw is available', () => {
+        const msg = buildRepairMessage('- x: bad', 'do something', '{"a":1}');
+        expect(msg).not.toContain('Original request:');
+        expect(msg).toContain('{"a":1}');
     });
 
     test('includes previousRaw when supplied', () => {

@@ -145,7 +145,8 @@ src/
     github-local.ts                # Local GitHub stand-in (bare git repo)
     github-repo-manager.ts         # GitHub repo create/validate/init
     run-budget.ts                  # Graceful degradation on budget limits
-    structured-output.ts           # JSON extraction + Zod validation + repair
+    structured-output.ts           # JSON extraction + Zod validation + repair + content-block text extraction
+    response-log.ts                # Full-response dumps (outputs/<run>/full-responses/*.json + index.jsonl)
     event-bus.ts                   # Typed singleton event bus (12 event types)
     token-tracker.ts               # Token consumption tracker (singleton)
     token-callback.ts              # LangChain callback for token recording (two-tier provider lookup)
@@ -298,7 +299,10 @@ These are load-bearing. Changing any of them reintroduces a failure mode that is
 | `sanitizeStreamingContentBlocks()` runs before `compactHistory()` on every call | `history-compactor.ts`, wired in `agent-factory.ts` | Defence-in-depth against corrupt histories, including ones restored from a checkpoint written by an older provider package. Operates on a copy; `tool_calls` is untouched (the adapter re-materialises `tool_use` blocks from it). Flag: `SANITIZE_STREAM_BLOCKS`. |
 | `handleLLMEnd` reads `llmOutput.{tokenUsage,token_usage,usage,estimatedTokenUsage}`, then falls back to `generations[].message.usage_metadata` | `token-callback.ts` + `token-usage-extractor.ts` | No single field covers every transport. Reading only tier 1 recorded 5 token records for a 60+ call run, silently disabling `MAX_RUN_COST_USD`. Tier 1 wins when present, so nothing is double-counted. Both paths share `normaliseUsage` / `sumUsageMetadata`. |
 | `AgentConfig.topP` / `topK` are forwarded to `createChatModel()` | `agent-factory.ts` | They were accepted by 10 agent builders and silently dropped. |
-| `invokeAgent()` normalises `AIMessage.content` from content blocks to string before JSON parsing | `nodes.ts`, `pr-workflow.ts` | Anthropic streaming and OpenAI Responses API (`*codex*`, `gpt-5.x-pro`) return `content` as `[{ type: 'text', text: '...' }]` arrays, not plain strings. Without normalisation, the `typeof content !== 'string'` guard bypasses all JSON parsing and schema validation, producing silent empty output. Uses `extractTextFromContentBlocks()` / `normaliseContentToString()` from `structured-output.ts`. |
+| `invokeAgent()` normalises `AIMessage.content` from content blocks to string before JSON parsing | `nodes.ts`, `pr-workflow.ts` | Anthropic streaming and OpenAI Responses API (`*codex*`, `gpt-5.x-pro`) return `content` as `[{ type: 'text', text: '...' }]` arrays, not plain strings. Without normalisation, the `typeof content !== 'string'` guard bypasses all JSON parsing and schema validation, producing silent empty output. Uses `extractAgentText()` from `structured-output.ts`. |
+| A response with **no** extractable text never returns raw content blocks when a schema is set | `nodes.ts` (`invokeAgent`), `pr-workflow.ts` | Reasoning-only responses and thinking-exhausted output budgets have no text block. Returning `last.content` there is what wrote `architect-mission.md` with `undefined` fields and `0 components` while reporting success. Now it logs the block census, re-asks through the repair loop (repair message carries the original request because there is no previous payload to correct), and throws if still empty. |
+| `reasoning` / `thinking` blocks are excluded from extracted text | `structured-output.ts` | Concatenating them into the payload corrupts `JSON.parse`. |
+| Every agent invocation is dumped to `outputs/<run>/full-responses/` | `response-log.ts`, wired in `nodes.ts` + `pr-workflow.ts` | Response-shape failures are invisible in `run.log` — it only shows the symptom (`0 components`). The dumps + `index.jsonl` (`textSource`, `finalContentBlocks`, `truncatedByTokenLimit`) make the cause a one-line read. Flag: `FULL_RESPONSE_LOG_ENABLED`. |
 
 OpenAI auth priority: `OPENAI_API_KEY` (direct API key, no custom fetch chain) > OAuth client-credentials flow (`oauthFetch` -> `cassetteFetch` -> `throttledFetch`).
 Anthropic and Google use their own HTTP handling with direct API keys.
@@ -718,6 +722,18 @@ Robust JSON extraction from LLM responses:
 5. `detectTruncation()` for structural completeness check
 6. `repairFieldViolations()` -- deterministic field-level repair (enum near-miss, scalar/array coercion, type coercion) before LLM repair
 7. Zod validation with repair loop (re-invoke agent with issue summary, 16k middle-clip budget)
+
+Content-block handling (same module, used before any of the above):
+- `extractTextFromContentBlocks(content)` -- concatenates payload blocks (`text`, `output_text`, any non-thinking block with a string `text`), skips `reasoning`/`thinking`/`refusal`, returns `null` when nothing usable
+- `extractAgentText(messages)` -- locates the payload in a LangGraph result: last message first, then walks back over **AI messages only** (never tool output); reports `source`, `blockTypes` census and `truncatedByTokenLimit` (from `finish_reason`/`stop_reason`/`status`)
+- `describeContentBlocks(content)` -- `"reasoning×2, text×1"` census for diagnostics
+
+### Full-Response Log (`response-log.ts`)
+
+`initResponseLog(outputPath)` (intake) + `logAgentResponse(meta, result)` (every agent
+invocation, including repair attempts) write `outputs/<run>/full-responses/<seq>-<agent>-<phase>[-repair<n>].json`
+with `{ meta, user_message, model_request: { messages, structuredResponse? } }`, plus one
+summary line per invocation in `index.jsonl`. Never throws; a write failure is a warning.
 
 ---
 

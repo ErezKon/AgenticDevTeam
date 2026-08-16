@@ -65,10 +65,12 @@ import { getTruncationStats } from '../tools/_shared/truncate';
 import type { ContextSection } from './context-builder';
 import {
     parseAgentJson, validateAgentOutput, buildRepairMessage,
-    repairFieldViolations, extractTextFromContentBlocks,
+    repairFieldViolations, extractAgentText,
     getValidationStats, logValidationStats,
     _recordValidated, _recordRepaired, _recordFailed,
 } from '../utils/structured-output';
+import type { ParseResult } from '../utils/structured-output';
+import { initResponseLog, logAgentResponse } from '../utils/response-log';
 import { validateStoryPlan, validateAssignmentPlan, buildCoverageGapPrompt, logPlanFunnel } from './plan-coverage';
 import { z } from 'zod';
 import { CodebaseAnalysisSchema } from '../agents/_shared/base-schemas';
@@ -373,32 +375,47 @@ async function invokeAgent(
             });
         };
 
-        const last = result.messages[result.messages.length - 1];
         // Normalise content: Anthropic streaming and OpenAI Responses API
         // return AIMessage.content as an array of content blocks instead of
         // a plain string.  Extract the text so JSON parsing can proceed.
-        let rawContent: string;
-        if (typeof last.content === 'string') {
-            rawContent = last.content;
-        } else {
-            const extracted = extractTextFromContentBlocks(last.content);
-            if (extracted === null) {
-                // No text blocks — genuine structured data (e.g. tool calls)
-                emitEnd();
-                return { output: last.content, tokenUsage };
-            }
-            invokeLog.debug(
-                `Extracted ${extracted.length} chars from ${Array.isArray(last.content) ? last.content.length : 1} ` +
-                `content block(s) for "${threadSuffix}"`,
+        const extraction = extractAgentText(result.messages);
+        const schema = opts?.schema;
+
+        logAgentResponse({
+            agentId, phase, model, threadId, invocationId,
+            kind: 'invoke', userMessage, systemPrompt: agent.systemPromptText,
+            durationMs: Date.now() - startMs,
+        }, result);
+
+        if (extraction.truncatedByTokenLimit) {
+            invokeLog.warn(
+                `Agent "${threadSuffix}" response was cut off by the output-token limit ` +
+                `— raise PLANNING_MAX_OUTPUT_TOKENS/LLM_MAX_OUTPUT_TOKENS if this repeats.`,
             );
-            rawContent = extracted;
+        }
+        if (extraction.text === null && !schema) {
+            // No schema — the caller wants whatever structured data came back
+            // (e.g. tool calls), so pass the raw content through unchanged.
+            const last = result.messages[result.messages.length - 1];
+            invokeLog.warn(
+                `Agent "${threadSuffix}" returned no text content ` +
+                `(final message content: ${extraction.blockTypes}) — passing raw content through.`,
+            );
+            emitEnd();
+            return { output: last?.content, tokenUsage };
+        }
+        if (extraction.text !== null && extraction.source !== 'string') {
+            invokeLog.debug(
+                `Extracted ${extraction.text.length} chars from ${extraction.source} ` +
+                `(${extraction.blockTypes}) for "${threadSuffix}"`,
+            );
         }
 
         // Extract JSON from the response using the shared parser
-        const raw = rawContent.trim();
-        const parseResult = parseAgentJson(raw);
-
-        const schema = opts?.schema;
+        const raw = extraction.text?.trim() ?? '';
+        const parseResult: ParseResult = extraction.text === null
+            ? { ok: false, error: `Response carried no text content (final message content: ${extraction.blockTypes}).` }
+            : parseAgentJson(raw);
 
         // If JSON parsing failed and no schema is provided, throw immediately
         if (!parseResult.ok && !schema) {
@@ -412,7 +429,17 @@ async function invokeAgent(
         let parsed = parseResult.ok ? parseResult.value : undefined;
         let issuesForRepair: string;
 
-        if (!parseResult.ok) {
+        if (extraction.text === null) {
+            // Content blocks with no text at all: a reasoning-only response, or
+            // an output budget consumed entirely by thinking. Returning the raw
+            // blocks here is what silently produced empty phases — re-ask instead.
+            invokeLog.error(
+                `Agent "${threadSuffix}" returned no text content ` +
+                `(final message content: ${extraction.blockTypes}) — re-asking.`,
+            );
+            issuesForRepair = `Your previous response contained no text output at all `
+                + `(content blocks: ${extraction.blockTypes}). No JSON payload was received.`;
+        } else if (!parseResult.ok) {
             // JSON parsing failed but we have a schema — route into repair loop
             invokeLog.warn(`Agent "${threadSuffix}" returned unparseable JSON — entering repair loop. ${parseResult.error}`);
             issuesForRepair = `Response was not valid JSON. ${parseResult.error}`;
@@ -469,14 +496,21 @@ async function invokeAgent(
                 invokeLog.warn(`Repair attempt ${attempt + 1} for "${threadSuffix}" threw: ${repairErr?.message ?? repairErr}`);
                 continue;
             }
-            const repairLast = repairResult.messages[repairResult.messages.length - 1];
+            logAgentResponse({
+                agentId, phase, model, threadId: repairThreadId, invocationId,
+                kind: 'repair', attempt: attempt + 1, userMessage: repairMsg,
+                systemPrompt: agent.systemPromptText,
+            }, repairResult);
             // Normalise content blocks (same as main path above)
-            const repairRaw: string | null = typeof repairLast.content === 'string'
-                ? repairLast.content
-                : extractTextFromContentBlocks(repairLast.content);
-            if (repairRaw === null) {
+            const repairExtraction = extractAgentText(repairResult.messages);
+            if (repairExtraction.text === null) {
+                const repairLast = repairResult.messages[repairResult.messages.length - 1];
+                invokeLog.warn(
+                    `Repair attempt ${attempt + 1} for "${threadSuffix}" returned no text ` +
+                    `(${repairExtraction.blockTypes})`,
+                );
                 // Non-text content — try validating it directly
-                const rv = validateAgentOutput(schema!, repairLast.content);
+                const rv = validateAgentOutput(schema!, repairLast?.content);
                 if (rv.ok) {
                     _recordRepaired();
                     invokeLog.info(`Agent "${threadSuffix}" repaired on attempt ${attempt + 1}`);
@@ -485,7 +519,7 @@ async function invokeAgent(
                 }
                 continue;
             }
-            const repairParse = parseAgentJson(repairRaw.trim());
+            const repairParse = parseAgentJson(repairExtraction.text.trim());
             if (!repairParse.ok) continue;
             const rv = validateAgentOutput(schema!, repairParse.value);
             if (rv.ok) {
@@ -548,6 +582,7 @@ export async function intakeNode(state: ProjectStateType): Promise<Partial<Proje
     const outputPath = createRunOutputDir(state.input.systemName);
     setRunLogPath(path.join(outputPath, 'run.log'));
     initLedger(outputPath);
+    initResponseLog(outputPath);
     appendLedger({ kind: 'phase', phase: 'intake', event: 'start' });
 
     // ── Token report: create skeleton immediately so it exists on disk ───

@@ -16,15 +16,27 @@ const log = getLogger('[structured-output]', 183);
 // ─── Content Block Normalisation ────────────────────────────────────────────
 
 /**
+ * Content-block types that carry model *thinking*, never the final answer.
+ * Concatenating them into the payload corrupts JSON parsing, so they are
+ * skipped by `extractTextFromContentBlocks`.
+ */
+const NON_ANSWER_BLOCK_TYPES = new Set([
+    'reasoning', 'thinking', 'redacted_thinking', 'summary_text', 'refusal',
+]);
+
+/**
  * Extract text from LangChain content blocks.
  *
  * Handles Anthropic streaming and OpenAI Responses API formats where
  * `AIMessage.content` is an array of content blocks instead of a plain string.
  * - Anthropic streaming: `[{ type: 'text', text: '...' }]`
  * - OpenAI Responses API: `[{ type: 'text', text: '...', annotations: [...] }]`
+ * - OpenAI Responses API (raw item shape): `[{ type: 'output_text', text: '...' }]`
+ *
+ * Reasoning / thinking blocks are skipped — they are commentary, not payload.
  *
  * Returns the concatenated text, or `null` if no text blocks are found
- * (e.g. the content is tool calls or other non-text data).
+ * (e.g. the content is tool calls, reasoning only, or other non-text data).
  */
 export function extractTextFromContentBlocks(content: unknown): string | null {
     if (!Array.isArray(content)) return null;
@@ -32,14 +44,119 @@ export function extractTextFromContentBlocks(content: unknown): string | null {
     for (const block of content) {
         if (typeof block === 'string') {
             textParts.push(block);
-        } else if (typeof block === 'object' && block !== null && 'type' in block) {
-            const b = block as Record<string, unknown>;
-            if (b.type === 'text' && typeof b.text === 'string') {
-                textParts.push(b.text);
-            }
+            continue;
+        }
+        if (typeof block !== 'object' || block === null) continue;
+        const b = block as Record<string, unknown>;
+        const type = typeof b.type === 'string' ? b.type : undefined;
+        if (type && NON_ANSWER_BLOCK_TYPES.has(type)) continue;
+        // Any non-thinking block exposing a string `text` field carries payload:
+        // 'text' (Anthropic + LangChain-normalised OpenAI), 'output_text' /
+        // 'input_text' (raw Responses API items), and future variants.
+        if (typeof b.text === 'string') textParts.push(b.text);
+    }
+    if (textParts.length === 0) return null;
+    const joined = textParts.join('');
+    return joined.trim().length > 0 ? joined : null;
+}
+
+/**
+ * Human-readable census of content-block types, e.g. `"reasoning×2, text×1"`.
+ * Used in diagnostics when text extraction comes back empty — the block types
+ * are the only clue as to *why* an agent produced no payload.
+ */
+export function describeContentBlocks(content: unknown): string {
+    if (typeof content === 'string') return `string(${content.length} chars)`;
+    if (!Array.isArray(content)) return `${typeof content}`;
+    if (content.length === 0) return 'empty array';
+    const counts = new Map<string, number>();
+    for (const block of content) {
+        const type = typeof block === 'string'
+            ? 'raw-string'
+            : (typeof block === 'object' && block !== null && typeof (block as any).type === 'string'
+                ? (block as any).type
+                : 'unknown');
+        counts.set(type, (counts.get(type) ?? 0) + 1);
+    }
+    return [...counts.entries()].map(([t, n]) => `${t}×${n}`).join(', ');
+}
+
+/** True when a message is an assistant/AI message (LangChain instance or plain object). */
+function isAiMessage(msg: any): boolean {
+    if (!msg || typeof msg !== 'object') return false;
+    if (typeof msg._getType === 'function') return msg._getType() === 'ai';
+    if (typeof msg.getType === 'function') return msg.getType() === 'ai';
+    return msg.type === 'ai' || msg.role === 'assistant' || Array.isArray(msg.tool_calls);
+}
+
+export interface AgentTextExtraction {
+    /** The extracted payload text, or `null` when no message carried any. */
+    text: string | null;
+    /** Where the text came from — `earlier-message` means the final message was empty. */
+    source: 'string' | 'content-blocks' | 'earlier-message' | 'none';
+    /** Index into `messages` of the message the text came from (-1 when none). */
+    messageIndex: number;
+    /** Block-type census of the LAST message, for diagnostics. */
+    blockTypes: string;
+    /** Provider stop reason when it indicates truncation (`length`/`max_tokens`), else null. */
+    truncatedByTokenLimit: boolean;
+}
+
+/**
+ * Locate an agent's final payload text in a LangGraph result's message list.
+ *
+ * The last message is authoritative, but three real-world shapes make a naive
+ * `messages[messages.length - 1].content` read unsafe:
+ *  1. Content is an array of blocks (Anthropic streaming, OpenAI Responses API).
+ *  2. Content is present but carries only reasoning blocks or an empty string
+ *     (reasoning models that spend the whole output budget thinking).
+ *  3. A trailing tool/empty message follows the real answer.
+ *
+ * In cases 2 and 3 we walk backwards to the most recent message that has usable
+ * text so the caller can still validate a payload instead of silently treating
+ * the run as empty.
+ */
+export function extractAgentText(messages: unknown): AgentTextExtraction {
+    const list = Array.isArray(messages) ? messages : [];
+    const lastMsg: any = list.length > 0 ? list[list.length - 1] : undefined;
+    const blockTypes = lastMsg ? describeContentBlocks(lastMsg.content) : 'no messages';
+    const stopReason = String(
+        lastMsg?.response_metadata?.finish_reason
+        ?? lastMsg?.response_metadata?.stop_reason
+        ?? lastMsg?.response_metadata?.status
+        ?? '',
+    ).toLowerCase();
+    const truncatedByTokenLimit = stopReason === 'length' || stopReason === 'max_tokens' || stopReason === 'incomplete';
+
+    for (let i = list.length - 1; i >= 0; i--) {
+        const msg: any = list[i];
+        const content = msg?.content;
+        if (content == null) continue;
+        const isLast = i === list.length - 1;
+        // Only the final message may be of any type; when walking back we accept
+        // AI messages only — a ToolMessage body is tool output, never the payload.
+        if (!isLast && !isAiMessage(msg)) continue;
+
+        if (typeof content === 'string') {
+            if (content.trim().length === 0) continue;
+            return {
+                text: content,
+                source: isLast ? 'string' : 'earlier-message',
+                messageIndex: i, blockTypes, truncatedByTokenLimit,
+            };
+        }
+
+        const extracted = extractTextFromContentBlocks(content);
+        if (extracted !== null) {
+            return {
+                text: extracted,
+                source: isLast ? 'content-blocks' : 'earlier-message',
+                messageIndex: i, blockTypes, truncatedByTokenLimit,
+            };
         }
     }
-    return textParts.length > 0 ? textParts.join('') : null;
+
+    return { text: null, source: 'none', messageIndex: -1, blockTypes, truncatedByTokenLimit };
 }
 
 /**
@@ -372,6 +489,11 @@ export function buildRepairMessage(issues: string, originalRequest: string, prev
                 + previousRaw.slice(previousRaw.length - tailLen);
         }
         parts.push('', 'Your previous (invalid) JSON:', '```', clipped, '```');
+    } else if (originalRequest) {
+        // Nothing usable came back (empty / reasoning-only response), so there is
+        // nothing to correct — the model needs the original request again or it
+        // will answer from the system prompt alone.
+        parts.push('', 'Original request:', originalRequest);
     }
 
     parts.push(

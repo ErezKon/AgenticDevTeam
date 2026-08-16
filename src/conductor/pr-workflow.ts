@@ -62,7 +62,8 @@ import { GATE_INTEGRITY_MODE } from '../config';
 import { classifyPrFailure, isFatalPrFailure } from './pr-failure';
 import { resolveKnownConflicts, listConflictedFiles } from './merge-resolve';
 import type { CompletionEvidence } from './assignment-policy';
-import { parseAgentJson, validateAgentOutput, normaliseContentToString } from '../utils/structured-output';
+import { parseAgentJson, validateAgentOutput, extractAgentText } from '../utils/structured-output';
+import { logAgentResponse } from '../utils/response-log';
 import { DeveloperOutputSchema } from '../agents/developers/schemas/dev-output.schema';
 import { ReviewOutputSchema } from '../agents/developers/schemas/review-output.schema';
 import type { GateReport } from './quality-gates';
@@ -401,8 +402,16 @@ function getModelForRank(rank: DevRank): string {
  */
 function parseDevResult(
     result: any, agentId: string, model: string,
+    logMeta?: { userMessage?: string; systemPrompt?: string; generation?: number },
 ): { output: DeveloperOutput; tokenUsage: TokenCallRecord | null } {
     const tokenUsage = extractTokenUsageFromMessages(result, agentId, model, 'development');
+    logAgentResponse({
+        agentId, phase: 'development', model,
+        kind: logMeta?.generation ? 'respawn' : 'invoke',
+        attempt: logMeta?.generation,
+        userMessage: logMeta?.userMessage,
+        systemPrompt: logMeta?.systemPrompt,
+    }, result);
 
     // Guard against empty or missing messages array
     if (!result?.messages || result.messages.length === 0) {
@@ -410,13 +419,17 @@ function parseDevResult(
         return { output: { fileChanges: [], notes: 'Agent returned no messages (possible tool loop or recursion limit).' }, tokenUsage };
     }
 
-    const last = result.messages[result.messages.length - 1];
-    if (!last || last.content == null) {
-        log.warn(`Dev agent ${agentId} returned message with no content — returning empty output`);
-        return { output: { fileChanges: [], notes: 'Agent returned empty content.' }, tokenUsage };
+    // Content may be a plain string or an array of blocks (Anthropic streaming,
+    // OpenAI Responses API); extractAgentText handles both and skips reasoning.
+    const extraction = extractAgentText(result.messages);
+    if (extraction.text === null) {
+        log.warn(
+            `Dev agent ${agentId} returned no text content (${extraction.blockTypes}) — returning empty output`,
+        );
+        return { output: { fileChanges: [], notes: `Agent returned no text content (${extraction.blockTypes}).` }, tokenUsage };
     }
 
-    const raw = normaliseContentToString(last.content);
+    const raw = extraction.text;
     const parseResult = parseAgentJson(raw);
     if (!parseResult.ok) {
         throw new Error(`Invalid JSON output from dev agent: ${parseResult.error}`);
@@ -477,7 +490,9 @@ async function invokeDevAgent(
                     { configurable: { thread_id: `dev-pr-${threadSuffix}-gen${gen}-${Date.now()}` }, recursionLimit: DEV_RECURSION_LIMIT },
                 );
 
-                const parsed = parseDevResult(result, agentId, model);
+                const parsed = parseDevResult(result, agentId, model, {
+                    userMessage: message, systemPrompt: currentAgent.systemPromptText, generation: gen || undefined,
+                });
                 if (parsed.tokenUsage) allTokenUsage.push(parsed.tokenUsage);
 
                 // Check if ceiling was reached and more generations are available
@@ -527,7 +542,9 @@ async function invokeDevAgent(
             { configurable: { thread_id: `dev-pr-${threadSuffix}-${Date.now()}` }, recursionLimit: DEV_RECURSION_LIMIT },
         );
         tokenTracker.endInvocation(invocationId);
-        return parseDevResult(result, agentId, model);
+        return parseDevResult(result, agentId, model, {
+            userMessage, systemPrompt: agent.systemPromptText,
+        });
     }, `dev-${threadSuffix}`);
 }
 
@@ -566,6 +583,10 @@ async function invokeReviewerAgent(
         }
         tokenTracker.endInvocation(invocationId);
         const tokenUsage = extractTokenUsageFromMessages(result, agentId, model, 'review');
+        logAgentResponse({
+            agentId, phase: 'review', model, invocationId, kind: 'invoke',
+            userMessage, systemPrompt: agent.systemPromptText,
+        }, result);
 
         // Guard against empty or missing messages — abstain, not approve
         if (!result?.messages || result.messages.length === 0) {
@@ -573,13 +594,13 @@ async function invokeReviewerAgent(
             return { outcome: { kind: 'abstained' as const, reviewerId: agentId, reason: 'empty-output' as const, detail: 'Reviewer returned no messages' }, tokenUsage };
         }
 
-        const last = result.messages[result.messages.length - 1];
-        if (!last || last.content == null) {
-            log.warn(`Reviewer ${agentId} returned message with no content — abstaining`);
-            return { outcome: { kind: 'abstained' as const, reviewerId: agentId, reason: 'empty-output' as const, detail: 'Reviewer returned empty content' }, tokenUsage };
+        const extraction = extractAgentText(result.messages);
+        if (extraction.text === null) {
+            log.warn(`Reviewer ${agentId} returned no text content (${extraction.blockTypes}) — abstaining`);
+            return { outcome: { kind: 'abstained' as const, reviewerId: agentId, reason: 'empty-output' as const, detail: `Reviewer returned no text content (${extraction.blockTypes})` }, tokenUsage };
         }
 
-        const raw = normaliseContentToString(last.content);
+        const raw = extraction.text;
         const parseResult = parseAgentJson(raw);
         if (!parseResult.ok) {
             throw new Error(`Invalid JSON output from reviewer agent: ${parseResult.error}`);
