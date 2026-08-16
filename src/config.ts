@@ -949,3 +949,17 @@ export const PLAYWRIGHT_AUTO_INSTALL =
 /** Generate a deterministic Dockerfile/compose when the DevOps agent fails or produces none. */
 export const DEVOPS_FALLBACK_ENABLED =
     (process.env.DEVOPS_FALLBACK_ENABLED ?? 'true') === 'true';
+
+// ─── Continue Run (Plan 23) ─────────────────────────────────────────────────
+
+/** Include previous run's token usage in budget calculations when continuing. */
+export const CONTINUE_TOKEN_CARRY_FORWARD =
+    (process.env.CONTINUE_TOKEN_CARRY_FORWARD ?? 'true') === 'true';
+
+/** Auto-fix git state issues (worktree cleanup, branch sync) before resuming. */
+export const CONTINUE_GIT_RECONCILE =
+    (process.env.CONTINUE_GIT_RECONCILE ?? 'true') === 'true';
+
+/** Close open GitHub PRs from previous run that will be re-dispatched. */
+export const CONTINUE_CLOSE_STALE_PRS =
+    (process.env.CONTINUE_CLOSE_STALE_PRS ?? 'true') === 'true';

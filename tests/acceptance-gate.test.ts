@@ -82,6 +82,8 @@ function makeMinimalState(overrides: Partial<ProjectStateType> = {}): ProjectSta
         e2eSkipReason: null,
         e2eEvidence: null,
         invariantViolations: [],
+        _isContinuation: false,
+        _resumePhase: null,
         ...overrides,
     };
 }

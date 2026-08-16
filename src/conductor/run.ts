@@ -1,12 +1,16 @@
 /**
- * Run helpers — start a full orchestration run in autonomous or HITL mode.
+ * Run helpers — start a full orchestration run in autonomous or HITL mode,
+ * or continue a previously stopped run.
  */
-import { createConductor, type ConductorOptions } from './graph';
+import { createConductor } from './graph';
 import { getLogger } from '../utils/logger';
 import { tokenTracker } from '../utils/token-tracker';
 import { refreshTokenReport } from '../utils/token-report';
 import { writeStateSnapshot, writeRunManifest } from '../utils/run-snapshot';
-import type { RunInput, RepoTarget, PhaseName } from '../agents/_shared/base-schemas';
+import { appendLedger } from '../utils/run-ledger';
+import { collectRunState, reconstructState, reconcileGitState } from './continue';
+import { rehydrateSingletons } from './continue/singleton-rehydration';
+import type { RepoTarget, PhaseName } from '../agents/_shared/base-schemas';
 import type { ProjectStateType } from './state';
 
 const log = getLogger('[Run]', 46);
@@ -378,3 +382,209 @@ export async function resumeRun(
 
     return { threadId, conductor, getState, resume };
 }
+
+// ─── Continue a stopped run (Plan 23, Sub-Plan 04) ──────────────────────────
+
+export interface ContinueRunOptions {
+    /** Absolute path to the stopped run's output directory (or an identifier for findRunOutputs). */
+    outputPath: string;
+    /** Run mode override. Defaults to 'autonomous'. */
+    mode?: 'autonomous' | 'human';
+    /** Optional thread ID. Auto-generated when omitted. */
+    threadId?: string;
+}
+
+/**
+ * Continue a previously stopped run from the last completed phase.
+ *
+ * 1. Collects all artifacts from the stopped run's output directory
+ * 2. Reconstructs a valid ProjectState from state.json + ledger + git
+ * 3. Resolves the correct phase to resume from
+ * 4. Rehydrates global singletons (logger, ledger, response log, token tracker)
+ * 5. Injects the reconstructed state into a new graph invocation with
+ *    `_isContinuation=true` and `_resumePhase` set — completed nodes skip
+ *    via the idempotency guard in shouldSkipOnContinue()
+ *
+ * Returns the final ProjectState (autonomous) or a RunSession (human).
+ */
+export async function continueRun(
+    opts: ContinueRunOptions,
+): Promise<RunSession | ProjectStateType> {
+    const continueLog = getLogger('[ContinueRun]', 177);
+    continueLog.info(`Continuing run from: ${opts.outputPath}`);
+
+    // ── 1. Collect artifacts ─────────────────────────────────────────────
+    const collected = collectRunState(opts.outputPath);
+
+    if (!collected.workspaceExists) {
+        throw new Error(
+            `Cannot continue run — workspace directory not found: "${collected.workspacePath || '(unknown)'}". ` +
+            `The generated project must exist on disk to continue.`,
+        );
+    }
+
+    // ── 2. Reconstruct state ─────────────────────────────────────────────
+    const { state: reconstructedState, resumePhase, confidence, warnings } = reconstructState(collected);
+
+    continueLog.info(`Reconstruction confidence: ${confidence}`);
+    continueLog.info(`Resume phase: ${resumePhase}`);
+    if (warnings.length > 0) {
+        for (const w of warnings) continueLog.warn(`  Warning: ${w}`);
+    }
+
+    if (confidence === 'minimal') {
+        continueLog.warn(
+            'Only minimal state reconstruction was possible. ' +
+            'The continued run may repeat significant work.',
+        );
+    }
+
+    // ── 3. Rehydrate singletons ──────────────────────────────────────────
+    // These are normally initialised by intakeNode, which will be skipped
+    // during continuation (its idempotency guard detects existing paths).
+    rehydrateSingletons(collected, reconstructedState);
+
+    // ── 3b. Git state reconciliation ─────────────────────────────────────
+    // Verify and fix workspace git state before resuming. This cleans up
+    // stale worktrees, lock files, and branches from the previous run.
+    if (collected.workspaceIsGitRepo) {
+        const reconciliation = reconcileGitState(collected, reconstructedState);
+        if (reconciliation.warnings.length > 0) {
+            for (const w of reconciliation.warnings) continueLog.warn(`  Git: ${w}`);
+        }
+        if (!reconciliation.ok) {
+            continueLog.warn(
+                'Git reconciliation completed with issues. The continued run may encounter git errors.',
+            );
+        }
+    }
+
+    // ── 4. Build the graph and invoke ────────────────────────────────────
+    const resolvedMode = opts.mode ?? 'autonomous';
+    const conductor = createConductor({
+        mode: resolvedMode,
+        outputPath: collected.outputPath,
+    });
+    const threadId = opts.threadId ?? `continue-${Date.now()}`;
+    const config = { configurable: { thread_id: threadId } };
+
+    // Inject the continuation flags into the state
+    const initialState: Partial<ProjectStateType> = {
+        ...reconstructedState as Partial<ProjectStateType>,
+        _isContinuation: true,
+        _resumePhase: resumePhase,
+    };
+
+    // Append a ledger entry marking the continuation
+    appendLedger({
+        kind: 'phase',
+        phase: resumePhase,
+        event: 'start',
+    });
+
+    if (resolvedMode === 'autonomous') {
+        try {
+            const finalState = await conductor.invoke(initialState, config);
+            continueLog.info('Continued autonomous run complete.');
+            return finalState as ProjectStateType;
+        } catch (err: any) {
+            tokenTracker.setRunStatus('failed');
+            try { refreshTokenReport(); } catch { /* best-effort */ }
+            try {
+                const snapshot = await conductor.getState(config);
+                const crashState = snapshot?.values as ProjectStateType | undefined;
+                if (crashState?.outputPath) {
+                    writeStateSnapshot(crashState.outputPath, crashState);
+                    writeRunManifest(crashState.outputPath, crashState, 'crashed');
+                }
+            } catch { /* best-effort */ }
+            continueLog.error(`Continued autonomous run failed: ${err?.message ?? err}`);
+            if (err?.stack) continueLog.error(err.stack);
+            throw err;
+        }
+    }
+
+    // ── HITL mode: return a session ──────────────────────────────────────
+    try {
+        await conductor.invoke(initialState, config);
+    } catch (err: any) {
+        tokenTracker.setRunStatus('failed');
+        try { refreshTokenReport(); } catch { /* best-effort */ }
+        try {
+            const snapshot = await conductor.getState(config);
+            const crashState = snapshot?.values as ProjectStateType | undefined;
+            if (crashState?.outputPath) {
+                writeStateSnapshot(crashState.outputPath, crashState);
+                writeRunManifest(crashState.outputPath, crashState, 'crashed');
+            }
+        } catch { /* best-effort */ }
+        continueLog.error(`Continued HITL run failed during initial invoke: ${err?.message ?? err}`);
+        if (err?.stack) continueLog.error(err.stack);
+        throw err;
+    }
+
+    async function getState(): Promise<ProjectStateType> {
+        const snapshot = await conductor.getState(config);
+        return snapshot.values as ProjectStateType;
+    }
+
+    async function resume(decisionOrBool: HitlDecision | boolean, feedback?: string): Promise<ProjectStateType | null> {
+        let decision: HitlDecision;
+        if (typeof decisionOrBool === 'boolean') {
+            decision = decisionOrBool ? 'approve' : 'deny';
+        } else {
+            decision = decisionOrBool;
+        }
+
+        const state = await getState();
+
+        if (decision === 'enhance') {
+            if (!feedback || feedback.trim() === '') {
+                throw new Error('Enhance requires non-empty feedback.');
+            }
+            const approval = {
+                phase: state.phase,
+                decision: 'enhance' as const,
+                feedback,
+                timestamp: new Date().toISOString(),
+            };
+            await conductor.updateState(config, {
+                approvals: [approval],
+                pendingRerun: state.phase as PhaseName,
+                phaseFeedback: { [state.phase]: [feedback] },
+            });
+            const result = await conductor.invoke(null, config);
+            return result as ProjectStateType;
+        }
+
+        if (decision === 'deny') {
+            tokenTracker.setRunStatus('cancelled');
+            const approval = {
+                phase: state.phase,
+                decision: 'deny' as const,
+                feedback,
+                timestamp: new Date().toISOString(),
+            };
+            await conductor.updateState(config, {
+                approvals: [approval],
+                cancelled: true,
+            });
+            const result = await conductor.invoke(null, config);
+            return result as ProjectStateType;
+        }
+
+        const approval = {
+            phase: state.phase,
+            decision: 'approve' as const,
+            feedback,
+            timestamp: new Date().toISOString(),
+        };
+        await conductor.updateState(config, { approvals: [approval] });
+        const result = await conductor.invoke(null, config);
+        return result as ProjectStateType;
+    }
+
+    return { threadId, conductor, getState, resume };
+}
+
+

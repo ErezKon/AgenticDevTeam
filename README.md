@@ -15,6 +15,7 @@
 - [Bug-Fix Loop](#bug-fix-loop)
 - [Git Branching & PR Workflow](#git-branching--pr-workflow)
 - [Multi-Repo Project Targeting](#multi-repo-project-targeting)
+- [Continue Run](#continue-run)
 - [Context Compaction & Token Optimization](#context-compaction--token-optimization)
 - [Provider Transport & Token Accounting](#provider-transport--token-accounting)
 - [Project Structure](#project-structure)
@@ -436,6 +437,80 @@ In the New Run form, a **Project Hosting** dropdown appears when the run type is
 
 - Multi-repo targeting is **greenfield only**. Maintain mode always operates on the existing project's repository.
 - If `GITHUB_PROJECT_TOKEN` is not set, the system falls back to `GITHUB_TOKEN`. Ensure the token has `repo` scope for creating new repositories.
+
+---
+
+## Continue Run
+
+When a run stops — due to a crash, error, budget exhaustion, or manual cancellation — the **Continue Run** feature lets you resume execution from the last completed phase instead of starting over.
+
+### How It Works
+
+```mermaid
+flowchart LR
+    STOP([Stopped Run<br/>state.json + workspace]) --> COLLECT[Collect<br/>Artifacts]
+    COLLECT --> RECON[Reconstruct<br/>State]
+    RECON --> RESOLVE[Resolve<br/>Resume Phase]
+    RESOLVE --> RECONCILE[Git<br/>Reconciliation]
+    RECONCILE --> RESUME[Resume<br/>Pipeline]
+
+    style STOP fill:#ef4444,color:#fff
+    style RESUME fill:#22c55e,color:#fff
+```
+
+1. **Collect** all artifacts from the stopped run's output directory (`state.json`, `run-manifest.json`, `ledger.jsonl`, token usage, git state)
+2. **Reconstruct** a valid `ProjectState` from the collected artifacts, rehydrating secrets (tokens, keys) from the current `.env`
+3. **Resolve** which phase to resume from — the first phase without evidence of completion
+4. **Reconcile** the workspace git state — remove stale worktrees, lock files, branches; sync with remote
+5. **Resume** the pipeline from the resolved phase — completed nodes skip automatically
+
+### Reconstruction Confidence
+
+| Level | Trigger | What You Get |
+|-------|---------|-------------|
+| **Full** | `state.json` exists | Complete state restoration; resume from exact crash point |
+| **Partial** | Only `run-manifest.json` | Basic metadata; arrays start empty; may repeat some work |
+| **Minimal** | Only `ledger.jsonl` | Phase completion evidence only; will repeat most planning work |
+
+### CLI Usage
+
+```
+Commands:
+  1) Start new run (autonomous)
+  2) Start new run (human-in-the-loop)
+  3) Maintain existing project
+  4) Continue a stopped run
+  5) Show agent roster
+  6) Exit
+```
+
+Select option 4 to:
+1. See a list of stopped runs with status, phase, and timestamp
+2. View a reconstruction summary (resume phase, confidence, warnings)
+3. Choose autonomous or human-in-the-loop mode
+4. Confirm and continue
+
+### REST API
+
+```
+GET  /api/runs/stoppable           # List runs that can be continued
+POST /api/run/continue             # Continue a stopped run
+  Body: { outputPath, mode?, threadId? }
+```
+
+### Configuration
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CONTINUE_TOKEN_CARRY_FORWARD` | `true` | Include previous run's token usage in budget calculations |
+| `CONTINUE_GIT_RECONCILE` | `true` | Auto-fix git state issues (worktree cleanup, branch sync) before resuming |
+| `CONTINUE_CLOSE_STALE_PRS` | `true` | Close open GitHub PRs from previous run that will be re-dispatched |
+
+### Limitations
+
+- **Workspace must exist on disk.** If the generated project directory was deleted, continuation is not possible (fatal error with clear message).
+- **Partial development recovery.** Completed assignments are skipped; pending assignments are re-dispatched. Stale worktrees and branches are cleaned up automatically.
+- **Token budget carries forward.** The continued run accounts for tokens already spent in the original run.
 
 ---
 

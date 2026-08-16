@@ -75,6 +75,12 @@ src/
     review-policy.ts               # Fail-closed review: ReviewOutcome, decideMerge, escalation, quorum (Sub-Plan 07)
     devops-verify.ts               # Real Docker build/run/health-check
     file-checkpointer.ts           # Persistent checkpoints for crash recovery
+    continue/                      # Continue Run feature (Plan 23)
+      index.ts                     # Barrel export
+      state-collector.ts           # Read-only artifact collector
+      state-reconstructor.ts       # State reconstruction + phase resolution
+      singleton-rehydration.ts     # Global singleton rehydration
+      git-reconciliation.ts        # Git workspace reconciliation
 
   agents/
     registry.ts                    # Master 20-agent registry (id, name, tag, color)
@@ -833,6 +839,77 @@ Greenfield projects can be hosted in:
 3. **Existing GitHub repository** -- Pushes code to an existing repo
 
 Separate tokens: `GITHUB_PROJECT_TOKEN` / `GITHUB_PROJECT_OWNER` (fall back to `GITHUB_TOKEN` / `GITHUB_OWNER`).
+
+---
+
+## Continue Run (Plan 23)
+
+When a run stops (crash, error, SIGINT, budget exhaustion, or manual cancellation), the **Continue Run** feature reconstructs pipeline state from persisted artifacts and resumes execution from the last completed phase.
+
+### Architecture
+
+```
+collectRunState() → reconstructState() → rehydrateSingletons() → reconcileGitState() → conductor.invoke()
+```
+
+| Step | Module | Purpose |
+|------|--------|---------|
+| **Collect** | `src/conductor/continue/state-collector.ts` | Read-only scan of `outputs/<run>/` — reads `state.json`, `run-manifest.json`, `ledger.jsonl`, `token-usage.json`, agent artifacts, git branches |
+| **Reconstruct** | `src/conductor/continue/state-reconstructor.ts` | Build a valid `ProjectState` from collected artifacts; rehydrate secrets from `.env`; resolve the resume phase |
+| **Rehydrate** | `src/conductor/continue/singleton-rehydration.ts` | Reinitialise global singletons: run log, ledger, response log, token tracker, run budget, local bare repo |
+| **Reconcile** | `src/conductor/continue/git-reconciliation.ts` | Clean up stale worktrees/lock files, checkout system branch, sync with remote, delete stale branches |
+| **Invoke** | `src/conductor/run.ts` (`continueRun()`) | Inject reconstructed state with `_isContinuation=true` + `_resumePhase`; graph nodes skip completed phases via `shouldSkipOnContinue()` |
+
+### State Reconstruction Paths
+
+| Path | Trigger | Confidence |
+|------|---------|-----------|
+| **Primary** | `state.json` exists | `full` |
+| **Fallback** | Only `run-manifest.json` exists | `partial` |
+| **Degraded** | Only `ledger.jsonl` exists | `minimal` |
+
+### Phase Resolution
+
+Phases are walked in pipeline order; each phase requires both ledger evidence (end event) and state evidence (e.g., `architecture != null`, `epics.length > 0`). The first phase without evidence is the resume point. Special cases:
+- **Intake**: always skipped (workspace already exists)
+- **Development**: counts pending assignments; all completed → advances past
+- **Bugfix loop**: `iteration.bugfix` and `fixedBugIds` are preserved
+- **Finalize**: always re-run
+
+### Node Idempotency
+
+Every pipeline node except `finalizeNode` calls `shouldSkipOnContinue(state, currentPhase, logger)` at the top. Returns `true` when `_isContinuation` is set and the current phase's index is before the resume phase. Skipped nodes return `{ phase: currentPhase }` — a no-op that maintains correct pipeline state without side effects.
+
+### Configuration
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CONTINUE_TOKEN_CARRY_FORWARD` | `true` | Include previous run's token usage in budget calculations |
+| `CONTINUE_GIT_RECONCILE` | `true` | Auto-fix git state issues before resuming |
+| `CONTINUE_CLOSE_STALE_PRS` | `true` | Close open GitHub PRs from previous run that will be re-dispatched |
+
+### Entry Points
+
+| Interface | Trigger |
+|-----------|---------|
+| **CLI** | Menu option 4: "Continue a stopped run" — lists runs, shows summary, confirms |
+| **REST API** | `GET /api/runs/stoppable` + `POST /api/run/continue` |
+
+### Files
+
+```
+src/conductor/continue/
+  index.ts                    # Barrel export
+  state-collector.ts          # collectRunState(), findRunOutputs(), listStoppedRuns()
+  state-reconstructor.ts      # reconstructState(), resolveResumePhase() (internal)
+  singleton-rehydration.ts    # rehydrateSingletons()
+  git-reconciliation.ts       # reconcileGitState()
+src/conductor/run.ts          # continueRun(), ContinueRunOptions
+src/conductor/state.ts        # _isContinuation, _resumePhase fields
+src/conductor/nodes.ts        # shouldSkipOnContinue() + guards on all nodes
+tests/continue-run.test.ts    # Unit tests (state collector, reconstructor, phase resolver)
+tests/continue-integration.test.ts  # Integration tests (full flow, singletons, git)
+```
 
 ---
 

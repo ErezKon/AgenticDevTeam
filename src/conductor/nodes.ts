@@ -540,6 +540,63 @@ async function invokeAgent(
     }, threadSuffix);
 }
 
+// ─── Continue-run idempotency (Plan 23, Sub-Plan 04) ────────────────────────
+
+/**
+ * Phase ordering for continue-run skip logic.
+ * Must match the pipeline flow defined in graph.ts.
+ */
+const CONTINUE_PHASE_ORDER: PhaseName[] = [
+    'intake',
+    'codebase-analyzer',
+    'architect',
+    'product-manager',
+    'dba',
+    'team-leader',
+    'development',
+    'qa',
+    'bugfix-triage',
+    'devops',
+    'e2e',
+    'acceptance-gate',
+    'finalize',
+];
+const CONTINUE_PHASE_INDEX = new Map(CONTINUE_PHASE_ORDER.map((p, i) => [p, i]));
+
+/**
+ * Check whether a node should skip execution during a continuation run.
+ *
+ * Returns `true` when:
+ *   1. `state._isContinuation` is true, AND
+ *   2. `state._resumePhase` is set, AND
+ *   3. The current phase's index is strictly before the resume phase's index
+ *
+ * Nodes at or after the resume phase execute normally.
+ * This guard is intentionally conservative — if the indices cannot be resolved,
+ * it returns `false` (execute the node).
+ */
+function shouldSkipOnContinue(
+    state: ProjectStateType,
+    currentPhase: PhaseName,
+    logger: ReturnType<typeof getLogger>,
+): boolean {
+    if (!state._isContinuation || !state._resumePhase) return false;
+
+    const currentIdx = CONTINUE_PHASE_INDEX.get(currentPhase);
+    const resumeIdx = CONTINUE_PHASE_INDEX.get(state._resumePhase);
+
+    if (currentIdx === undefined || resumeIdx === undefined) return false;
+
+    if (currentIdx < resumeIdx) {
+        logger.info(
+            `Skipping ${currentPhase} — continuation resume target is ${state._resumePhase}`,
+        );
+        return true;
+    }
+
+    return false;
+}
+
 // ─── 1. Intake ──────────────────────────────────────────────────────────────
 
 const intakeLog = getLogger('[Intake]', 255);
@@ -843,6 +900,10 @@ export async function intakeNode(state: ProjectStateType): Promise<Partial<Proje
 const analyzerLog = getLogger('[Analyzer]', 147);
 
 export async function codebaseAnalyzerNode(state: ProjectStateType): Promise<Partial<ProjectStateType>> {
+    // Continue-run idempotency: skip if this phase completed in a previous run
+    if (shouldSkipOnContinue(state, 'codebase-analyzer', analyzerLog)) {
+        return { phase: 'codebase-analyzer' as PhaseName };
+    }
     emitRunEvent('phase:start', { phase: 'codebase-analyzer' });
     const rerunUpdate = checkRerun(state, 'codebase-analyzer', analyzerLog);
     analyzerLog.info('Starting codebase analysis...');
@@ -912,6 +973,10 @@ export async function codebaseAnalyzerNode(state: ProjectStateType): Promise<Par
 const archLog = getLogger('[Architect]', 39);
 
 export async function architectNode(state: ProjectStateType): Promise<Partial<ProjectStateType>> {
+    // Continue-run idempotency: skip if this phase completed in a previous run
+    if (shouldSkipOnContinue(state, 'architect', archLog)) {
+        return { phase: 'architect' as PhaseName };
+    }
     emitRunEvent('phase:start', { phase: 'architect' });
     const rerunUpdate = checkRerun(state, 'architect', archLog);
     archLog.info('Starting architecture phase...');
@@ -998,6 +1063,10 @@ export async function architectNode(state: ProjectStateType): Promise<Partial<Pr
 const pmLog = getLogger('[Product Manager]', 214);
 
 export async function productManagerNode(state: ProjectStateType): Promise<Partial<ProjectStateType>> {
+    // Continue-run idempotency: skip if this phase completed in a previous run
+    if (shouldSkipOnContinue(state, 'product-manager', pmLog)) {
+        return { phase: 'product-manager' as PhaseName };
+    }
     emitRunEvent('phase:start', { phase: 'product-manager' });
     const rerunUpdate = checkRerun(state, 'product-manager', pmLog);
     pmLog.info('Starting product management phase...');
@@ -1065,6 +1134,10 @@ export async function productManagerNode(state: ProjectStateType): Promise<Parti
 const dbaLog = getLogger('[DBA]', 100);
 
 export async function dbaNode(state: ProjectStateType): Promise<Partial<ProjectStateType>> {
+    // Continue-run idempotency: skip if this phase completed in a previous run
+    if (shouldSkipOnContinue(state, 'dba', dbaLog)) {
+        return { phase: 'dba' as PhaseName };
+    }
     emitRunEvent('phase:start', { phase: 'dba' });
     const rerunUpdate = checkRerun(state, 'dba', dbaLog);
     dbaLog.info('Starting database design phase...');
@@ -1132,6 +1205,10 @@ export async function dbaNode(state: ProjectStateType): Promise<Partial<ProjectS
 const tlLog = getLogger('[Team Leader]', 213);
 
 export async function teamLeaderNode(state: ProjectStateType): Promise<Partial<ProjectStateType>> {
+    // Continue-run idempotency: skip if this phase completed in a previous run
+    if (shouldSkipOnContinue(state, 'team-leader', tlLog)) {
+        return { phase: 'team-leader' as PhaseName };
+    }
     emitRunEvent('phase:start', { phase: 'team-leader' });
     const rerunUpdate = checkRerun(state, 'team-leader', tlLog);
     tlLog.info('Starting assignment phase...');
@@ -1263,6 +1340,12 @@ export async function teamLeaderNode(state: ProjectStateType): Promise<Partial<P
 const devLog = getLogger('[Development]', 226);
 
 export async function developmentNode(state: ProjectStateType): Promise<Partial<ProjectStateType>> {
+    // Continue-run idempotency: skip if this phase completed in a previous run.
+    // Development uses selectPendingAssignments() internally, so partially-completed
+    // development will still dispatch only the remaining assignments.
+    if (shouldSkipOnContinue(state, 'development', devLog)) {
+        return { phase: 'development' as PhaseName };
+    }
     emitRunEvent('phase:start', { phase: 'development' });
     const haltUpdate = haltIfUnrecoverable(state, devLog, RUN_FAIL_POLICY);
     if (haltUpdate) return { ...haltUpdate, phase: 'development' as PhaseName };
@@ -1388,6 +1471,10 @@ export async function developmentNode(state: ProjectStateType): Promise<Partial<
 const qaLog = getLogger('[QA Lead]', 198);
 
 export async function qaNode(state: ProjectStateType): Promise<Partial<ProjectStateType>> {
+    // Continue-run idempotency: skip only if resume target is past QA
+    if (shouldSkipOnContinue(state, 'qa', qaLog)) {
+        return { phase: 'qa' as PhaseName };
+    }
     emitRunEvent('phase:start', { phase: 'qa' });
     const haltQa = haltIfUnrecoverable(state, qaLog, RUN_FAIL_POLICY);
     if (haltQa) return { ...haltQa, phase: 'qa' as PhaseName };
@@ -1863,6 +1950,10 @@ export async function qaNode(state: ProjectStateType): Promise<Partial<ProjectSt
 const bugLog = getLogger('[BugTriage]', 196);
 
 export async function bugfixTriageNode(state: ProjectStateType): Promise<Partial<ProjectStateType>> {
+    // Continue-run idempotency: skip only if resume target is past bugfix-triage
+    if (shouldSkipOnContinue(state, 'bugfix-triage', bugLog)) {
+        return { phase: 'bugfix-triage' as PhaseName };
+    }
     emitRunEvent('phase:start', { phase: 'bugfix-triage' });
     const iteration = state.iteration.bugfix + 1;
     bugLog.info(`Bug-fix triage iteration ${iteration}/${getEffectiveLimits().maxBugfixIterations}`);
@@ -1975,6 +2066,10 @@ IMPORTANT: When triaging lint errors about "unused imports" or "defined but neve
 const opsLog = getLogger('[DevOps]', 33);
 
 export async function devopsNode(state: ProjectStateType): Promise<Partial<ProjectStateType>> {
+    // Continue-run idempotency: skip only if resume target is past devops
+    if (shouldSkipOnContinue(state, 'devops', opsLog)) {
+        return { phase: 'devops' as PhaseName };
+    }
     emitRunEvent('phase:start', { phase: 'devops' });
     const haltOps = haltIfUnrecoverable(state, opsLog, RUN_FAIL_POLICY);
     if (haltOps) return { ...haltOps, phase: 'devops' as PhaseName };
@@ -2158,6 +2253,10 @@ export async function devopsNode(state: ProjectStateType): Promise<Partial<Proje
 const e2eLog = getLogger('[QA E2E]', 118);
 
 export async function e2eNode(state: ProjectStateType): Promise<Partial<ProjectStateType>> {
+    // Continue-run idempotency: skip only if resume target is past e2e
+    if (shouldSkipOnContinue(state, 'e2e', e2eLog)) {
+        return { phase: 'e2e' as PhaseName };
+    }
     emitRunEvent('phase:start', { phase: 'e2e' });
     const rerunUpdate = checkRerun(state, 'e2e', e2eLog);
     e2eLog.info('Starting E2E testing phase...');
@@ -2381,6 +2480,10 @@ export async function e2eNode(state: ProjectStateType): Promise<Partial<ProjectS
 const acceptLog = getLogger('[Acceptance]', 214);
 
 export async function acceptanceNode(state: ProjectStateType): Promise<Partial<ProjectStateType>> {
+    // Continue-run idempotency: skip only if resume target is past acceptance-gate
+    if (shouldSkipOnContinue(state, 'acceptance-gate', acceptLog)) {
+        return { phase: 'acceptance-gate' as PhaseName };
+    }
     emitRunEvent('phase:start', { phase: 'acceptance-gate' });
     acceptLog.info('Evaluating acceptance gate...');
 

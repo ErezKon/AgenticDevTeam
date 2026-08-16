@@ -328,6 +328,31 @@ class TokenTracker {
         return [...this.ledger];
     }
 
+    /**
+     * Import a token usage record from a previous run (continuation support).
+     *
+     * The record is added to the ledger without triggering persistence or
+     * refresh callbacks — we're restoring history, not recording new usage.
+     * The budget system will see these records when calculating cumulative spend.
+     */
+    recordFromPreviousRun(record: Record<string, any>): void {
+        // Best-effort: only add if it looks like a valid record
+        if (typeof record === 'object' && record !== null && record.agentId) {
+            this.ledger.push({
+                agentId: record.agentId ?? 'unknown',
+                model: record.model ?? 'unknown',
+                phase: record.phase ?? 'unknown',
+                inputTokens: record.inputTokens ?? 0,
+                outputTokens: record.outputTokens ?? 0,
+                totalTokens: record.totalTokens ?? 0,
+                cacheReadTokens: record.cacheReadTokens,
+                cacheCreationTokens: record.cacheCreationTokens,
+                timestamp: record.timestamp ?? '',
+                invocationId: record.invocationId,
+            });
+        }
+    }
+
     /** Clear all tracked data and persistence config (call at run start). */
     reset(): void {
         if (this._refreshTimer) { clearTimeout(this._refreshTimer); this._refreshTimer = null; }

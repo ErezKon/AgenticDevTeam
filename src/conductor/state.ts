@@ -394,6 +394,22 @@ export const ProjectState = Annotation.Root({
         reducer: appendReducer,
         default: () => [],
     }),
+
+    // ── Continue Run (Plan 23, Sub-Plan 04) ──────────────────────────────
+
+    /** When true, this is a continuation of a previously stopped run. Nodes
+     *  before `_resumePhase` skip execution (idempotency guard). */
+    _isContinuation: Annotation<boolean>({
+        reducer: replaceReducer,
+        default: () => false,
+    }),
+
+    /** The phase to resume from on a continuation run. Set by `continueRun()`
+     *  based on the Phase Resolver result. Null for normal (non-continuation) runs. */
+    _resumePhase: Annotation<PhaseName | null>({
+        reducer: replaceReducer,
+        default: () => null,
+    }),
 });
 
 /** TypeScript type for the full Project State. */

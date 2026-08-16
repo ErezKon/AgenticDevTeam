@@ -2,14 +2,17 @@
  * REST + WebSocket server — dashboard backend.
  *
  * Endpoints:
- * - POST /api/run          Start a new run
- * - GET  /api/runs          List all active HITL sessions
- * - GET  /api/run/:id       Get run state
+ * - POST /api/run              Start a new run
+ * - GET  /api/runs             List all active HITL sessions
+ * - GET  /api/run/:id          Get run state
  * - POST /api/run/:id/approve  Approve a HITL phase
  * - GET  /api/run/:id/artifact/:agentId  Get a single artifact with content
  * - GET  /api/run/:id/artifacts          List all artifacts with content
- * - GET  /api/agents        List all agents
- * - GET  /api/events        Recent run events (ring buffer backfill)
+ * - GET  /api/run/:id/prs      List PRs for a run
+ * - GET  /api/agents           List all agents
+ * - GET  /api/events           Recent run events (ring buffer backfill)
+ * - GET  /api/runs/stoppable   List runs that can be continued (Plan 23)
+ * - POST /api/run/continue     Continue a stopped run (Plan 23)
  *
  * WebSocket:
  * - ws://host:port/ws       Real-time transcript + state updates
@@ -29,7 +32,8 @@ import { createServer } from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
 import { DASHBOARD_PORT } from './config';
 import { AGENT_REGISTRY } from './agents/registry';
-import { runAutonomous, runHumanInTheLoop, resumeRun, type RunSession, type HitlDecision } from './conductor/run';
+import { runAutonomous, runHumanInTheLoop, resumeRun, continueRun, type RunSession, type HitlDecision } from './conductor/run';
+import { listStoppedRuns, collectRunState, reconstructState } from './conductor/continue';
 import { parseRequirementsFile } from './tools/requirements/parse-requirements';
 import { getLogger } from './utils/logger';
 import { LogColors, color256 } from './utils/log-colors.util';
@@ -310,6 +314,150 @@ app.get('/api/run/:id/prs', async (req, res) => {
         return;
     }
     res.status(404).json({ error: 'Run not found' });
+});
+
+// ─── Continue Run endpoints (Plan 23, Sub-Plan 07) ──────────────────────────
+
+/**
+ * GET /api/runs/stoppable
+ *
+ * List all runs in the outputs directory that can be continued (status != 'completed').
+ * Returns an array sorted by timestamp descending (newest first).
+ */
+app.get('/api/runs/stoppable', (_req, res) => {
+    try {
+        const runs = listStoppedRuns();
+        res.json(runs);
+    } catch (err: any) {
+        log.error(`GET /api/runs/stoppable failed: ${err.message}`);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+/**
+ * POST /api/run/continue
+ *
+ * Continue a previously stopped run from the last completed phase.
+ *
+ * Body: {
+ *   outputPath: string,                       // Path to the stopped run's output directory
+ *   mode?: 'autonomous' | 'human',            // Override run mode (default: 'autonomous')
+ *   threadId?: string,                        // Optional thread ID
+ * }
+ *
+ * In autonomous mode: fires and sends results via WebSocket.
+ * In HITL mode: returns a session that can be driven via /api/run/:id/approve.
+ */
+app.post('/api/run/continue', async (req, res) => {
+    try {
+        const { outputPath, mode, threadId } = req.body;
+
+        if (!outputPath) {
+            res.status(400).json({ error: 'outputPath is required' });
+            return;
+        }
+
+        if (!fs.existsSync(outputPath)) {
+            res.status(400).json({ error: `outputPath not found: ${outputPath}` });
+            return;
+        }
+
+        // Collect and reconstruct to provide the response summary
+        let collected;
+        try {
+            collected = collectRunState(outputPath);
+        } catch (err: any) {
+            res.status(400).json({ error: `Failed to collect run state: ${err.message}` });
+            return;
+        }
+
+        if (!collected.workspaceExists) {
+            res.status(400).json({
+                error: `Workspace not found: "${collected.workspacePath || '(unknown)'}". ` +
+                    `The generated project must exist on disk to continue.`,
+            });
+            return;
+        }
+
+        let reconstructed;
+        try {
+            reconstructed = reconstructState(collected);
+        } catch (err: any) {
+            res.status(400).json({ error: `Failed to reconstruct state: ${err.message}` });
+            return;
+        }
+
+        const { resumePhase, confidence, warnings } = reconstructed;
+        const systemName = reconstructed.state.input?.systemName ?? 'unknown';
+        const resolvedMode = mode === 'human' ? 'human' : 'autonomous';
+        const resolvedThreadId = threadId ?? `continue-${Date.now()}`;
+
+        if (resolvedMode === 'autonomous') {
+            broadcast('run:started', { systemName, mode: 'autonomous', continuing: true, resumePhase });
+
+            // Fire and forget — results come via WebSocket
+            continueRun({ outputPath, mode: 'autonomous', threadId: resolvedThreadId })
+                .then((state) => {
+                    const finalState = state as any;
+                    states.set(systemName, finalState);
+                    const acceptance = finalState.acceptance;
+                    const status = finalState.cancelled ? 'cancelled'
+                        : acceptance?.status === 'accepted' ? 'completed'
+                        : acceptance?.status === 'partial' ? 'partial'
+                        : acceptance?.status === 'inconclusive' ? 'inconclusive'
+                        : 'failed';
+                    broadcast('run:complete', { systemName, state: finalState, status, blockers: acceptance?.blockers ?? [] });
+                })
+                .catch((err) => {
+                    log.error(`Continued autonomous run error: ${err?.message ?? err}`);
+                    const reportPath = tokenTracker.getOutputPath();
+                    broadcast('run:error', {
+                        systemName,
+                        error: err.message,
+                        tokenReportPath: reportPath ? `${reportPath}/token-usage-report.html` : null,
+                    });
+                });
+
+            res.json({
+                status: 'continuing',
+                threadId: resolvedThreadId,
+                systemName,
+                resumePhase,
+                confidence,
+                warnings,
+                mode: 'autonomous',
+            });
+        } else {
+            // HITL mode
+            const result = await continueRun({ outputPath, mode: 'human', threadId: resolvedThreadId });
+            const session = result as RunSession;
+
+            sessions.set(session.threadId, session);
+            const state = await session.getState();
+            states.set(session.threadId, state);
+            broadcast('run:started', { systemName, threadId: session.threadId, mode: 'human', continuing: true, resumePhase });
+            broadcast('hitl:waiting', {
+                threadId: session.threadId,
+                phase: state.phase,
+                systemName,
+                latestArtifact: state.artifacts?.[state.artifacts.length - 1] ?? null,
+            });
+
+            res.json({
+                status: 'continuing',
+                threadId: session.threadId,
+                systemName,
+                resumePhase,
+                confidence,
+                warnings,
+                mode: 'human',
+                phase: state.phase,
+            });
+        }
+    } catch (err: any) {
+        log.error(`POST /api/run/continue failed: ${err.message}`);
+        res.status(500).json({ error: err.message });
+    }
 });
 
 // ─── Serve Angular dashboard (static build) ─────────────────────────────────
