@@ -3,11 +3,9 @@
  * common configuration (model, checkpointer, logging).
  */
 import { MemorySaver } from '@langchain/langgraph';
-import { createReactAgent } from '@langchain/langgraph/prebuilt';
+import { createAgent, createMiddleware } from 'langchain';
 import type { StructuredToolInterface } from '@langchain/core/tools';
 import { z } from 'zod';
-import type { BaseMessage } from '@langchain/core/messages';
-import { RunnableLambda } from '@langchain/core/runnables';
 import { LLM_BASE_URL, LLM_MODEL, RESPONSE_SCHEMA_COMPACT, RESPONSE_SCHEMA_STRIP_ALL_DESCRIPTIONS, HISTORY_COMPACTION_ENABLED, LLM_JSON_MODE, LLM_MAX_OUTPUT_TOKENS, LLM_REQUEST_TIMEOUT_MS, OPENAI_API_KEY } from '../../config';
 import { getAccessToken } from '../../utils/oauth-auth.util';
 import { throttledFetch } from '../../utils/llm-throttle';
@@ -129,9 +127,12 @@ export function buildAgent(apiKey: string, cfg: AgentConfig) {
 
     const { tools: guardedTools, isCeilingReached } = withLoopGuard(cfg.tools, cfg.id, cfg.maxToolCalls);
 
-    const preModelHook = HISTORY_COMPACTION_ENABLED
-        ? RunnableLambda.from((state: { messages: BaseMessage[] }) => {
-            const { messages, stats } = compactHistory(state.messages);
+    // History compaction runs inside wrapModelCall so the compacted messages are
+    // only what the LLM sees — the persisted graph state keeps the full history.
+    const historyCompaction = createMiddleware({
+        name: 'history-compaction',
+        wrapModelCall: (request, handler) => {
+            const { messages, stats } = compactHistory(request.messages);
             recordCompaction(stats);
             if (stats.originalChars !== stats.compactedChars) {
                 factoryLog.debug(
@@ -139,16 +140,16 @@ export function buildAgent(apiKey: string, cfg: AgentConfig) {
                     `(${stats.toolResultsStubbed} results, ${stats.writeArgsStubbed} write args stubbed)`,
                 );
             }
-            return { llmInputMessages: messages };
-        })
-        : undefined;
+            return handler({ ...request, messages });
+        },
+    });
 
-    const agent = createReactAgent({
-        llm: model,
+    const agent = createAgent({
+        model,
         checkpointer,
-        prompt,
+        systemPrompt: prompt,
         tools: guardedTools,
-        preModelHook,
+        middleware: HISTORY_COMPACTION_ENABLED ? [historyCompaction] : [],
     });
 
     // Expose isCeilingReached and setInvocationId on the agent so callers

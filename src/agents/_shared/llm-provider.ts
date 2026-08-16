@@ -118,7 +118,6 @@ export function createChatModel(opts: CreateModelOpts): BaseChatModel {
                 maxRetries: 0,
                 maxTokens: opts.maxTokens,
                 timeout: opts.timeout,
-                openAIApiKey: opts.apiKey,
                 apiKey: opts.apiKey,
                 configuration: {
                     baseURL: opts.baseURL,

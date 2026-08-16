@@ -117,7 +117,7 @@ graph TB
 |-----------|------|---------|
 | **Conductor** | `src/conductor/` | LangGraph state machine — nodes, graph, run modes |
 | **ProjectState** | `src/conductor/state.ts` | Single source of truth with typed annotations and merge reducers |
-| **Agent Factory** | `src/agents/_shared/agent-factory.ts` | Builds LangGraph `createReactAgent` instances with OAuth, tools, checkpointers, and history compaction preModelHook |
+| **Agent Factory** | `src/agents/_shared/agent-factory.ts` | Builds LangChain `createAgent` instances with OAuth, tools, checkpointers, and a history-compaction middleware |
 | **Agent Registry** | `src/agents/registry.ts` | 20-agent lookup table with IDs, display tags, and color codes |
 | **Tools** | `src/tools/` | Workspace filesystem, sandboxed shell, Mermaid diagrams, requirements parser, Playwright MCP |
 | **Docker Runner** | `src/executor/docker-runner.ts` | Dockerode-based image build, container run, and health checks |
@@ -452,9 +452,9 @@ In a ReAct agent loop, every tool-call step re-sends the entire conversation his
 
 Every tool result is truncated to `MAX_TOOL_RESULT_CHARS` (default: 6,000) using a head/tail split that preserves both the beginning and end of the output. Shell output uses a **tail-weighted split** (20% head, 80% tail) because build/test failures print at the end. Truncated results include a marker so agents know content was elided and can request specific regions via `read_file` with `offset`/`limit`.
 
-#### 2. ReAct History Compaction (`preModelHook`)
+#### 2. ReAct History Compaction (`wrapModelCall` middleware)
 
-Before each LLM call, a `preModelHook` compacts the message history:
+Before each LLM call, a `history-compaction` middleware compacts the message history:
 
 - The **first message** (the task) and the **last N tool results** (default: 3) are always kept verbatim
 - Older tool results are replaced with one-line receipts: `[read_file src/App.tsx -> 4,210 chars, elided]`
@@ -503,7 +503,7 @@ All compaction features default to **on**. To disable any feature, set its envir
 
 | Variable | Default | Effect of disabling |
 |----------|---------|-------------------|
-| `HISTORY_COMPACTION_ENABLED` | `true` | Disables the preModelHook; full history replayed on every call |
+| `HISTORY_COMPACTION_ENABLED` | `true` | Disables the compaction middleware; full history replayed on every call |
 | `MAX_TOOL_RESULT_CHARS` | `6000` | Set higher to allow longer tool results |
 | `HISTORY_KEEP_RECENT_TOOL_RESULTS` | `3` | Increase to keep more recent results verbatim |
 | `HISTORY_MAX_CHARS` | `40000` | Raise the hard ceiling for compacted history |
@@ -540,10 +540,10 @@ AgenticDevTeam/
 │   │
 │   ├── agents/
 │   │   ├── _shared/
-│   │   │   ├── agent-factory.ts            # createReactAgent wrapper (+ preModelHook)
+│   │   │   ├── agent-factory.ts            # createAgent wrapper (+ compaction middleware)
 │   │   │   ├── base-schemas.ts             # 20+ Zod schemas for all domain entities
 │   │   │   ├── persona.ts                  # Developer persona prompt builder (compact + verbose)
-│   │   │   ├── history-compactor.ts        # ReAct history compaction (preModelHook)
+│   │   │   ├── history-compactor.ts        # ReAct history compaction (middleware)
 │   │   │   ├── tool-loop-guard.ts          # Tool-call ceiling + isCeilingReached for respawn
 │   │   │   └── artifact.ts                 # Mission report writer
 │   │   ├── registry.ts                     # Master 20-agent registry
@@ -849,7 +849,7 @@ npm run build
 | `GITHUB_PROJECT_OWNER` | — | Owner for project-specific repos (falls back to `GITHUB_OWNER`) |
 | `DASHBOARD_PORT` | `3000` | HTTP/WS server port |
 | `MAX_TOOL_RESULT_CHARS` | `6000` | Max characters any single tool result may contribute to agent history |
-| `HISTORY_COMPACTION_ENABLED` | `true` | Enable preModelHook ReAct history compaction |
+| `HISTORY_COMPACTION_ENABLED` | `true` | Enable middleware-based ReAct history compaction |
 | `HISTORY_MAX_CHARS` | `40000` | Hard character ceiling for compacted ReAct history |
 | `CONVENTIONS_INLINE_DIGEST` | `true` | Inject conventions digest instead of read_file instructions |
 | `DEV_GIT_TOOLS_ENABLED` | `false` | Give dev agents git tools (PR workflow handles git) |
@@ -866,7 +866,7 @@ See [`.env.example`](.env.example) for the full template.
 |----------|---------|-------------|
 | `MAX_TOOL_RESULT_CHARS` | `6000` | Max characters any single tool result may contribute to agent history |
 | `HISTORY_KEEP_RECENT_TOOL_RESULTS` | `3` | Number of most-recent tool results kept verbatim in ReAct history |
-| `HISTORY_COMPACTION_ENABLED` | `true` | Enable the preModelHook that compacts ReAct history before each LLM call |
+| `HISTORY_COMPACTION_ENABLED` | `true` | Enable the middleware that compacts ReAct history before each LLM call |
 | `HISTORY_MAX_CHARS` | `40000` | Hard character ceiling for the assembled ReAct history passed to the LLM |
 | `CONVENTIONS_INLINE_DIGEST` | `true` | Inject a distilled conventions digest instead of agents reading convention files |
 | `DEV_GIT_TOOLS_ENABLED` | `false` | Give developer agents git tools (the PR workflow already commits/pushes) |
@@ -1011,7 +1011,7 @@ Every agent writes a detailed Markdown mission report including:
 | Layer | Technology |
 |-------|-----------|
 | **Orchestration** | LangGraph (StateGraph, Annotations, conditional edges, HITL interrupts) |
-| **Agent Framework** | LangChain (`createReactAgent`, multi-provider: `ChatOpenAI`, `ChatAnthropic`, `ChatGoogleGenerativeAI`, structured output) |
+| **Agent Framework** | LangChain (`createAgent` + middleware, multi-provider: `ChatOpenAI`, `ChatAnthropic`, `ChatGoogleGenerativeAI`, structured output) |
 | **GitHub Integration** | Octokit REST (PR creation, code reviews, merge) |
 | **Schema Validation** | Zod (20+ schemas for all domain entities) |
 | **Runtime** | Node.js 20+ with TypeScript (tsx) |

@@ -1,5 +1,5 @@
 /**
- * ReAct history compaction — `preModelHook` transformer.
+ * ReAct history compaction — `wrapModelCall` middleware transformer.
  *
  * Compacts a ReAct message history before each LLM call, replacing older
  * tool results with one-line stubs and eliding large write_file/edit_file

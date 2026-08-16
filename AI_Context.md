@@ -30,7 +30,7 @@
 | Layer | Technology |
 |-------|-----------|
 | Orchestration | LangGraph (`StateGraph`, `Annotation`, conditional edges, HITL interrupts) |
-| Agent Framework | LangChain (`createReactAgent`, multi-provider: `ChatOpenAI`, `ChatAnthropic`, `ChatGoogleGenerativeAI`, structured output) |
+| Agent Framework | LangChain (`createAgent` + middleware, multi-provider: `ChatOpenAI`, `ChatAnthropic`, `ChatGoogleGenerativeAI`, structured output) |
 | GitHub Integration | Octokit REST + local bare-repo stand-in for offline mode |
 | Schema Validation | Zod v4 (20+ schemas for all domain entities) |
 | Runtime | Node.js 20+ with TypeScript (tsx, no build step in dev) |
@@ -79,7 +79,7 @@ src/
   agents/
     registry.ts                    # Master 20-agent registry (id, name, tag, color)
     _shared/
-      agent-factory.ts             # buildAgent() wrapper for createReactAgent
+      agent-factory.ts             # buildAgent() wrapper for createAgent
       llm-provider.ts              # Multi-provider LLM factory (OpenAI, Anthropic, Google)
       persona.ts                   # Developer prompt builder (rank/domain/languages)
       artifact.ts                  # Mission report writer (docs/agents/*.md)
@@ -283,7 +283,7 @@ All agents are built via `buildAgent()` in `src/agents/_shared/agent-factory.ts`
    - **Google** (model matches `/gemini/i`): `ChatGoogleGenerativeAI` with `GOOGLE_API_KEY`
 3. Appends the JSON schema instruction to the system prompt if `responseFormat` is provided
 4. Wraps all tools with `withLoopGuard()` for infinite-loop prevention
-5. Returns a `createReactAgent()` instance with its own `MemorySaver`
+5. Returns a `createAgent()` instance with its own `MemorySaver` and a `history-compaction` middleware
 
 OpenAI auth priority: `OPENAI_API_KEY` (direct API key, no custom fetch chain) > OAuth client-credentials flow (`oauthFetch` -> `cassetteFetch` -> `throttledFetch`).
 Anthropic and Google use their own HTTP handling with direct API keys.

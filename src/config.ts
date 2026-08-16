@@ -364,7 +364,7 @@ export const MAX_TOOL_RESULT_CHARS =
 export const HISTORY_KEEP_RECENT_TOOL_RESULTS =
     parseInt(process.env.HISTORY_KEEP_RECENT_TOOL_RESULTS ?? '4', 10);
 
-/** Enable the preModelHook that compacts ReAct history before each LLM call. */
+/** Enable the middleware that compacts ReAct history before each LLM call. */
 export const HISTORY_COMPACTION_ENABLED =
     (process.env.HISTORY_COMPACTION_ENABLED ?? 'true') === 'true';
 
