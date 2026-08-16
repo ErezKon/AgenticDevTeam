@@ -532,7 +532,14 @@ Mixed-provider runs (Claude + GPT + Gemini) exposed three transport-level failur
 
 ### Anthropic: adaptive-only model guard
 
-Adaptive-only models (`claude-opus-4-7+`, `claude-opus-4-8+`, `claude-opus-5+`, `claude-fable-5+`, `claude-mythos-*`) reject `temperature`, `topK`, and `topP` at call time via `@langchain/anthropic`'s `validateInvocationParamCompatibility()`. The factory detects these models by prefix regex and omits all three sampling params from the constructor. Non-adaptive Claude models (e.g. `claude-sonnet-4-*`, `claude-opus-4-20250514`) continue to receive sampling params normally.
+Adaptive-only models (`claude-opus-4-7+`, `claude-opus-5+`, `claude-sonnet-5+`, `claude-fable-5+`, `claude-mythos-*`) reject non-default `temperature`, `topK`, and `topP`. The factory detects these models by prefix regex and omits all three sampling params from the constructor. Non-adaptive Claude models (e.g. `claude-sonnet-4-*`, `claude-opus-4-20250514`) continue to receive sampling params normally.
+
+Rejection happens in **two** places, and the factory must cover both:
+
+- **Client-side** — `@langchain/anthropic`'s `validateInvocationParamCompatibility()` throws for models in its hardcoded `ADAPTIVE_ONLY_MODEL_PREFIXES`.
+- **Server-side** — the Anthropic API returns `400 "temperature is deprecated for this model"` for models the SDK list has not caught up with yet.
+
+`claude-sonnet-5` is the second case: it is absent from the SDK list even in `@langchain/anthropic@1.5.6`, so the request goes out with `temperature` and dies at the first LLM call. The factory's regex is therefore a **superset** of the SDK list, not a mirror of it — do not "re-sync" it downward.
 
 ### OpenAI: JSON mode works on both APIs
 

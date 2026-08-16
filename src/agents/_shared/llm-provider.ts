@@ -84,11 +84,16 @@ export function createChatModel(opts: CreateModelOpts): BaseChatModel {
                 log.warn(`Model "${opts.modelName}" detected as Anthropic but ANTHROPIC_API_KEY is not set`);
             }
 
-            // Adaptive-only models (claude-opus-4-7+, claude-fable-5, claude-mythos-*)
-            // reject temperature, topK, and topP at call time via
-            // validateInvocationParamCompatibility in @langchain/anthropic.
-            // Must stay in sync with ADAPTIVE_ONLY_MODEL_PREFIXES in the SDK.
-            const adaptiveOnly = /^claude-(opus-4-[7-9]|opus-[5-9]|fable-5|mythos)/.test(opts.modelName);
+            // Adaptive-only models (claude-opus-4-7+, claude-sonnet-5+, claude-fable-5,
+            // claude-mythos-*) reject non-default temperature, topK, and topP.
+            //
+            // This list is a SUPERSET of ADAPTIVE_ONLY_MODEL_PREFIXES in
+            // @langchain/anthropic and must NOT be narrowed to match it. The SDK list
+            // lags the API: as of @langchain/anthropic@1.5.6 it still omits
+            // claude-sonnet-5, so the SDK sends `temperature` and the API answers
+            // 400 "`temperature` is deprecated for this model." Sonnet 5 adopted the
+            // Opus 4.7 constraint (see Anthropic's "What's new in Sonnet 5").
+            const adaptiveOnly = /^claude-(opus-4-[7-9]|opus-[5-9]|sonnet-[5-9]|fable-5|mythos)/.test(opts.modelName);
             if (adaptiveOnly) {
                 log.debug(`Model "${opts.modelName}" is adaptive-only — omitting temperature/topK/topP`);
             } else {

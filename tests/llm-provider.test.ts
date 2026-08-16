@@ -265,6 +265,11 @@ describe('createChatModel', () => {
         'claude-opus-4-7-20260101',
         'claude-opus-4-8-20260301',
         'claude-opus-5-20260601',
+        // Sonnet 5 is NOT in the SDK's ADAPTIVE_ONLY_MODEL_PREFIXES (as of
+        // @langchain/anthropic@1.5.6) but the API rejects temperature with
+        // 400 "`temperature` is deprecated for this model."
+        'claude-sonnet-5',
+        'claude-sonnet-5-20260203',
         'claude-fable-5-20260601',
         'claude-mythos-5-20260101',
         'claude-mythos-preview-20260101',
@@ -282,9 +287,15 @@ describe('createChatModel', () => {
         expect(args.model).toBe(modelName);
     });
 
-    it('passes temperature/topP/topK for non-adaptive Claude models', () => {
+    // Guard against over-broad matching: pre-gen-5 Claude models still accept sampling params.
+    it.each([
+        'claude-sonnet-4-20250514',
+        'claude-sonnet-4-6-20260101',
+        'claude-opus-4-6-20260101',
+        'claude-haiku-4-5-20251001',
+    ])('passes temperature/topP/topK for non-adaptive Claude model "%s"', (modelName) => {
         const { createChatModel } = loadModule();
-        createChatModel({ ...baseOpts, modelName: 'claude-sonnet-4-20250514', topP: 0.9, topK: 30 });
+        createChatModel({ ...baseOpts, modelName, topP: 0.9, topK: 30 });
 
         const args = MockChatAnthropic.mock.calls[0][0];
         expect(args.temperature).toBe(0.3);
