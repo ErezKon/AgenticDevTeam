@@ -13,5 +13,7 @@ export const createTeamLeaderAgent = (apiKey: string) => {
         model: TEAM_LEADER_MODEL,
         maxOutputTokens: PLANNING_MAX_OUTPUT_TOKENS,
         keepSchemaDescriptions: true,
+        topK: undefined,
+        topP: undefined
     });
 };
