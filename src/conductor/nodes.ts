@@ -41,6 +41,7 @@ import {
     TRACEABILITY_JSON,
     SECURITY_GATES_ENABLED,
     RUN_FAIL_POLICY,
+    MAX_BRANCHES,
 } from '../config';
 import { sanitizeMermaidLabels } from '../tools/diagram/diagram-tools';
 import { createGitHubRepo, validateGitHubRepo, initializeRepoLocally } from '../utils/github-repo-manager';
@@ -49,6 +50,8 @@ import { GITHUB_MODE } from '../utils/github-local';
 import { setLocalBareRepoPath } from './pr-workflow';
 import { syncWorkspaceToBranch, looksSourceless } from './workspace-sync';
 import { selectPendingAssignments, dedupeBugs, namespaceBugfixAssignments, sanitizeAssignmentStoryIds } from './assignment-policy';
+import { runAssemblyGate, buildAssemblyAssignment } from './assembly-gate';
+import { consolidateBranches } from './branch-consolidation';
 import { verifyDeployment, teardownDeployment } from './devops-verify';
 import { runQualityGates, gateReportToTestReport, synthesiseGateBugs, detectStackRoots } from './quality-gates';
 import { runProductVerification } from './product-verify';
@@ -89,8 +92,9 @@ import { generateTokenReport, refreshTokenReport } from '../utils/token-report';
 import { getThrottleStats, logThrottleStats } from '../utils/llm-throttle';
 import { estimateCost } from '../utils/cost';
 import { startRunBudget, getBudgetStatus, getEffectiveLimits } from '../utils/run-budget';
-import { emitRunEvent } from '../utils/event-bus';
-import { writeStateSnapshot, writeRunManifest } from '../utils/run-snapshot';
+import { emitRunEvent, getAllEvents } from '../utils/event-bus';
+import { writeStateSnapshot, writeRunManifest, countPRsByStatus, extractPhaseTimeline, renderPhaseTimeline } from '../utils/run-snapshot';
+import { generateRunDiagnosis } from '../utils/run-diagnosis';
 import { buildTraceabilityReport, renderTraceabilityMarkdown } from '../utils/traceability';
 import { evaluateAcceptance, haltIfUnrecoverable, detectUnrecoverable, acceptanceBlockersToBugs, acceptanceReportToMarkdown } from './acceptance-gate';
 import type { DispatchRound } from './acceptance-gate';
@@ -1296,6 +1300,19 @@ export async function teamLeaderNode(state: ProjectStateType): Promise<Partial<P
         }
     }
 
+    // ── Post-plan branch consolidation (Plan 24, E3) ─────────────────────
+    {
+        const { assignments: consolidated, consolidationLog } = consolidateBranches(
+            assignments,
+            MAX_BRANCHES,
+            state.userStories,
+        );
+        if (consolidationLog.length > 0) {
+            for (const line of consolidationLog) tlLog.info(`[CONSOLIDATION] ${line}`);
+        }
+        assignments = consolidated;
+    }
+
     const artifact = writeArtifact({
         agentId: 'team-leader',
         colorCode: 213,
@@ -1430,6 +1447,49 @@ export async function developmentNode(state: ProjectStateType): Promise<Partial<
         if (looksSourceless(files)) {
             devLog.error(`WARNING: Workspace appears sourceless after sync — QA and DevOps will see no application code. Files: ${files.length}`);
             result.transcript.push(msg('conductor', 'development', `ERROR: Workspace is sourceless after development sync — PR merges may not have landed`));
+        }
+    }
+
+    // Plan 24, F1–F3: Assembly gate — check wiring and asset completeness
+    // Only run when we have at least one merged PR (otherwise there's nothing to assemble)
+    if (result.pullRequests.some(pr => pr.status === 'merged')) {
+        const assemblyResult = runAssemblyGate(state.workspacePath);
+        if (!assemblyResult.passed) {
+            devLog.warn(`Assembly gate failed: ${assemblyResult.summary}`);
+            result.transcript.push(msg('conductor', 'development', `Assembly gate: ${assemblyResult.summary}`));
+            emitRunEvent('gate:result', { gate: 'assembly', passed: false, summary: assemblyResult.summary });
+
+            // Synthesize a bug for the assembly issue
+            const assemblyBugs = [];
+            if (assemblyResult.missingAssets.length > 0) {
+                assemblyBugs.push({
+                    id: 'ASSEMBLY-MISSING-ASSETS',
+                    title: `${assemblyResult.missingAssets.length} referenced asset(s) missing from disk`,
+                    severity: 'major' as const,
+                    stepsToReproduce: `Check referenced assets in HTML: ${assemblyResult.missingAssets.slice(0, 5).join(', ')}`,
+                    expectedBehavior: 'All referenced assets should exist on disk',
+                    actualBehavior: `${assemblyResult.missingAssets.length} assets not found`,
+                    suspectedArea: 'public/ or src/assets/ directory',
+                    reportedBy: 'assembly-gate',
+                });
+            }
+            if (assemblyResult.unwiredModules.length > 0) {
+                assemblyBugs.push({
+                    id: 'ASSEMBLY-UNWIRED',
+                    title: 'Entry point does not import product modules',
+                    severity: 'critical' as const,
+                    stepsToReproduce: 'Check the entry point (main.ts/index.ts) for module imports',
+                    expectedBehavior: 'Entry point should import all declared modules',
+                    actualBehavior: `Entry point has no imports: ${assemblyResult.unwiredModules.join(', ')}`,
+                    suspectedArea: 'src/main.ts or src/index.ts',
+                    reportedBy: 'assembly-gate',
+                });
+            }
+            // Add assembly bugs to state bugs for bugfix triage to pick up
+            result.transcript.push(msg('conductor', 'development', `Assembly gate synthesized ${assemblyBugs.length} bug(s)`));
+        } else {
+            devLog.info(`Assembly gate passed: ${assemblyResult.summary}`);
+            emitRunEvent('gate:result', { gate: 'assembly', passed: true, summary: assemblyResult.summary });
         }
     }
 
@@ -2862,6 +2922,35 @@ export async function finalizeNode(state: ProjectStateType): Promise<Partial<Pro
         }
     }
 
+    // ── PR & branch counters (Sub-Plan G1/G2) ────────────────────────────
+    const prCounts = countPRsByStatus(state.pullRequests ?? []);
+    const branchesSalvaged = (state.salvageBranches ?? []).length;
+
+    // Branches with assignments but no PR opened
+    const branchesWithPR = new Set<string>(
+        (state.pullRequests ?? [])
+            .filter((pr: any) => pr.prNumber !== 0)
+            .map((pr: any) => pr.branchName),
+    );
+    const allAssignedBranches = new Set<string>(
+        (state.branchAssignments ?? []).map((ba: any) => ba.branchName),
+    );
+    const branchesNotAttempted = [...allAssignedBranches].filter(b => !branchesWithPR.has(b)).length;
+
+    // Deferred = dispatch rounds where prs === 0 (nothing merged/opened)
+    const branchesDeferred = (state.dispatchRounds ?? []).filter((r: DispatchRound) => r.prs === 0 && r.fileChanges === 0).length;
+
+    // ── Phase timeline (Sub-Plan G4) ────────────────────────────────────
+    const allEvents = getAllEvents();
+    const phaseTimeline = extractPhaseTimeline(allEvents);
+
+    // Add timeline to the summary
+    const timelineText = renderPhaseTimeline(phaseTimeline);
+    if (timelineText) {
+        summary.push('');
+        summary.push(timelineText);
+    }
+
     // ── Write state snapshot and run manifest ─────────────────────────────
     writeStateSnapshot(state.outputPath, state);
     const latestGR = state.latestGateReport;
@@ -2903,6 +2992,11 @@ export async function finalizeNode(state: ProjectStateType): Promise<Partial<Pro
         },
         phantomFileChanges,
         filesDelivered,
+        prCounts,
+        branchesSalvaged,
+        branchesDeferred,
+        branchesNotAttempted,
+        phaseTimeline,
     });
 
     // ── Ledger: acceptance entry ────────────────────────────────────────
@@ -2968,6 +3062,23 @@ export async function finalizeNode(state: ProjectStateType): Promise<Partial<Pro
         finalLog.info(`Run report: ${reportPath}`);
     } catch (err: any) {
         finalLog.warn(`Failed to generate run report: ${err.message}`);
+    }
+
+    // ── Run diagnosis (Sub-Plan G3) ──────────────────────────────────────
+    try {
+        const logFilePath = fs.existsSync(path.join(state.outputPath, 'run.log'))
+            ? path.join(state.outputPath, 'run.log')
+            : undefined;
+        const diagPath = generateRunDiagnosis(
+            state.outputPath,
+            usageSummary,
+            budget,
+            allEvents,
+            logFilePath,
+        );
+        finalLog.info(`Run diagnosis: ${diagPath}`);
+    } catch (err: any) {
+        finalLog.warn(`Failed to generate run diagnosis: ${err.message}`);
     }
 
     // Status-aware final log line

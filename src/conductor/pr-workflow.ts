@@ -28,12 +28,13 @@ import {
     AGENT_RESPAWN_ENABLED, AGENT_RESPAWN_MAX_GENERATIONS,
     WORKTREE_SALVAGE_MAX, PR_SALVAGE_PATCHES,
     MERGE_CONFLICT_FIX_ATTEMPTS,
-    STRONG_FIXER_MODEL, STRONG_FIXER_ENABLED, STRONG_FIXER_MAX_TOOL_CALLS,
+    STRONG_FIXER_MODEL, STRONG_FIXER_ENABLED, STRONG_FIXER_MAX_TOOL_CALLS, STRONG_FIXER_MAX_INPUT_TOKENS,
     PR_EXHAUSTION_STRATEGY,
+    MAX_INVOCATION_INPUT_TOKENS, MAX_BRANCH_COST_USD, MAX_BRANCH_WALL_MS,
 } from '../config';
 import { buildHandoff, renderHandoff, madeProgress } from './agent-respawn';
 import { ensureProjectGitignore, getGitignoreEntriesForStack } from '../utils/workspace';
-import { getEffectiveLimits } from '../utils/run-budget';
+import { getEffectiveLimits, InvocationBudgetExceededError } from '../utils/run-budget';
 import { buildWorkspaceSnapshot } from './workspace-snapshot';
 import { reconcileFileChanges } from './file-change-reconciliation';
 import {
@@ -76,6 +77,7 @@ import type { DeveloperOutput } from '../agents/developers/schemas/dev-output.sc
 import type { ReviewOutput } from '../agents/developers/schemas/review-output.schema';
 import { extractTokenUsageFromMessages } from '../utils/token-usage-extractor';
 import { tokenTracker, type TokenCallRecord } from '../utils/token-tracker';
+import { estimateCost } from '../utils/cost';
 import type { DevRank } from '../agents/_shared/persona';
 
 const log = getLogger('[PR-Workflow]', 135);
@@ -87,6 +89,12 @@ const log = getLogger('[PR-Workflow]', 135);
  * reconnaissance in the pacmanclaude run.
  */
 const MAX_CONSECUTIVE_ZERO_WRITE_GENERATIONS = 1;
+
+/**
+ * Plan 24 B2: branches that have already had a zero-write strong fixer pass.
+ * One shot per branch — if the fixer produced nothing, re-running it is waste.
+ */
+const strongFixerZeroWriteBranches = new Set<string>();
 
 /**
  * Archive a test file the integrity gate is about to delete (Plan 22, F3).
@@ -333,29 +341,61 @@ function evictStaleSalvageWorktrees(gitRoot: string): void {
 
 /**
  * Find an existing open PR for the given head branch to avoid 422 errors.
+ *
+ * Plan 24, A1: the bare-ref fallback is gated on local mode only. In live
+ * GitHub mode, `pulls.list({ head: 'branch' })` without the `owner:` prefix
+ * is not a head filter — it silently returns the full open-PR list and
+ * `data[0]` is whatever PR was opened first. This attached nine branches to
+ * the wrong PR in the pacmanclaude run.
+ *
+ * Both modes validate unconditionally: a candidate is accepted only when
+ * `pr.head?.ref === head` (the local stand-in stores `head` as the bare
+ * branch name, so one predicate covers both).
  */
 async function findExistingPR(
     octokit: any, owner: string, repo: string, head: string,
-): Promise<{ number: number; html_url: string; node_id: string } | null> {
+): Promise<{ number: number; html_url: string; node_id: string; head?: { ref: string } } | null> {
     try {
         const headRef = `${owner}:${head}`;
         const { data } = await octokit.pulls.list({ owner, repo, head: headRef, state: 'open' });
-        if (data.length > 0) {
-            const pr = data[0];
-            log.info(`Found existing open PR #${pr.number} for ${head}`);
-            return { number: pr.number, html_url: pr.html_url, node_id: pr.node_id ?? `pr-${pr.number}` };
+        for (const pr of data) {
+            // Validate: candidate's actual head must match the requested branch
+            const prHeadRef = pr.head?.ref ?? pr.head;
+            if (prHeadRef === head) {
+                log.info(`Found existing open PR #${pr.number} for ${head}`);
+                return { number: pr.number, html_url: pr.html_url, node_id: pr.node_id ?? `pr-${pr.number}`, head: { ref: prHeadRef } };
+            }
+            log.warn(`Rejected PR #${pr.number}: head '${prHeadRef}' !== requested '${head}'`);
         }
-        // Also try bare branch name (for local mode)
-        const { data: data2 } = await octokit.pulls.list({ owner, repo, head, state: 'open' });
-        if (data2.length > 0) {
-            const pr = data2[0];
-            log.info(`Found existing open PR #${pr.number} for ${head} (bare)`);
-            return { number: pr.number, html_url: pr.html_url, node_id: pr.node_id ?? `pr-${pr.number}` };
+        // Bare-ref fallback: only in local mode (Plan 24, A1)
+        if (GITHUB_MODE === 'local') {
+            const { data: data2 } = await octokit.pulls.list({ owner, repo, head, state: 'open' });
+            for (const pr of data2) {
+                const prHeadRef = pr.head?.ref ?? pr.head;
+                if (prHeadRef === head) {
+                    log.info(`Found existing open PR #${pr.number} for ${head} (bare)`);
+                    return { number: pr.number, html_url: pr.html_url, node_id: pr.node_id ?? `pr-${pr.number}`, head: { ref: prHeadRef } };
+                }
+                log.warn(`Rejected PR #${pr.number} (bare): head '${prHeadRef}' !== requested '${head}'`);
+            }
         }
     } catch (err: any) {
         log.warn(`Failed to list existing PRs: ${err.message}`);
     }
     return null;
+}
+
+/**
+ * PR identity mismatch error — thrown when the PR about to be merged or
+ * whose branch is about to be deleted has a different head than expected.
+ * Plan 24, A1: this is the assertion that would have prevented the deletion
+ * of `us-010-screen-manager` in the pacmanclaude run.
+ */
+export class PrIdentityMismatchError extends Error {
+    constructor(public readonly prNumber: number, public readonly expectedHead: string, public readonly actualHead: string) {
+        super(`PR #${prNumber} head mismatch: expected '${expectedHead}', got '${actualHead}'`);
+        this.name = 'PrIdentityMismatchError';
+    }
 }
 
 // ─── PR title & description builders ─────────────────────────────────────────
@@ -544,6 +584,19 @@ async function invokeDevAgent(
                 });
                 if (parsed.tokenUsage) allTokenUsage.push(parsed.tokenUsage);
 
+                // Plan 24 D1: per-invocation input token ceiling
+                if (MAX_INVOCATION_INPUT_TOKENS > 0) {
+                    const invInputTokens = tokenTracker.getInvocationInputTokens(invocationId);
+                    if (invInputTokens >= MAX_INVOCATION_INPUT_TOKENS) {
+                        log.warn(
+                            `${agentId} invocation ${invocationId} exceeded input ceiling: `
+                            + `${invInputTokens.toLocaleString()} / ${MAX_INVOCATION_INPUT_TOKENS.toLocaleString()} — stopping gracefully`,
+                        );
+                        tokenTracker.endInvocation(invocationId, respawnCount > 0 ? respawnCount : undefined);
+                        throw new InvocationBudgetExceededError(invocationId, invInputTokens, MAX_INVOCATION_INPUT_TOKENS);
+                    }
+                }
+
                 // Check if ceiling was reached and more generations are available
                 const ceilingHit = currentAgent.isCeilingReached?.() ?? false;
 
@@ -615,6 +668,19 @@ async function invokeDevAgent(
             { configurable: { thread_id: `dev-pr-${threadSuffix}-${Date.now()}` }, recursionLimit: DEV_RECURSION_LIMIT },
         );
         tokenTracker.endInvocation(invocationId);
+
+        // Plan 24 D1: per-invocation input token ceiling
+        if (MAX_INVOCATION_INPUT_TOKENS > 0) {
+            const invInputTokens = tokenTracker.getInvocationInputTokens(invocationId);
+            if (invInputTokens >= MAX_INVOCATION_INPUT_TOKENS) {
+                log.warn(
+                    `${agentId} invocation ${invocationId} exceeded input ceiling: `
+                    + `${invInputTokens.toLocaleString()} / ${MAX_INVOCATION_INPUT_TOKENS.toLocaleString()} — stopping gracefully`,
+                );
+                throw new InvocationBudgetExceededError(invocationId, invInputTokens, MAX_INVOCATION_INPUT_TOKENS);
+            }
+        }
+
         return parseDevResult(result, agentId, model, {
             userMessage, systemPrompt: agent.systemPromptText,
         });
@@ -735,6 +801,40 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
     const allTranscript: TranscriptMessage[] = [];
     const allTokenUsage: TokenCallRecord[] = [];
 
+    // ── Plan 24 D2: per-branch budget tracking ──────────────────────────
+    const branchStartMs = Date.now();
+
+    /**
+     * Estimate the USD cost of token usage accumulated on this branch so far.
+     */
+    const estimateBranchCost = (): number => {
+        let total = 0;
+        for (const t of allTokenUsage) {
+            total += estimateCost(t.model, t.inputTokens, t.outputTokens);
+        }
+        return total;
+    };
+
+    /**
+     * Check whether this branch has exceeded its wall-time or cost cap.
+     * Returns a reason string if exceeded, or null if within budget.
+     */
+    const checkBranchBudget = (checkpoint: string): string | null => {
+        if (MAX_BRANCH_WALL_MS > 0) {
+            const elapsedMs = Date.now() - branchStartMs;
+            if (elapsedMs >= MAX_BRANCH_WALL_MS) {
+                return `wall time ${(elapsedMs / 1000).toFixed(0)}s >= cap ${(MAX_BRANCH_WALL_MS / 1000).toFixed(0)}s at ${checkpoint}`;
+            }
+        }
+        if (MAX_BRANCH_COST_USD > 0) {
+            const cost = estimateBranchCost();
+            if (cost >= MAX_BRANCH_COST_USD) {
+                return `cost $${cost.toFixed(4)} >= cap $${MAX_BRANCH_COST_USD} at ${checkpoint}`;
+            }
+        }
+        return null;
+    };
+
     // ── 0. Create isolated worktree for this branch ─────────────────────
     // Each branch gets its own working directory so parallel agents
     // never interfere with each other via git checkout races.
@@ -748,6 +848,23 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
 
     log.info(`Creating worktree for branch: ${branchName} (from ${baseBranch})`);
 
+    // Plan 24, A2: remove ANY existing worktree whose branch is this branchName,
+    // including ones under .worktrees-failed/ (salvage). Without this, `git branch -D`
+    // fails because the salvage worktree still has the branch checked out, then
+    // `git worktree add` fails with "A branch named '...' already exists".
+    const porcelainOutput = gitExec(gitRoot, 'worktree list --porcelain');
+    const worktreeEntries = porcelainOutput.split('\n\n').filter(Boolean);
+    for (const entry of worktreeEntries) {
+        const branchMatch = entry.match(/^branch refs\/heads\/(.+)$/m);
+        const pathMatch = entry.match(/^worktree (.+)$/m);
+        if (branchMatch && pathMatch && branchMatch[1] === branchName) {
+            const existingWtPath = pathMatch[1];
+            // Skip if it's the main worktree
+            if (existingWtPath === gitRoot) continue;
+            log.info(`Removing existing worktree for branch ${branchName}: ${existingWtPath}`);
+            gitExec(gitRoot, `worktree remove "${existingWtPath}" --force`);
+        }
+    }
     // Prune stale worktree tracking entries (e.g. directories deleted but
     // git's internal worktree list not updated — prevents "already checked out" errors)
     gitExec(gitRoot, 'worktree prune');
@@ -756,21 +873,47 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
     if (fs.existsSync(worktreeDir)) {
         gitExec(gitRoot, `worktree remove "${worktreeDir}" --force`);
     }
-    // Delete stale local branch if it exists (ignore errors)
-    gitExec(gitRoot, `branch -D ${branchName}`);
+    // Delete stale local branch if it exists (ignore errors).
+    // Plan 24, A2: this now succeeds because we removed the worktree above.
+    const branchDelResult = gitExec(gitRoot, `branch -D ${branchName}`);
     // Fetch latest base branch from remote (may fail if not pushed yet)
     gitExec(gitRoot, `fetch origin ${baseBranch}`);
+    // Plan 24, A2: if the branch still exists despite deletion attempt (e.g. it's
+    // checked out in a worktree we couldn't remove), reuse it with a hard reset.
+    const branchExists = !gitExec(gitRoot, `rev-parse --verify refs/heads/${branchName}`).startsWith('Error:');
+
     // Create worktree with a new branch — try remote ref first, fall back to local.
     // Wrapped in try/catch so a failed creation cleans up the partial directory
     // before re-throwing (fixes A11 worktree leak).
     try {
-        let wtResult = gitExec(gitRoot, `worktree add "${worktreeDir}" -b ${branchName} origin/${baseBranch}`);
-        if (wtResult.startsWith('Error:')) {
-            log.warn(`Remote ref origin/${baseBranch} not found, falling back to local branch`);
-            wtResult = gitExec(gitRoot, `worktree add "${worktreeDir}" -b ${branchName} ${baseBranch}`);
-        }
-        if (wtResult.startsWith('Error:')) {
-            throw new Error(`Failed to create worktree for ${branchName}: ${wtResult}`);
+        let wtResult: string;
+        if (branchExists) {
+            // Plan 24, A2: reuse existing branch — happens when a salvage worktree
+            // held the branch and we couldn't fully remove it, or on a re-dispatch.
+            log.info(`Reusing existing branch ${branchName} for a second dispatch round (previous attempt salvaged)`);
+            wtResult = gitExec(gitRoot, `worktree add "${worktreeDir}" ${branchName}`);
+            if (wtResult.startsWith('Error:')) {
+                throw new Error(`Failed to reuse worktree for ${branchName}: ${wtResult}`);
+            }
+            // Reset to base to discard stale commits from previous attempt
+            const resetTarget = gitExec(worktreeDir, `rev-parse --verify origin/${baseBranch}`).startsWith('Error:')
+                ? baseBranch
+                : `origin/${baseBranch}`;
+            const resetResult = gitExec(worktreeDir, `reset --hard ${resetTarget}`);
+            if (resetResult.startsWith('Error:')) {
+                log.warn(`Reset to ${resetTarget} failed: ${resetResult}`);
+            } else {
+                log.info(`Reset reused branch to ${resetTarget}`);
+            }
+        } else {
+            wtResult = gitExec(gitRoot, `worktree add "${worktreeDir}" -b ${branchName} origin/${baseBranch}`);
+            if (wtResult.startsWith('Error:')) {
+                log.warn(`Remote ref origin/${baseBranch} not found, falling back to local branch`);
+                wtResult = gitExec(gitRoot, `worktree add "${worktreeDir}" -b ${branchName} ${baseBranch}`);
+            }
+            if (wtResult.startsWith('Error:')) {
+                throw new Error(`Failed to create worktree for ${branchName}: ${wtResult}`);
+            }
         }
         log.info(`Worktree created: ${wtResult}`);
         // Set git identity in the worktree so agent shell commands have valid author
@@ -856,6 +999,21 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
         }
 
         for (const [devId, devAssignments] of byDev) {
+            // Plan 24 D2: check branch budget before each dev invocation
+            const branchBudgetReason = checkBranchBudget(`before dev ${devId}`);
+            if (branchBudgetReason) {
+                log.warn(`Branch ${branchName} budget exceeded: ${branchBudgetReason} — stopping branch`);
+                allTranscript.push(msg('conductor', `Branch budget exceeded: ${branchBudgetReason}`));
+                emitRunEvent('branch:budget-exceeded', { branchName, reason: branchBudgetReason, checkpoint: `before dev ${devId}` });
+                // Salvage worktree and commit any partial work
+                commitWorktree(worktreeWorkspace, branchName, projectSlug, primaryStoryId, 'chore',
+                    `partial work before budget stop`, gitContext);
+                if (outputPath) {
+                    salvageWorktree(worktreeWorkspace, gitRoot, baseRef, branchName, branchBudgetReason, outputPath);
+                }
+                break;
+            }
+
             const entry = getDevAgent(devId);
             if (!entry) {
                 log.warn(`Unknown dev agent: ${devId}, skipping`);
@@ -957,8 +1115,14 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                 allTranscript.push(msg(entry.id, `Completed ${output.fileChanges?.length ?? 0} file changes on branch ${branchName}`));
                 devLog.info(`Done: ${output.fileChanges?.length ?? 0} file changes`);
             } catch (err: any) {
-                log.error(`Dev agent ${devId} failed: ${err.message}`);
-                allTranscript.push(msg(devId, `Failed: ${err.message}`));
+                // Plan 24 D1: invocation budget exceeded is a graceful stop, not a failure
+                if (err instanceof InvocationBudgetExceededError) {
+                    log.warn(`Dev agent ${devId} stopped: ${err.message}`);
+                    allTranscript.push(msg(devId, `Stopped (invocation budget exceeded): ${err.message}`));
+                } else {
+                    log.error(`Dev agent ${devId} failed: ${err.message}`);
+                    allTranscript.push(msg(devId, `Failed: ${err.message}`));
+                }
             } finally {
                 // Sub-Plan 06 §2: commit in finally — agent may have written files before throwing
                 commitWorktree(worktreeWorkspace, branchName, projectSlug, primaryStoryId, 'feat',
@@ -1137,6 +1301,23 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                     allTranscript.push(msg('conductor', `Gate integrity: ${integrityFindings.length} finding(s) detected\n${integrityFindings.map(f => `- [${f.severity}] ${f.kind}: ${f.detail}`).join('\n')}`));
 
                     if (criticals.length > 0 && GATE_INTEGRITY_MODE === 'enforce') {
+                        // Plan 24 B3: remember pre-revert gate status so we can
+                        // detect revert-induced failures and undo them.
+                        const gatesGreenBeforeRevert = gateReport?.passed ?? false;
+
+                        // Snapshot the current (pre-revert) content of files we are
+                        // about to overwrite, so we can restore if the revert breaks gates.
+                        const preRevertBodies: Record<string, string> = {};
+                        for (const [relPath, body] of Object.entries(branchBaseline.protectedBodies)) {
+                            const absPath = path.join(worktreeWorkspace, relPath);
+                            if (fs.existsSync(absPath)) {
+                                const currentBody = fs.readFileSync(absPath, 'utf-8');
+                                if (currentBody !== body) {
+                                    preRevertBodies[relPath] = currentBody;
+                                }
+                            }
+                        }
+
                         // Revert protected files to baseline content
                         log.warn('Reverting protected files to baseline content...');
                         for (const [relPath, body] of Object.entries(branchBaseline.protectedBodies)) {
@@ -1202,6 +1383,47 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                                 installTimeoutMs: PR_TEST_INSTALL_TIMEOUT_MS,
                             });
                             log.info(`Quality gates after revert: ${gateReport?.passed ? 'passed' : 'failed'}`);
+
+                            // Plan 24 B3: if gates were green before the revert and red
+                            // after, the revert itself broke them. Restore the reverted
+                            // content, record a config-change finding at major, and emit
+                            // an event. Never let revert-induced failures reach decideMerge.
+                            if (gatesGreenBeforeRevert && gateReport && !gateReport.passed) {
+                                log.warn('Revert broke quality gates — restoring pre-revert content and flagging as config-change');
+                                for (const [relPath, body] of Object.entries(preRevertBodies)) {
+                                    const absPath = path.join(worktreeWorkspace, relPath);
+                                    fs.writeFileSync(absPath, body, 'utf-8');
+                                    log.info(`  Restored: ${relPath}`);
+                                }
+
+                                // Re-commit restored state
+                                gitExec(worktreeWorkspace, 'add .');
+                                const restoreStatus = gitExec(worktreeWorkspace, 'status --short');
+                                if (restoreStatus && !restoreStatus.includes('nothing to commit')) {
+                                    gitExec(worktreeWorkspace, `commit -m "[${projectSlug}]-integrity: restore config (revert broke gates)"`);
+                                    gitPush(worktreeWorkspace, branchName, gitContext);
+                                }
+
+                                // Record as a major (informational) finding, not a gate blocker
+                                integrityFindings.push({
+                                    kind: 'config-change-by-feature-branch',
+                                    severity: 'major',
+                                    file: Object.keys(preRevertBodies).join(', '),
+                                    detail: 'config-change-by-feature-branch: feature branch config changes are required for gates to pass',
+                                });
+
+                                emitRunEvent('pr:config-change-flagged', {
+                                    branch: branchName,
+                                    files: Object.keys(preRevertBodies),
+                                });
+
+                                // Restore the pre-revert gate report so the revert-induced
+                                // failure does not reach decideMerge as a blocker.
+                                gateReport = runQualityGates(worktreeWorkspace, {
+                                    timeoutMs: PR_TEST_TIMEOUT_MS,
+                                    installTimeoutMs: PR_TEST_INSTALL_TIMEOUT_MS,
+                                });
+                            }
                         } catch (rerunErr: any) {
                             log.warn(`Quality gate re-run after revert failed: ${rerunErr.message}`);
                         }
@@ -1252,8 +1474,19 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
             prBody += `\n\n## Quality Gates\n\n${gateReportToMarkdown(gateReport)}`;
         }
         // Append gate integrity findings to the PR description
+        // Plan 24 B4: split major findings into an informational section
         if (integrityFindings.length > 0) {
-            prBody += `\n\n${tamperFindingsToMarkdown(integrityFindings)}`;
+            const criticalFindings = integrityFindings.filter(f => f.severity === 'critical');
+            const majorFindings = integrityFindings.filter(f => f.severity === 'major');
+            if (criticalFindings.length > 0) {
+                prBody += `\n\n${tamperFindingsToMarkdown(criticalFindings)}`;
+            }
+            if (majorFindings.length > 0) {
+                prBody += `\n\n## Heuristic findings (informational)\n\n`
+                    + '| Severity | Kind | File | Detail |\n'
+                    + '|----------|------|------|--------|\n'
+                    + majorFindings.map(f => `| ${f.severity.toUpperCase()} | ${f.kind} | \`${f.file}\` | ${f.detail} |`).join('\n');
+            }
         }
 
         // ── 1c. Secret scan before PR (when SECURITY_GATE_IN_PR=true) ────
@@ -1279,7 +1512,7 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
 
         log.info(`Creating PR: "${prTitle}"`);
         const octokit = getOctokit(gitContext);
-        let ghPr: { number: number; html_url: string; node_id: string };
+        let ghPr: { number: number; html_url: string; node_id: string; head?: { ref: string } };
 
         // Sub-Plan 06 §4: Check for existing open PR before creating (prevents 422 deadlock)
         const existingPR = await findExistingPR(octokit, ghOwner, ghRepo, branchName);
@@ -1396,6 +1629,15 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
         ].map(p => `':!${p}'`).join(' ');
 
         for (let iteration = 1; iteration <= getEffectiveLimits().maxReviewIterations; iteration++) {
+            // Plan 24 D2: check branch budget before each review iteration
+            const reviewBudgetReason = checkBranchBudget(`before review iteration ${iteration}`);
+            if (reviewBudgetReason) {
+                log.warn(`Branch ${branchName} budget exceeded: ${reviewBudgetReason} — ending review loop`);
+                allTranscript.push(msg('conductor', `Branch budget exceeded during review: ${reviewBudgetReason}`));
+                emitRunEvent('branch:budget-exceeded', { branchName, reason: reviewBudgetReason, checkpoint: `review iteration ${iteration}` });
+                break;
+            }
+
             const effectiveReviewLimit = getEffectiveLimits().maxReviewIterations;
             log.info(`Review iteration ${iteration}/${effectiveReviewLimit}`);
 
@@ -1997,9 +2239,39 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
             const { maxReviewIterations: budgetCheck } = getEffectiveLimits();
             if (budgetCheck <= 0) {
                 log.warn('Strong fixer skipped: run budget exhausted');
+            } else if (strongFixerZeroWriteBranches.has(branchName)) {
+                // Plan 24 B2: one shot per branch — a previous zero-write pass means rerunning is waste
+                log.info(`Strong fixer: skipped (zero-write pass already attempted on ${branchName})`);
             } else {
+                // Plan 24 B2: precondition — only run when at least one blocker is an
+                // unresolved review comment or a repairable gate failure (typecheck/lint/test).
+                // Skip when blockers are exclusively non-fixer-repairable
+                // ('Product verification failed', 'critical layout violation', 'Quorum not met'
+                //  with zero review comments).
+                const hasReviewComments = allReviews.some(r => r.comments.length > 0);
+                const hasRepairableGateFailure = gateReport && !gateReport.passed && gateReport.results?.some(
+                    (r: any) => !r.passed && !r.skipped && /typecheck|lint|test|build/i.test(r.step),
+                );
+                const productVerifyFailed = gateReport?.productVerify && !gateReport.productVerify.passed;
+                const criticalLayoutOnly = integrityFindings.length > 0
+                    && integrityFindings.every(f => f.severity === 'critical');
+                const quorumNotMet = allOutcomes.filter(o => o.kind === 'approved').length < REVIEW_QUORUM
+                    && !hasReviewComments;
+                const onlyNonRepairable = !hasReviewComments && !hasRepairableGateFailure
+                    && (productVerifyFailed || criticalLayoutOnly || quorumNotMet);
+
+                const fixerBlockerSummary = [
+                    ...(hasReviewComments ? ['review-comments'] : []),
+                    ...(hasRepairableGateFailure ? ['repairable-gate-failure'] : []),
+                    ...(productVerifyFailed ? ['product-verify-failed'] : []),
+                    ...(quorumNotMet ? ['quorum-not-met'] : []),
+                ].join(', ') || 'none';
+
+                if (onlyNonRepairable) {
+                    log.info(`Strong fixer: skipped (blockers not fixer-repairable: ${fixerBlockerSummary})`);
+                } else {
                 const fixerModel = STRONG_FIXER_MODEL || PRINCIPAL_DEV_MODEL;
-                log.info(`Invoking strong model fixer (${fixerModel}) for PR #${ghPr.number}...`);
+                log.info(`Strong fixer: running (${STRONG_FIXER_MAX_TOOL_CALLS} turns, ${Math.round(STRONG_FIXER_MAX_INPUT_TOKENS / 1000)}k tokens, blockers: ${fixerBlockerSummary || 'review-comments-only'})`);
                 allTranscript.push(msg('conductor', `Strong fixer invoked (model: ${fixerModel})`));
                 emitRunEvent('pr:strong-fixer', { prNumber: ghPr.number, model: fixerModel, branch: branchName });
 
@@ -2034,7 +2306,13 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                     `\n## All Review Comments (${allComments.length} total)\n${JSON.stringify(allComments, null, 2)}`,
                     `\n## Current Diff\n\`\`\`diff\n${truncatedFixerDiff}\n\`\`\``,
                     gateReport ? `\n## Quality Gate Results\n${gateReportToMarkdown(gateReport)}` : '',
-                    integrityFindings.length > 0 ? `\n## Integrity Findings\n${tamperFindingsToMarkdown(integrityFindings)}` : '',
+                    // Plan 24 B4: present major integrity findings as informational, not blockers
+                    integrityFindings.filter(f => f.severity === 'critical').length > 0
+                        ? `\n## Integrity Findings\n${tamperFindingsToMarkdown(integrityFindings.filter(f => f.severity === 'critical'))}`
+                        : '',
+                    integrityFindings.filter(f => f.severity === 'major').length > 0
+                        ? `\n## Heuristic findings (informational)\n${tamperFindingsToMarkdown(integrityFindings.filter(f => f.severity === 'major'))}`
+                        : '',
                     `\n## Instructions`,
                     `1. Read and understand ALL review comments.`,
                     `2. Fix every issue raised by reviewers.`,
@@ -2061,6 +2339,12 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                     log.info(`Strong fixer completed: ${fixerChanges.length} verified file change(s)`);
                     allTranscript.push(msg('strong-fixer', `Strong fixer applied ${fixerChanges.length} file changes`));
 
+                    // Plan 24 B2: track zero-write passes so we don't retry
+                    if (fixerChanges.length === 0) {
+                        strongFixerZeroWriteBranches.add(branchName);
+                        log.info(`Strong fixer: zero writes on ${branchName} — branch marked for skip on retry`);
+                    }
+
                     // Run quality gates after the fixer's changes
                     let fixerGateReport: GateReport | null = null;
                     try {
@@ -2074,8 +2358,10 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                     }
 
                     // Final review with a principal-rank reviewer
+                    // Plan 24 B1: pass the original author's devAgentId, not 'strong-fixer'
+                    // ('strong-fixer' is not in DEV_AGENTS so selectEscalationCandidate returned null)
                     const finalReviewerId = selectEscalationCandidate(
-                        'strong-fixer',
+                        assignments[0].devAgentId,
                         [...reviewerAgentIds, assignments[0].devAgentId],
                     );
 
@@ -2181,6 +2467,7 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                     commitWorktree(worktreeWorkspace, branchName, projectSlug, primaryStoryId, 'fix',
                         `strong fixer pass (model: ${STRONG_FIXER_MODEL || PRINCIPAL_DEV_MODEL})`, gitContext);
                 }
+                } // Plan 24 B2: end of precondition-check else block
             }
         }
 
@@ -2351,6 +2638,16 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
             }
 
             if (!secretsBlockMerge && (prStatus === 'approved' || prStatus === 'open')) {
+                // Plan 24, A1: assert PR head matches branchName before merge/deleteRef.
+                // This guard prevents merging/deleting the wrong branch when findExistingPR
+                // previously returned a PR for a different head.
+                const prHeadRef = ghPr.head?.ref;
+                if (prHeadRef && prHeadRef !== branchName) {
+                    const err = new PrIdentityMismatchError(ghPr.number, branchName, prHeadRef);
+                    log.error(err.message);
+                    allTranscript.push(msg('conductor', err.message));
+                    prStatus = 'open';
+                } else {
                 try {
                     await octokit.pulls.merge({
                         owner: ghOwner,
@@ -2379,6 +2676,7 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                     allTranscript.push(msg('conductor', `Merge failed: ${err.message}`));
                     prStatus = 'open';
                 }
+                } // end Plan 24 A1 head-match else
             }
         }
 

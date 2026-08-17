@@ -46,6 +46,8 @@ export interface BudgetStatus {
 
 let _runStartMs = Date.now();
 let _lastLoggedLevel: BudgetLevel = 'ok';
+/** Accumulated paused time (ms) excluded from wall utilisation (Plan 24, D4). */
+let _pausedMs = 0;
 
 // ─── Pure helpers ───────────────────────────────────────────────────────────
 
@@ -63,7 +65,21 @@ export function computeBudgetLevel(utilisation: number): BudgetLevel {
 export function startRunBudget(): void {
     _runStartMs = Date.now();
     _lastLoggedLevel = 'ok';
+    _pausedMs = 0;
     log.info('Run budget started');
+}
+
+// ─── Pause Accounting (Plan 24, D4) ─────────────────────────────────────────
+
+/** Add paused time (ms) that should be excluded from wall utilisation. */
+export function addPausedMs(ms: number): void {
+    _pausedMs += ms;
+    log.debug(`Paused time accumulated: +${ms}ms (total ${_pausedMs}ms)`);
+}
+
+/** Get total paused time (ms) accumulated so far. */
+export function getPausedMs(): number {
+    return _pausedMs;
 }
 
 // ─── Status ─────────────────────────────────────────────────────────────────
@@ -72,7 +88,8 @@ export function getBudgetStatus(): BudgetStatus {
     const summary = tokenTracker.getRunSummary();
     const usedTokens = summary.totalTokens;
     const estCostUsd = estimateRunCost(summary);
-    const elapsedMs = Date.now() - _runStartMs;
+    // Plan 24 D4: subtract paused time from elapsed wall clock
+    const elapsedMs = Math.max(0, Date.now() - _runStartMs - _pausedMs);
 
     // Compute per-limit utilisation (0 = disabled → 0 utilisation)
     const tokenUtil = MAX_RUN_TOKENS > 0 ? usedTokens / MAX_RUN_TOKENS : 0;
@@ -187,12 +204,34 @@ export function getEffectiveLimits(): {
     }
 }
 
+// ─── Invocation Budget Error (Plan 24, D1) ──────────────────────────────────
+
+/**
+ * Thrown when a single agent invocation exceeds MAX_INVOCATION_INPUT_TOKENS.
+ * Handled like ToolBudgetExhaustedError — commits are already durable, the
+ * agent stops gracefully.
+ */
+export class InvocationBudgetExceededError extends Error {
+    constructor(
+        public readonly invocationId: string,
+        public readonly inputTokens: number,
+        public readonly ceiling: number,
+    ) {
+        super(
+            `Invocation "${invocationId}" exceeded input token ceiling: `
+            + `${inputTokens.toLocaleString()} / ${ceiling.toLocaleString()}`,
+        );
+        this.name = 'InvocationBudgetExceededError';
+    }
+}
+
 // ─── Test helpers ───────────────────────────────────────────────────────────
 
 /** Reset the run budget state (for testing only). */
 export function _resetRunBudget(): void {
     _runStartMs = Date.now();
     _lastLoggedLevel = 'ok';
+    _pausedMs = 0;
 }
 
 /** Override the run start time (for testing only). */

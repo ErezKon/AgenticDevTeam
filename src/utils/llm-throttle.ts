@@ -215,6 +215,98 @@ function handleSuccess(): void {
     }
 }
 
+// ─── Provider Pause Gate (Plan 24, A3) ──────────────────────────────────────
+
+/** Max time to wait for a provider outage to clear (ms). */
+const PROVIDER_PAUSE_MAX_MS =
+    parseInt(process.env.PROVIDER_PAUSE_MAX_MS ?? '900000', 10);
+
+/** Whether the process-wide provider pause gate is active. */
+let providerPaused = false;
+
+/** Resolve all waiting callers when the gate clears. */
+let pauseGateResolvers: Array<() => void> = [];
+
+/** Total ms spent in provider pause state. */
+let totalPausedMs = 0;
+
+/** Get total ms the system spent paused due to provider outages. */
+export function getProviderPausedMs(): number {
+    return totalPausedMs;
+}
+
+/**
+ * Pause all LLM traffic due to a provider-level failure (billing, quota, etc.).
+ * Probes with exponential backoff up to PROVIDER_PAUSE_MAX_MS.
+ * Returns true if the provider recovered, false if it did not.
+ */
+export async function awaitProviderRecovery(
+    probeFn?: () => Promise<boolean>,
+): Promise<boolean> {
+    if (providerPaused) {
+        // Already paused — wait on the existing gate
+        return new Promise<boolean>(resolve => {
+            pauseGateResolvers.push(() => resolve(!providerPaused));
+        });
+    }
+
+    providerPaused = true;
+    const pauseStart = Date.now();
+    log.warn(`Provider unavailable — pausing all LLM traffic (max ${PROVIDER_PAUSE_MAX_MS / 1000}s)`);
+
+    let backoff = 10_000; // 10s initial
+    const maxBackoff = 120_000; // 2 min max per probe
+
+    while (Date.now() - pauseStart < PROVIDER_PAUSE_MAX_MS) {
+        await new Promise(r => setTimeout(r, backoff));
+
+        // Probe: if a probe function is provided, use it; otherwise just clear
+        if (probeFn) {
+            try {
+                const recovered = await probeFn();
+                if (recovered) {
+                    const elapsed = Date.now() - pauseStart;
+                    totalPausedMs += elapsed;
+                    providerPaused = false;
+                    log.info(`Provider recovered after ${(elapsed / 1000).toFixed(0)}s pause`);
+                    // Wake all waiters
+                    for (const resolve of pauseGateResolvers) resolve();
+                    pauseGateResolvers = [];
+                    return true;
+                }
+            } catch {
+                // probe failed — continue waiting
+            }
+        } else {
+            // No probe function — just wait the full duration and give up
+            break;
+        }
+
+        backoff = Math.min(backoff * 2, maxBackoff);
+    }
+
+    const elapsed = Date.now() - pauseStart;
+    totalPausedMs += elapsed;
+    log.error(`Provider did not recover after ${(elapsed / 1000).toFixed(0)}s — giving up`);
+    // Wake all waiters with failure
+    for (const resolve of pauseGateResolvers) resolve();
+    pauseGateResolvers = [];
+    // Keep providerPaused=true so new calls immediately fail
+    return false;
+}
+
+/** Check if the provider pause gate is active. */
+export function isProviderPaused(): boolean {
+    return providerPaused;
+}
+
+/** Clear the provider pause state (for recovery or testing). */
+export function clearProviderPause(): void {
+    providerPaused = false;
+    for (const resolve of pauseGateResolvers) resolve();
+    pauseGateResolvers = [];
+}
+
 // ─── Exported throttle wrapper ──────────────────────────────────────────────
 
 /**

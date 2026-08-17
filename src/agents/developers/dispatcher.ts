@@ -8,14 +8,17 @@
  * implicit scaffold dependencies are injected, and overlapping module
  * owners are serialised instead of batched.
  */
-import { MAX_CONCURRENT_DEVS, INTER_BATCH_DELAY_MS, CONFIG_OWNERSHIP_SCAFFOLD_ONLY } from '../../config';
+import { MAX_CONCURRENT_DEVS, INTER_BATCH_DELAY_MS, CONFIG_OWNERSHIP_SCAFFOLD_ONLY, MAX_BRANCH_WALL_MS } from '../../config';
 import { getLogger } from '../../utils/logger';
 import { executePRWorkflow } from '../../conductor/pr-workflow';
 import { completedIdsFromPullRequests } from '../../conductor/assignment-policy';
 import type { CompletionEvidence } from '../../conductor/assignment-policy';
-import { getEffectiveLimits } from '../../utils/run-budget';
+import { getEffectiveLimits, getBudgetStatus } from '../../utils/run-budget';
 import { getDevAgent } from './registry';
 import { gitExec } from '../../utils/git-exec';
+import { classifyProviderFailure, isProviderLevelFailure } from '../../conductor/provider-failure';
+import { awaitProviderRecovery } from '../../utils/llm-throttle';
+import { emitRunEvent } from '../../utils/event-bus';
 import type { Assignment, FileChange, ArtifactRef, TranscriptMessage, PhaseName, PullRequest, GitContext, TechDecision, UserStory, Task } from '../_shared/base-schemas';
 import type { TokenCallRecord } from '../../utils/token-tracker';
 
@@ -32,6 +35,8 @@ export interface DispatchResult {
     completionEvidence: CompletionEvidence[];
     /** Branches salvaged (failed to merge but patches exported). */
     salvageBranches: string[];
+    /** Branches deferred because they cannot plausibly finish within remaining wall time (Plan 24, D3). */
+    branchesDeferred: number;
 }
 
 /**
@@ -183,6 +188,67 @@ export function injectScaffoldDependencies(assignments: Assignment[]): Assignmen
     });
 }
 
+// ─── Bootstrap/wiring barrier (Plan 24, E4) ─────────────────────────────────
+
+/** Patterns in moduleIds that indicate an entry-point / app-root module. */
+const ENTRY_MODULE_PATTERNS = [/^MOD-MAIN$/i, /^MOD-APP$/i, /^MOD-ROOT$/i, /^MOD-ENTRY$/i];
+
+/** Patterns in assignment descriptions / story text that indicate bootstrap work. */
+const BOOTSTRAP_TEXT_PATTERNS = [
+    /\bbootstrap\b/i, /\bwiring\b/i, /\bentry\s*point\b/i,
+    /\bapp\s*initializ/i, /\bcomposition\s*root\b/i,
+];
+
+/**
+ * Returns true when an assignment looks like bootstrap/wiring work:
+ * it either owns an entry-point module or its description mentions bootstrap keywords.
+ */
+export function isBootstrapAssignment(a: Assignment): boolean {
+    // Don't classify scaffold assignments as bootstrap
+    if (isScaffoldAssignment(a)) return false;
+
+    // Check moduleIds for entry-point patterns
+    for (const mod of a.moduleIds ?? []) {
+        if (ENTRY_MODULE_PATTERNS.some(re => re.test(mod))) return true;
+    }
+
+    // Check description for bootstrap/wiring keywords
+    const desc = a.description ?? '';
+    if (BOOTSTRAP_TEXT_PATTERNS.some(re => re.test(desc))) return true;
+
+    return false;
+}
+
+/**
+ * Returns true when a *dispatch branch* is a bootstrap/wiring branch.
+ *
+ * A branch is bootstrap if any of its assignments is a bootstrap assignment.
+ */
+export function isBootstrapBranch(branch: string, assignments: Assignment[]): boolean {
+    return assignments.length > 0 && assignments.some(isBootstrapAssignment);
+}
+
+/**
+ * Inject implicit bootstrap dependencies (Plan 24, E4): every non-scaffold,
+ * non-bootstrap assignment depends on all bootstrap assignment ids.
+ * This guarantees the bootstrap/wiring branch runs immediately after scaffold,
+ * before other feature branches.
+ */
+export function injectBootstrapDependencies(assignments: Assignment[]): Assignment[] {
+    const bootstrapIds = assignments.filter(isBootstrapAssignment).map(a => a.id);
+    if (bootstrapIds.length === 0) return assignments;
+
+    log.info(`Bootstrap barrier: ${bootstrapIds.length} bootstrap assignment(s) detected — injecting dependencies`);
+
+    return assignments.map(a => {
+        if (isScaffoldAssignment(a) || isBootstrapAssignment(a)) return a;
+        const existing = new Set(a.dependsOn);
+        const newDeps = bootstrapIds.filter(id => !existing.has(id));
+        if (newDeps.length === 0) return a;
+        return { ...a, dependsOn: [...a.dependsOn, ...newDeps] };
+    });
+}
+
 /**
  * Detect branches with overlapping moduleIds. Returns sets of branches
  * that share module paths and should be serialised instead of batched.
@@ -264,6 +330,20 @@ function collectReviewers(assignments: Assignment[]): string[] {
         .slice(0, 2);
 }
 
+// ─── Plan 24 D3: wall-clock-aware admission control ─────────────────────────
+
+/** Default estimated branch duration (ms) when no branches have completed yet. */
+const DEFAULT_BRANCH_ESTIMATE_MS = 180_000; // 3 minutes
+
+/** Compute the median of a sorted numeric array. Returns 0 for empty arrays. */
+function median(sorted: number[]): number {
+    if (sorted.length === 0) return 0;
+    const mid = Math.floor(sorted.length / 2);
+    return sorted.length % 2 === 0
+        ? (sorted[mid - 1] + sorted[mid]) / 2
+        : sorted[mid];
+}
+
 /**
  * Dispatch all assignments to developer agents via the PR workflow.
  *
@@ -304,8 +384,15 @@ export async function dispatchDevelopers(
     const allCompletionEvidence: CompletionEvidence[] = [];
     const allSalvageBranches: string[] = [];
 
+    // Plan 24 D3: wall-clock-aware admission control
+    let branchesDeferred = 0;
+    const completedBranchDurationsMs: number[] = [];
+
     // Sub-Plan 06 §5a: Inject implicit scaffold dependencies before grouping
-    const augmentedAssignments = injectScaffoldDependencies(assignments);
+    // Plan 24, E4: also inject bootstrap/wiring dependencies so the entry-point
+    // branch runs immediately after scaffold, before other feature branches.
+    const withScaffoldDeps = injectScaffoldDependencies(assignments);
+    const augmentedAssignments = injectBootstrapDependencies(withScaffoldDeps);
 
     // ── Story → branch mapping (shared across grouping + layer loop) ────
     const storyBranches = new Map<string, string>();
@@ -355,7 +442,14 @@ export async function dispatchDevelopers(
         const scaffoldBranches = branchesToProcess.filter(branch =>
             isScaffoldBranch(branch, branchGroups.get(branch) ?? []),
         );
-        const featureBranches = branchesToProcess.filter(b => !scaffoldBranches.includes(b));
+        // Plan 24, E4: Identify bootstrap/wiring branches (run right after scaffold)
+        const bootstrapBranches = branchesToProcess.filter(branch =>
+            !scaffoldBranches.includes(branch) &&
+            isBootstrapBranch(branch, branchGroups.get(branch) ?? []),
+        );
+        const featureBranches = branchesToProcess.filter(b =>
+            !scaffoldBranches.includes(b) && !bootstrapBranches.includes(b),
+        );
 
         // Sub-Plan 06 §5b: Serialise branches with overlapping modules
         const serialisedFeatures: string[][] = [];
@@ -379,6 +473,8 @@ export async function dispatchDevelopers(
         log.info(
             `Branch classification: ${scaffoldBranches.length} scaffold `
             + `[${scaffoldBranches.join(', ') || 'none'}], `
+            + `${bootstrapBranches.length} bootstrap `
+            + `[${bootstrapBranches.join(', ') || 'none'}], `
             + `${parallelFeatures.length} parallel, `
             + `${serialisedFeatures.length} serialised chain(s) `
             + `(${serialisedFeatures.reduce((n, c) => n + c.length, 0)} branches)`,
@@ -398,7 +494,44 @@ export async function dispatchDevelopers(
                     });
                     break;
                 }
-                const batch = branches.slice(j, j + MAX_CONCURRENT_DEVS);
+                let batch = branches.slice(j, j + MAX_CONCURRENT_DEVS);
+
+                // Plan 24 D3: wall-clock-aware admission control
+                const budgetStatus = getBudgetStatus();
+                if (budgetStatus.maxWallMs > 0) {
+                    const remainingWallMs = budgetStatus.maxWallMs - budgetStatus.elapsedMs;
+                    const estimateMs = completedBranchDurationsMs.length > 0
+                        ? median([...completedBranchDurationsMs].sort((a, b) => a - b))
+                        : DEFAULT_BRANCH_ESTIMATE_MS;
+                    // Also respect per-branch wall cap as an estimate floor
+                    const effectiveEstimate = MAX_BRANCH_WALL_MS > 0
+                        ? Math.min(estimateMs, MAX_BRANCH_WALL_MS)
+                        : estimateMs;
+
+                    const admitted: string[] = [];
+                    for (const branchName of batch) {
+                        if (remainingWallMs < effectiveEstimate) {
+                            branchesDeferred++;
+                            log.warn(
+                                `Deferring branch "${branchName}": remaining wall time `
+                                + `${(remainingWallMs / 1000).toFixed(0)}s < estimated duration `
+                                + `${(effectiveEstimate / 1000).toFixed(0)}s`,
+                            );
+                            transcript.push({
+                                timestamp: new Date().toISOString(),
+                                agentId: 'dispatcher',
+                                phase: 'development' as PhaseName,
+                                message: `Branch "${branchName}" deferred: insufficient wall time (${(remainingWallMs / 1000).toFixed(0)}s remaining, ~${(effectiveEstimate / 1000).toFixed(0)}s needed)`,
+                            });
+                        } else {
+                            admitted.push(branchName);
+                        }
+                    }
+                    batch = admitted;
+                    if (batch.length === 0) continue;
+                }
+
+                const batchStartMs = Date.now();
                 const promises = batch.map(branchName => {
                     const branchAssignments = branchGroups.get(branchName) ?? [];
                     const reviewerIds = collectReviewers(branchAssignments);
@@ -427,6 +560,8 @@ export async function dispatchDevelopers(
                 });
 
                 const results = await Promise.allSettled(promises);
+                // Record batch duration for future admission estimates
+                completedBranchDurationsMs.push(Date.now() - batchStartMs);
                 for (const r of results) {
                     if (r.status === 'fulfilled') {
                         const prResult = r.value;
@@ -439,13 +574,31 @@ export async function dispatchDevelopers(
                         if (prResult.completionEvidence) allCompletionEvidence.push(...prResult.completionEvidence);
                         if (prResult.salvageBranch) allSalvageBranches.push(prResult.salvageBranch);
                     } else {
-                        log.error(`PR workflow failed: ${r.reason}`);
-                        transcript.push({
-                            timestamp: new Date().toISOString(),
-                            agentId: 'dispatcher',
-                            phase: 'development' as PhaseName,
-                            message: `PR workflow failed: ${r.reason}`,
-                        });
+                        // Plan 24, A3: classify the failure — provider-level errors
+                        // (billing, auth, quota) should not consume the branch's attempt.
+                        const classification = classifyProviderFailure(r.reason);
+                        if (isProviderLevelFailure(classification)) {
+                            log.error(`Provider failure (${classification.kind}): ${classification.message} — branch not counted as attempted`);
+                            emitRunEvent('run:paused', { kind: classification.kind, message: classification.message });
+                            transcript.push({
+                                timestamp: new Date().toISOString(),
+                                agentId: 'dispatcher',
+                                phase: 'development' as PhaseName,
+                                message: `Provider failure (${classification.kind}): branch assignments remain pending — ${classification.message}`,
+                            });
+                            // Attempt recovery if pauseable
+                            if (classification.pauseable) {
+                                await awaitProviderRecovery();
+                            }
+                        } else {
+                            log.error(`PR workflow failed: ${r.reason}`);
+                            transcript.push({
+                                timestamp: new Date().toISOString(),
+                                agentId: 'dispatcher',
+                                phase: 'development' as PhaseName,
+                                message: `PR workflow failed: ${r.reason}`,
+                            });
+                        }
                     }
                 }
 
@@ -477,6 +630,27 @@ export async function dispatchDevelopers(
             }
         }
 
+        // Plan 24, E4: Run bootstrap/wiring branches right after scaffold, before features.
+        // These branches wire up the entry point and other feature branches depend on them.
+        if (bootstrapBranches.length > 0) {
+            log.info(`Bootstrap barrier: running ${bootstrapBranches.length} bootstrap branch(es) after scaffold`);
+            for (const bootstrapBranch of bootstrapBranches) {
+                await runBranches([bootstrapBranch]);
+                const bootstrapPR = pullRequests.find(pr => pr.branchName === bootstrapBranch);
+                if (bootstrapPR?.status === 'merged') {
+                    syncWorkspaceToBranch(gitRoot, baseBranch);
+                } else {
+                    log.warn(`Bootstrap branch ${bootstrapBranch} failed to merge — feature branches may lack entry-point wiring`);
+                    transcript.push({
+                        timestamp: new Date().toISOString(),
+                        agentId: 'dispatcher',
+                        phase: 'development' as PhaseName,
+                        message: `Bootstrap branch ${bootstrapBranch} failed to merge — remaining branches may lack entry-point wiring`,
+                    });
+                }
+            }
+        }
+
         // Run serialised (overlapping) branches sequentially
         for (const chain of serialisedFeatures) {
             log.info(`Serialising ${chain.length} overlapping branches: ${chain.join(', ')}`);
@@ -496,7 +670,12 @@ export async function dispatchDevelopers(
     // for a round that delivered nothing at all (Plan 21, E3).
     const mergedPrs = pullRequests.filter(pr => pr.status === 'merged').length;
     const skippedPrs = pullRequests.filter(pr => pr.id.startsWith('PR-SKIPPED-')).length;
-    log.info(`Dispatch complete: ${fileChanges.length} total file changes, ${pullRequests.length} PRs (${mergedPrs} merged, ${skippedPrs} skipped), ${artifacts.length} artifacts, ${newlyCompletedIds.length} completed assignments`);
+    log.info(
+        `Dispatch complete: ${fileChanges.length} total file changes, ${pullRequests.length} PRs `
+        + `(${mergedPrs} merged, ${skippedPrs} skipped), ${artifacts.length} artifacts, `
+        + `${newlyCompletedIds.length} completed assignments`
+        + (branchesDeferred > 0 ? `, ${branchesDeferred} branch(es) deferred` : ''),
+    );
 
     // Systemic failure: every branch in the round produced nothing. Individually these
     // surface only as per-branch WARNs, which is how 34 identical provider 400s scrolled
@@ -517,5 +696,6 @@ export async function dispatchDevelopers(
         completedAssignmentIds: newlyCompletedIds,
         completionEvidence: allCompletionEvidence,
         salvageBranches: allSalvageBranches,
+        branchesDeferred,
     };
 }

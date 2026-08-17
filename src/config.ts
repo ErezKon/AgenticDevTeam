@@ -21,17 +21,17 @@ export const LLM_MODEL =
 export const ARCHITECT_MODEL =
     process.env.ARCHITECT_MODEL ?? 'gpt-oss-120b';
 
-/** Product Manager agent model. */
+/** Product Manager agent model (Plan 24, E1: upgraded to claude-sonnet-5). */
 export const PRODUCT_MANAGER_MODEL =
-    process.env.PRODUCT_MANAGER_MODEL ?? 'gpt-oss-120b';
+    process.env.PRODUCT_MANAGER_MODEL ?? 'claude-sonnet-5';
 
 /** DBA agent model. */
 export const DBA_MODEL =
     process.env.DBA_MODEL ?? 'gpt-oss-120b';
 
-/** Team Leader agent model. */
+/** Team Leader agent model (Plan 24, E1: upgraded to claude-sonnet-5). */
 export const TEAM_LEADER_MODEL =
-    process.env.TEAM_LEADER_MODEL ?? 'gpt-oss-120b';
+    process.env.TEAM_LEADER_MODEL ?? 'claude-sonnet-5';
 
 /** DevOps agent model. */
 export const DEVOPS_MODEL =
@@ -68,7 +68,17 @@ export const QA_MODEL =
  * These are configurable defaults based on typical provider pricing.
  * Adjust via the MODEL_PRICING_OVERRIDES env var (JSON string) if needed.
  */
-export const MODEL_PRICING: Record<string, { inputPer1k: number; outputPer1k: number }> = {
+/** Pricing entry for a model. Cache multipliers default to Anthropic's published rates. */
+export interface ModelPricingEntry {
+    inputPer1k: number;
+    outputPer1k: number;
+    /** Multiplier for cached-read input tokens (default 0.1 = 90% discount). */
+    cacheReadMultiplier?: number;
+    /** Multiplier for cache-creation input tokens (default 1.25 = 25% surcharge). */
+    cacheWriteMultiplier?: number;
+}
+
+export const MODEL_PRICING: Record<string, ModelPricingEntry> = {
     'gpt-oss-120b':                      { inputPer1k: 0.006,  outputPer1k: 0.012 },
     'llama-3-3-70b-instruct':            { inputPer1k: 0.003,  outputPer1k: 0.006 },
     'gemma-3-27b-it':                    { inputPer1k: 0.001,  outputPer1k: 0.002 },
@@ -96,7 +106,7 @@ export const MODEL_PRICING: Record<string, { inputPer1k: number; outputPer1k: nu
     'gemini-2.0-flash':                  { inputPer1k: 0.0001,  outputPer1k: 0.0004 },
     // Merge env-based overrides if provided
     ...(process.env.MODEL_PRICING_OVERRIDES
-        ? JSON.parse(process.env.MODEL_PRICING_OVERRIDES) as Record<string, { inputPer1k: number; outputPer1k: number }>
+        ? JSON.parse(process.env.MODEL_PRICING_OVERRIDES) as Record<string, ModelPricingEntry>
         : {}),
 };
 
@@ -166,6 +176,13 @@ export const RUN_MODE: 'autonomous' | 'human' =
 /** Max bug-fix loop iterations before the conductor gives up. */
 export const MAX_BUGFIX_ITERATIONS =
     parseInt(process.env.MAX_BUGFIX_ITERATIONS ?? '3', 10);
+
+/** Maximum feature branches per dispatch round (Plan 24, E2).
+ *  Each branch carries fixed scaffold, gate, review, and merge overhead;
+ *  branches that share a module are serialised. The dispatcher warned at
+ *  >8 since Plan 13 and the planner was never told. */
+export const MAX_BRANCHES =
+    parseInt(process.env.MAX_BRANCHES ?? '8', 10);
 
 /** Allow a hard reset to origin/<branch> when ff/rebase both fail during workspace sync. */
 export const WORKSPACE_SYNC_ALLOW_RESET =
@@ -324,6 +341,22 @@ export const MAX_RUN_COST_USD =
 export const MAX_RUN_WALL_MS =
     parseInt(process.env.MAX_RUN_WALL_MS ?? '18000000', 10);
 
+/** Max input tokens for a single agent invocation (Plan 24, D1).
+ *  Prevents a single runaway invocation from consuming the entire run budget.
+ *  0 = unlimited. */
+export const MAX_INVOCATION_INPUT_TOKENS =
+    parseInt(process.env.MAX_INVOCATION_INPUT_TOKENS ?? '600000', 10);
+
+/** Max estimated USD cost for a single branch workflow (Plan 24, D2).
+ *  0 = unlimited. */
+export const MAX_BRANCH_COST_USD =
+    parseFloat(process.env.MAX_BRANCH_COST_USD ?? '6');
+
+/** Max wall-clock time (ms) for a single branch workflow (Plan 24, D2).
+ *  Default 15 minutes. 0 = unlimited. */
+export const MAX_BRANCH_WALL_MS =
+    parseInt(process.env.MAX_BRANCH_WALL_MS ?? '900000', 10);
+
 /** Utilisation threshold for budget warning level (default: 0.70). */
 export const BUDGET_WARN_AT =
     parseFloat(process.env.BUDGET_WARN_AT ?? '0.70');
@@ -430,6 +463,12 @@ export const SANITIZE_STREAM_BLOCKS =
 export const HISTORY_MAX_CHARS =
     parseInt(process.env.HISTORY_MAX_CHARS ?? '60000', 10);
 
+/** Max aggregate characters across all tool results for a single model turn
+ *  (Plan 24, C4). When exceeded, results are proportionally shrunk with a
+ *  1500-char floor per result. 0 = disabled. */
+export const MAX_TURN_TOOL_RESULT_CHARS =
+    parseInt(process.env.MAX_TURN_TOOL_RESULT_CHARS ?? '30000', 10);
+
 /** Inject a distilled conventions digest in the prompt instead of making agents read_file them. */
 export const CONVENTIONS_INLINE_DIGEST =
     (process.env.CONVENTIONS_INLINE_DIGEST ?? 'true') === 'true';
@@ -532,6 +571,12 @@ export const FS_CONFIG_PROTECTION =
 export const REJECT_TRIVIAL_TESTS =
     (process.env.REJECT_TRIVIAL_TESTS ?? 'true') === 'true';
 
+/** Minimum product modules the reachable set must cover for the `subject-not-in-product`
+ *  and `no-product-import` checks to fire. When the entry-point closure is degenerate
+ *  (< N modules), those checks produce false positives and are skipped (Plan 24 B4). */
+export const GATE_REACHABILITY_MIN_CLOSURE =
+    parseInt(process.env.GATE_REACHABILITY_MIN_CLOSURE ?? '3', 10);
+
 // ─── Run Acceptance ─────────────────────────────────────────────────────────
 
 /**
@@ -592,6 +637,11 @@ export const SHELL_DEFAULT_TIMEOUT_S =
 export const SHELL_MAX_TIMEOUT_S =
     parseInt(process.env.SHELL_MAX_TIMEOUT_S ?? '900', 10);
 
+/** Max files a `cat`/`head` chain in `run_command` may touch before being refused
+ *  with a message pointing at `read_file` (Plan 24, C5). */
+export const SHELL_READ_MAX_FILES =
+    parseInt(process.env.SHELL_READ_MAX_FILES ?? '4', 10);
+
 // ─── Playwright MCP ─────────────────────────────────────────────────────────
 
 /** Command to launch the Playwright MCP server. */
@@ -622,7 +672,7 @@ export const GIT_USER_EMAIL = process.env.GIT_USER_EMAIL ?? 'agenticdevteam@nore
 
 /** Max PR review iterations before force-merging or escalating. */
 export const MAX_REVIEW_ITERATIONS =
-    parseInt(process.env.MAX_REVIEW_ITERATIONS ?? '5', 10);
+    parseInt(process.env.MAX_REVIEW_ITERATIONS ?? '3', 10);
 
 /** Timeout (ms) for `npm install` inside a PR worktree (default 5 min). */
 export const PR_TEST_INSTALL_TIMEOUT_MS =
@@ -818,14 +868,22 @@ export const STRONG_FIXER_MODEL =
 export const STRONG_FIXER_ENABLED =
     (process.env.STRONG_FIXER_ENABLED ?? 'true') === 'true';
 
-/** Turn ceiling for the strong fixer agent (default: 40).
+/** Turn ceiling for the strong fixer agent (default: 18).
  *
  *  Plan 22 A2 changed the unit: this now bounds *model turns*, not individual
  *  tool calls. Read/write/shell pools come from the principal budgets plus
  *  headroom (see `buildStrongFixerAgent`). Under the old call-based ceiling a
- *  Claude fixer that batched 9 reads into one turn spent 40 units in 5 turns. */
+ *  Claude fixer that batched 9 reads into one turn spent 40 units in 5 turns.
+ *
+ *  Plan 24 B2: reduced from 40 to 18 — the strong fixer rarely needs more than
+ *  a dozen turns, and runaway fixers waste budget on branches that cannot close. */
 export const STRONG_FIXER_MAX_TOOL_CALLS =
-    parseInt(process.env.STRONG_FIXER_MAX_TOOL_CALLS ?? '40', 10);
+    parseInt(process.env.STRONG_FIXER_MAX_TOOL_CALLS ?? '18', 10);
+
+/** Input-token ceiling for the strong fixer agent (default: 250 000).
+ *  Plan 24 B2: prevents runaway context growth in the fixer pass. */
+export const STRONG_FIXER_MAX_INPUT_TOKENS =
+    parseInt(process.env.STRONG_FIXER_MAX_INPUT_TOKENS ?? '250000', 10);
 
 /**
  * PR exhaustion strategy — controls what happens when max review iterations are reached:

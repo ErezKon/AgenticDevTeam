@@ -38,18 +38,44 @@ import {
 } from '@langchain/core/messages';
 import { HISTORY_KEEP_RECENT_TURNS } from '../../config';
 import { findTurnBoundary } from './history-compactor';
+import { getLogger } from '../../utils/logger';
+
+const cacheLog = getLogger('[prompt-cache]', 226);
 
 /** Anthropic's hard limit on `cache_control` breakpoints per request. */
 export const MAX_CACHE_BREAKPOINTS = 4;
 
+// ─── Model-aware cache minimums (Plan 24, C2) ──────────────────────────────
+
 /**
- * Minimum characters a block must carry to be worth a breakpoint. Anthropic
- * charges a 1.25x surcharge on cache writes and will not cache prefixes below
- * ~1024 tokens for most models, so marking tiny blocks is a pure loss.
+ * Minimum token count for a cacheable prefix, by model family.
+ * Anthropic documents different minimums per model tier.
  */
-const MIN_CACHEABLE_CHARS = 2000;
+export const CACHE_MIN_TOKENS_BY_FAMILY: Record<string, number> = {
+    haiku: 2048,
+    sonnet: 1024,
+    opus: 1024,
+};
+
+/**
+ * Return the minimum cacheable token count for a model name.
+ * Matches model name against known family patterns; defaults to 1024.
+ */
+export function getMinCacheableTokens(model: string): number {
+    const lower = model.toLowerCase();
+    for (const [family, minTokens] of Object.entries(CACHE_MIN_TOKENS_BY_FAMILY)) {
+        if (lower.includes(family)) return minTokens;
+    }
+    return 1024;
+}
+
+/** Rough chars-per-token estimate for the minimum check. */
+const CHARS_PER_TOKEN_ESTIMATE = 4;
 
 const EPHEMERAL = { type: 'ephemeral' as const };
+
+/** Set of agent IDs for which we have already logged breakpoint placement. */
+const _breakpointLoggedAgents = new Set<string>();
 
 // ─── Block helpers ──────────────────────────────────────────────────────────
 
@@ -92,14 +118,49 @@ function blocksWithTrailingBreakpoint(content: unknown): TextBlock[] | null {
  * caches the tool schemas *and* the persona *and* the injected response schema —
  * the fixed preamble that dominates input cost.
  *
+ * Plan 24, C2: accepts `model` and `tools` parameters. The minimum threshold is
+ * model-aware and the combined char count of tools + system message is checked
+ * (not just the system message alone) because tools are serialised first and
+ * form part of the cached prefix.
+ *
  * Returns the original message when it is too small to be worth caching or
  * already carries a breakpoint.
  */
-export function withSystemCacheBreakpoint(systemMessage: SystemMessage): SystemMessage {
-    if (contentChars(systemMessage.content) < MIN_CACHEABLE_CHARS) return systemMessage;
+export function withSystemCacheBreakpoint(
+    systemMessage: SystemMessage,
+    opts?: { model?: string; tools?: unknown[]; agentId?: string },
+): SystemMessage {
+    const model = opts?.model ?? '';
+    const agentId = opts?.agentId ?? '';
+    const minTokens = getMinCacheableTokens(model);
+    const minChars = minTokens * CHARS_PER_TOKEN_ESTIMATE;
+
+    // Plan 24, C2: count tools + system message content together
+    const systemChars = contentChars(systemMessage.content);
+    const toolsChars = opts?.tools?.length ? JSON.stringify(opts.tools).length : 0;
+    const combinedChars = systemChars + toolsChars;
+
+    if (combinedChars < minChars) {
+        if (agentId && !_breakpointLoggedAgents.has(`sys:${agentId}`)) {
+            _breakpointLoggedAgents.add(`sys:${agentId}`);
+            cacheLog.debug(
+                `${agentId}: system breakpoint skipped — combined ${combinedChars} chars < ${minChars} min `
+                + `(model="${model}", family min=${minTokens} tokens)`,
+            );
+        }
+        return systemMessage;
+    }
     if (hasCacheControl(systemMessage.content)) return systemMessage;
     const blocks = blocksWithTrailingBreakpoint(systemMessage.content);
     if (!blocks) return systemMessage;
+
+    if (agentId && !_breakpointLoggedAgents.has(`sys:${agentId}`)) {
+        _breakpointLoggedAgents.add(`sys:${agentId}`);
+        cacheLog.debug(
+            `${agentId}: system breakpoint placed — combined ${combinedChars} chars >= ${minChars} min `
+            + `(system=${systemChars}, tools=${toolsChars}, model="${model}")`,
+        );
+    }
     return new SystemMessage({ content: blocks as any });
 }
 
@@ -111,19 +172,26 @@ export function withSystemCacheBreakpoint(systemMessage: SystemMessage): SystemM
  * Operates on a copy — the persisted graph state is never mutated, matching the
  * invariant of `compactHistory` and `sanitizeStreamingContentBlocks`.
  *
+ * Plan 24, C2: accepts `model` for model-aware minimum threshold.
+ *
  * @param budget breakpoints still available after the system message.
  */
 export function withMessageCacheBreakpoints(
     messages: BaseMessage[],
     budget: number = MAX_CACHE_BREAKPOINTS - 1,
+    opts?: { model?: string; agentId?: string },
 ): { messages: BaseMessage[]; breakpoints: number } {
     if (budget <= 0 || messages.length === 0) return { messages, breakpoints: 0 };
+
+    const model = opts?.model ?? '';
+    const minTokens = getMinCacheableTokens(model);
+    const minChars = minTokens * CHARS_PER_TOKEN_ESTIMATE;
 
     const targets = new Set<number>();
 
     // 1. The first human message — the task and its context.
     const firstHuman = messages.findIndex(isHumanMessage);
-    if (firstHuman >= 0 && contentChars(messages[firstHuman].content) >= MIN_CACHEABLE_CHARS) {
+    if (firstHuman >= 0 && contentChars(messages[firstHuman].content) >= minChars) {
         targets.add(firstHuman);
     }
 
@@ -134,7 +202,7 @@ export function withMessageCacheBreakpoints(
         for (let i = Math.min(boundary, messages.length) - 1; i > firstHuman; i--) {
             const m = messages[i];
             if (!isAIMessage(m)) continue;
-            if (contentChars(m.content) < MIN_CACHEABLE_CHARS) continue;
+            if (contentChars(m.content) < minChars) continue;
             targets.add(i);
             break;
         }

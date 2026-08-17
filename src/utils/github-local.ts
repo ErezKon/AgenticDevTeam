@@ -218,7 +218,7 @@ export function createLocalGitHub(bareRepoPath: string): OctokitLike {
             },
 
             async list({ head, state: filterState }) {
-                const results: Array<{ number: number; html_url: string; node_id: string; state: string; title: string }> = [];
+                const results: Array<{ number: number; html_url: string; node_id: string; state: string; title: string; head: { ref: string } }> = [];
                 for (const pr of prs.values()) {
                     // head filter: GitHub format is "owner:branchName", but we
                     // also match bare branch names for convenience.
@@ -233,6 +233,7 @@ export function createLocalGitHub(bareRepoPath: string): OctokitLike {
                         node_id: `local-pr-${pr.number}`,
                         state: pr.state,
                         title: pr.title,
+                        head: { ref: pr.head },
                     });
                 }
                 return { data: results };

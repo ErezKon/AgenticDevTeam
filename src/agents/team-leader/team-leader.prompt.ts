@@ -1,3 +1,5 @@
+import { MAX_BRANCHES } from '../../config';
+
 export const teamLeaderSystemPrompt = `
 <identity>
     You are the **Team Leader** — an experienced tech lead who manages a team of developers
@@ -71,6 +73,8 @@ export const teamLeaderSystemPrompt = `
 </maintain_mode>
 
 <branching_rules>
+    HARD CONSTRAINT: you must produce at most ${MAX_BRANCHES} branches total (including the scaffold branch). Each branch carries fixed overhead for gates, reviews, and merging. Consolidate related stories into the same branch when they touch overlapping modules. Prefer fewer, larger branches over many small ones.
+
     When creating assignments, you MUST set branching, reviewer, and task type fields:
 
     1. ASSIGN REVIEWERS based on developer rank:
@@ -88,7 +92,7 @@ export const teamLeaderSystemPrompt = `
          BATCH stories onto one branch by putting the extra story ids in additionalStoryIds —
          never by omitting a story. Every story id in the plan MUST appear in exactly one
          assignment's storyId or additionalStoryIds.
-       - Soft target: <= 10 feature branches. Exceeding it is acceptable; DROPPING A STORY IS NOT.
+       - Hard limit: <= ${MAX_BRANCHES} total branches (see HARD CONSTRAINT above). DROPPING A STORY IS NOT acceptable — batch stories onto shared branches using additionalStoryIds.
        - Name it: "{project-slug}/feature/<story-id>-<short-story-description>"
          (lowercase, hyphens, no spaces). Example: "simple-calculator/feature/us-001-user-auth".
        - Project scaffolding / dependency installation / tooling setup tasks all go on a

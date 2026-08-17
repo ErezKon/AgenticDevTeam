@@ -75,6 +75,23 @@ export function _resetCompactionStats(): void {
     _cumulative = { invocations: 0, totalOriginal: 0, totalCompacted: 0, toolStubs: 0, writeStubs: 0 };
 }
 
+// ─── Compaction memoisation (Plan 24, C1) ───────────────────────────────────
+//
+// Once a message has been rendered as an elision marker, the marker bytes must
+// be identical on every subsequent turn — otherwise the Anthropic prompt cache
+// prefix is invalidated each time the recent window slides forward.  A
+// module-level Map keyed by message id (or a synthetic key) stores the first
+// rendering and reuses it verbatim.
+
+let _compactionMemo: Map<string, string> = new Map();
+let _memoThreadId: string = '';
+
+/** Clear the memoisation cache (exposed for testing). */
+export function _resetCompactionMemo(): void {
+    _compactionMemo = new Map();
+    _memoThreadId = '';
+}
+
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 /** Measure the character length of a message's serialisable content. */
@@ -110,12 +127,23 @@ function elisionMarker(chars: number, what: string): string {
 /**
  * Replace any string arg value longer than ELIDE_ARG_THRESHOLD with an elision
  * marker. Preserves short args (e.g. filePath) verbatim.
+ *
+ * Plan 24, C1: each elided arg is memoised by `memoKey + argName` so the
+ * Anthropic cache prefix stays byte-stable across turns.
  */
-function elideBigArgs(args: Record<string, unknown>): Record<string, unknown> {
+function elideBigArgs(args: Record<string, unknown>, memoKey: string): Record<string, unknown> {
     const result: Record<string, unknown> = {};
     for (const [key, value] of Object.entries(args)) {
         if (typeof value === 'string' && value.length > ELIDE_ARG_THRESHOLD) {
-            result[key] = elisionMarker(value.length, `the "${key}" argument`);
+            const argMemoKey = `${memoKey}::arg::${key}`;
+            const cached = _compactionMemo.get(argMemoKey);
+            if (cached !== undefined) {
+                result[key] = cached;
+            } else {
+                const marker = elisionMarker(value.length, `the "${key}" argument`);
+                _compactionMemo.set(argMemoKey, marker);
+                result[key] = marker;
+            }
         } else {
             result[key] = value;
         }
@@ -126,13 +154,22 @@ function elideBigArgs(args: Record<string, unknown>): Record<string, unknown> {
 /**
  * Build a one-line stub for a ToolMessage, preserving the tool name
  * and the original content size so the model knows what was there.
+ *
+ * Plan 24, C1: the stub is memoised by message key so that the same message
+ * always produces the exact same bytes, keeping the Anthropic cache prefix
+ * stable as the recent window slides.
  */
-function stubToolContent(m: ToolMessage): string {
+function stubToolContent(m: ToolMessage, memoKey: string): string {
+    const cached = _compactionMemo.get(memoKey);
+    if (cached !== undefined) return cached;
+
     const contentLen = typeof m.content === 'string'
         ? m.content.length
         : JSON.stringify(m.content).length;
     const name = m.name ?? 'unknown_tool';
-    return elisionMarker(contentLen, `the ${name} result`);
+    const stub = elisionMarker(contentLen, `the ${name} result`);
+    _compactionMemo.set(memoKey, stub);
+    return stub;
 }
 
 // ─── Streaming content-block sanitiser (Plan 21, E1) ────────────────────────
@@ -288,12 +325,20 @@ export function normaliseAIMessageForState<T>(message: T): T {
  */
 export function compactHistory(
     messages: BaseMessage[],
-    opts?: { keepRecent?: number; maxChars?: number; keepRecentTurns?: number; keepRecentWriteArgs?: number },
+    opts?: { keepRecent?: number; maxChars?: number; keepRecentTurns?: number; keepRecentWriteArgs?: number; threadId?: string },
 ): { messages: BaseMessage[]; stats: CompactionStats } {
     const keepRecent = opts?.keepRecent ?? HISTORY_KEEP_RECENT_TOOL_RESULTS;
     const keepRecentTurns = opts?.keepRecentTurns ?? HISTORY_KEEP_RECENT_TURNS;
     const keepRecentWriteArgs = opts?.keepRecentWriteArgs ?? HISTORY_KEEP_RECENT_WRITE_ARGS;
     const maxChars = opts?.maxChars ?? HISTORY_MAX_CHARS;
+
+    // Plan 24, C1: clear the memoisation cache when the thread changes so
+    // different invocations do not share stale elision markers.
+    const threadId = opts?.threadId ?? '';
+    if (threadId && threadId !== _memoThreadId) {
+        _compactionMemo.clear();
+        _memoThreadId = threadId;
+    }
 
     const originalChars = messages.reduce((sum, m) => sum + messageChars(m), 0);
     let toolResultsStubbed = 0;
@@ -335,11 +380,14 @@ export function compactHistory(
 
         // Rule 2: Stub older ToolMessages
         if (isToolMessage(m)) {
-            const stub = stubToolContent(m as ToolMessage);
+            // Plan 24, C1: use message id (or tool_call_id + index) as memo key
+            const tm = m as ToolMessage;
+            const memoKey = tm.id ?? `tool::${tm.tool_call_id}::${i}`;
+            const stub = stubToolContent(tm, memoKey);
             compacted.push(new ToolMessage({
                 content: stub,
-                tool_call_id: (m as ToolMessage).tool_call_id,
-                name: (m as ToolMessage).name,
+                tool_call_id: tm.tool_call_id,
+                name: tm.name,
             }));
             toolResultsStubbed++;
             continue;
@@ -352,8 +400,11 @@ export function compactHistory(
                 continue;
             }
             let anyElided = false;
-            const elidedToolCalls = m.tool_calls.map(tc => {
-                const elidedArgs = elideBigArgs(tc.args as Record<string, unknown>);
+            // Plan 24, C1: memo key per AI message + tool call index
+            const aiMemoBase = m.id ?? `ai::${i}`;
+            const elidedToolCalls = m.tool_calls.map((tc, tcIdx) => {
+                const tcMemoKey = `${aiMemoBase}::tc::${tcIdx}`;
+                const elidedArgs = elideBigArgs(tc.args as Record<string, unknown>, tcMemoKey);
                 if (JSON.stringify(elidedArgs) !== JSON.stringify(tc.args)) {
                     anyElided = true;
                 }

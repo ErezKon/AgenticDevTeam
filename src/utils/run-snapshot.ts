@@ -9,7 +9,7 @@ import * as path from 'path';
 import { getLogger } from './logger';
 import { tokenTracker } from './token-tracker';
 import { getBudgetStatus } from './run-budget';
-import { getRecentEvents } from './event-bus';
+import { getRecentEvents, type RunEvent } from './event-bus';
 
 const log = getLogger('[RunSnapshot]', 214);
 
@@ -143,6 +143,150 @@ export interface RunManifest {
     phantomFileChanges?: number;
     /** Count of distinct files actually present on disk at finalize time. */
     filesDelivered?: number;
+
+    // ── PR & branch counters (Sub-Plan G) ────────────────────────────────
+    /** PRs created in this run (de-duplicated by prNumber+branchName). */
+    prsCreated?: number;
+    /** PRs reused from a previous run (same branch re-opened). */
+    prsReused?: number;
+    /** PRs merged successfully. */
+    prsMerged?: number;
+    /** PRs blocked (could not merge). */
+    prsBlocked?: number;
+    /** Branches salvaged (failed to merge but patches exported). */
+    branchesSalvaged?: number;
+    /** Branches deferred (not attempted in this run). */
+    branchesDeferred?: number;
+    /** Branches where no PR was attempted. */
+    branchesNotAttempted?: number;
+
+    // ── Phase timeline (Sub-Plan G4) ─────────────────────────────────────
+    /** Per-phase start/end timestamps and duration. */
+    phaseTimeline?: Array<{
+        phase: string;
+        startedAt: string;
+        endedAt: string;
+        durationMs: number;
+    }>;
+}
+
+// ─── PR de-duplication (Sub-Plan G2) ────────────────────────────────────────
+
+export interface PRCountsInput {
+    prsCreated: number;
+    prsReused: number;
+    prsMerged: number;
+    prsBlocked: number;
+}
+
+/**
+ * De-duplicate PRs by (prNumber, branchName) and count by status.
+ * Entries with prNumber === 0 are internal placeholders (PR-SKIPPED-*) and are excluded.
+ */
+export function countPRsByStatus(pullRequests: Array<{
+    prNumber: number;
+    branchName: string;
+    status: string;
+    id?: string;
+}>): PRCountsInput {
+    // De-duplicate by (prNumber, branchName) — keep the last entry per pair
+    const seen = new Map<string, { status: string; prNumber: number }>();
+    for (const pr of pullRequests) {
+        if (pr.prNumber === 0) continue; // skip internal placeholders
+        const key = `${pr.prNumber}:${pr.branchName}`;
+        seen.set(key, { status: pr.status, prNumber: pr.prNumber });
+    }
+
+    let created = 0;
+    let reused = 0;
+    let merged = 0;
+    let blocked = 0;
+
+    // Track which prNumbers we've already counted as "created"
+    const seenNumbers = new Set<number>();
+    for (const [, pr] of seen) {
+        if (seenNumbers.has(pr.prNumber)) {
+            reused++;
+        } else {
+            created++;
+            seenNumbers.add(pr.prNumber);
+        }
+        if (pr.status === 'merged') merged++;
+        if (pr.status === 'blocked') blocked++;
+    }
+
+    return { prsCreated: created, prsReused: reused, prsMerged: merged, prsBlocked: blocked };
+}
+
+// ─── Phase timeline extraction (Sub-Plan G4) ────────────────────────────────
+
+export interface PhaseTimelineEntry {
+    phase: string;
+    startedAt: string;
+    endedAt: string;
+    durationMs: number;
+}
+
+/** Extract a phase timeline from run events (phase:start / phase:end pairs). */
+export function extractPhaseTimeline(events: RunEvent[]): PhaseTimelineEntry[] {
+    const starts = new Map<string, string>();
+    const timeline: PhaseTimelineEntry[] = [];
+
+    for (const e of events) {
+        const phase = e.payload?.phase as string | undefined;
+        if (!phase) continue;
+        if (e.type === 'phase:start') {
+            starts.set(phase, e.ts);
+        } else if (e.type === 'phase:end') {
+            const startTs = starts.get(phase);
+            if (startTs) {
+                const durationMs = new Date(e.ts).getTime() - new Date(startTs).getTime();
+                timeline.push({ phase, startedAt: startTs, endedAt: e.ts, durationMs });
+            }
+        }
+    }
+
+    return timeline;
+}
+
+/** Render a phase timeline as a human-readable text block. */
+export function renderPhaseTimeline(timeline: PhaseTimelineEntry[]): string {
+    if (timeline.length === 0) return '';
+    const lines = ['Phase Timeline:'];
+    // Find longest phase name for alignment
+    const maxLen = Math.max(...timeline.map(t => t.phase.length));
+    for (const t of timeline) {
+        const pad = ' '.repeat(maxLen - t.phase.length);
+        const start = new Date(t.startedAt).toLocaleTimeString('en-GB', { hour12: false });
+        const end = new Date(t.endedAt).toLocaleTimeString('en-GB', { hour12: false });
+        const durSec = Math.round(t.durationMs / 1000);
+        lines.push(`  ${t.phase}:${pad} ${start} → ${end} (${durSec}s)`);
+    }
+    return lines.join('\n');
+}
+
+// ─── Manifest counter assertion (Sub-Plan G1) ──────────────────────────────
+
+/**
+ * Compare counters between the manifest and externally-derived values.
+ * Logs a warning for each mismatch. Returns the number of disagreements.
+ */
+function assertCountersAgree(
+    label: string,
+    manifest: Record<string, number>,
+    derived: Record<string, number>,
+): number {
+    let disagreements = 0;
+    for (const [key, derivedVal] of Object.entries(derived)) {
+        const manifestVal = manifest[key];
+        if (manifestVal !== undefined && manifestVal !== derivedVal) {
+            log.warn(
+                `Counter mismatch [${label}] ${key}: manifest=${manifestVal}, derived=${derivedVal}`,
+            );
+            disagreements++;
+        }
+    }
+    return disagreements;
 }
 
 /**
@@ -159,6 +303,11 @@ export function writeRunManifest(
         verification?: RunManifest['verification'];
         phantomFileChanges?: number;
         filesDelivered?: number;
+        prCounts?: PRCountsInput;
+        branchesSalvaged?: number;
+        branchesDeferred?: number;
+        branchesNotAttempted?: number;
+        phaseTimeline?: PhaseTimelineEntry[];
     },
 ): string | null {
     try {
@@ -226,6 +375,40 @@ export function writeRunManifest(
         }
         if (opts?.filesDelivered !== undefined) {
             manifest.filesDelivered = opts.filesDelivered;
+        }
+
+        // ── PR & branch counters (Sub-Plan G1/G2) ───────────────────────
+        if (opts?.prCounts) {
+            manifest.prsCreated = opts.prCounts.prsCreated;
+            manifest.prsReused = opts.prCounts.prsReused;
+            manifest.prsMerged = opts.prCounts.prsMerged;
+            manifest.prsBlocked = opts.prCounts.prsBlocked;
+        }
+        if (opts?.branchesSalvaged !== undefined) {
+            manifest.branchesSalvaged = opts.branchesSalvaged;
+        }
+        if (opts?.branchesDeferred !== undefined) {
+            manifest.branchesDeferred = opts.branchesDeferred;
+        }
+        if (opts?.branchesNotAttempted !== undefined) {
+            manifest.branchesNotAttempted = opts.branchesNotAttempted;
+        }
+
+        // ── Phase timeline (Sub-Plan G4) ────────────────────────────────
+        const timeline = opts?.phaseTimeline ?? extractPhaseTimeline(events);
+        if (timeline.length > 0) {
+            manifest.phaseTimeline = timeline;
+        }
+
+        // ── Counter assertion (Sub-Plan G1) ─────────────────────────────
+        // Verify the manifest's counts agree with separately-derived values.
+        if (opts?.prCounts) {
+            const derivedPrTotal = opts.prCounts.prsCreated + opts.prCounts.prsReused;
+            assertCountersAgree('PR counts', {
+                pullRequests: manifest.counts.pullRequests,
+            }, {
+                pullRequests: derivedPrTotal,
+            });
         }
 
         const dest = path.join(outputPath, 'run-manifest.json');

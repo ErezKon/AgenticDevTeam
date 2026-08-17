@@ -24,6 +24,13 @@
 import type { StructuredToolInterface } from '@langchain/core/tools';
 import { tool } from '@langchain/core/tools';
 import { getLogger } from '../../utils/logger';
+import { MAX_TURN_TOOL_RESULT_CHARS, SHELL_READ_MAX_FILES } from '../../config';
+import {
+    branchReadCacheHit,
+    branchReadCacheStore,
+    branchReadCacheInvalidate,
+    branchReadCacheInvalidateFile,
+} from './branch-read-cache';
 
 const guardLog = getLogger('[loop-guard]', 226);
 
@@ -70,6 +77,56 @@ function classifyTool(name: string): ToolCategory {
     if (MUTATING_TOOL_NAMES.has(name)) return 'write';
     if (SHELL_TOOL_NAMES.has(name)) return 'shell';
     return 'read';
+}
+
+// ─── Shell read detection (Plan 24, C5) ─────────────────────────────────────
+
+/**
+ * Regex patterns for shell commands that are pure reads.
+ * These commands only read files and should be classified as 'read' for
+ * budget purposes, not 'shell'.
+ */
+const SHELL_READ_PATTERNS: RegExp[] = [
+    /^\s*cat\b/,
+    /^\s*head\b/,
+    /^\s*tail\b/,
+    /^\s*sed\s+-n\b/,
+    /^\s*less\b/,
+    /^\s*find\b.*-name\b/,
+];
+
+/**
+ * Returns true if a `run_command` command string is a pure read (cat, head,
+ * tail, sed -n, less, find ... -name).
+ */
+function isShellReadCommand(command: string): boolean {
+    // Handle pipes: check each segment; ALL must be reads
+    const segments = command.split(/\|/).map(s => s.trim());
+    return segments.every(seg => SHELL_READ_PATTERNS.some(p => p.test(seg)));
+}
+
+/**
+ * Count distinct files touched by cat/head chains in a command.
+ * Returns the number of file arguments.
+ */
+function countShellReadFiles(command: string): number {
+    // Extract non-flag arguments from cat/head/tail commands
+    const files = new Set<string>();
+    const segments = command.split(/[|;]/).map(s => s.trim());
+    for (const seg of segments) {
+        const match = seg.match(/^\s*(cat|head|tail)\s+(.+)$/);
+        if (!match) continue;
+        const args = match[2].split(/\s+/).filter(a => !a.startsWith('-') && a.length > 0);
+        for (const a of args) files.add(a);
+    }
+    return files.size;
+}
+
+/**
+ * Normalise a shell read command for caching — strips whitespace variations.
+ */
+function normaliseShellReadCommand(command: string): string {
+    return command.replace(/\s+/g, ' ').trim();
 }
 
 // ─── Errors ─────────────────────────────────────────────────────────────────
@@ -231,6 +288,11 @@ export function withLoopGuard(
     let lastTurnKey: string | null = null;
     let lastTurnAt = 0;
 
+    // ── Per-turn aggregate tool-result budget (Plan 24, C4) ──────────────
+    /** Accumulated result chars in the current turn, per turn key. */
+    const turnResultChars = new Map<string, number>();
+    let turnResultsShrunkLogged = false;
+
     // Legacy mode: if no budgets, use maxTotalCalls as a flat ceiling
     const legacyMaxCalls = budgets ? null : (options.maxTotalCalls ?? 22);
 
@@ -277,7 +339,8 @@ export function withLoopGuard(
     }
 
     /**
-     * Register the model turn this call belongs to.
+     * Register the model turn this call belongs to and return a stable
+     * turn key for per-turn budget tracking (Plan 24, C4).
      *
      * LangGraph exposes a per-step identifier in `config.metadata.langgraph_step`;
      * one ToolNode execution == one model turn, so it is an exact turn key.  When
@@ -285,18 +348,19 @@ export function withLoopGuard(
      * time-window batching: parallel calls from one turn all arrive within a few
      * milliseconds of each other.
      */
-    function registerTurn(config: unknown): void {
+    function registerTurn(config: unknown): string {
         const key = turnKeyFromConfig(config);
         const now = Date.now();
         if (key !== null) {
             if (key !== lastTurnKey) { turns++; lastTurnKey = key; lastTurnAt = now; }
-            return;
+            return key;
         }
         if (lastTurnAt === 0 || now - lastTurnAt > TURN_BATCH_WINDOW_MS) {
             turns++;
-            lastTurnKey = null;
+            lastTurnKey = `time:${now}`;
         }
         lastTurnAt = now;
+        return lastTurnKey ?? `time:${now}`;
     }
 
     /** Soft-pressure footer appended to successful tool results (Plan 22 A3). */
@@ -325,6 +389,37 @@ export function withLoopGuard(
         return `${JSON.stringify(result)}${footer}`;
     }
 
+    /**
+     * Plan 24, C4: enforce per-turn aggregate tool-result budget.
+     * If the accumulated result chars for this turn exceed MAX_TURN_TOOL_RESULT_CHARS,
+     * proportionally shrink this result to fit, with a 1500-char floor.
+     */
+    const TURN_RESULT_FLOOR = 1500;
+    function applyTurnResultBudget(result: unknown, turnKey: string): unknown {
+        if (MAX_TURN_TOOL_RESULT_CHARS <= 0) return result;
+        const resultStr = typeof result === 'string' ? result : JSON.stringify(result);
+        const resultLen = resultStr.length;
+
+        const accumulated = turnResultChars.get(turnKey) ?? 0;
+        const newTotal = accumulated + resultLen;
+        turnResultChars.set(turnKey, newTotal);
+
+        if (newTotal <= MAX_TURN_TOOL_RESULT_CHARS) return result;
+
+        // Budget exceeded — shrink this result proportionally
+        const remaining = Math.max(0, MAX_TURN_TOOL_RESULT_CHARS - accumulated);
+        const allowedLen = Math.max(TURN_RESULT_FLOOR, remaining);
+        if (allowedLen >= resultLen) return result;
+
+        const truncated = resultStr.slice(0, allowedLen)
+            + `\n[turn budget: result shrunk from ${resultLen} to ${allowedLen} chars]`;
+        if (!turnResultsShrunkLogged) {
+            turnResultsShrunkLogged = true;
+            guardLog.info(`${agentId}: per-turn tool result budget exceeded — shrinking results`);
+        }
+        return truncated;
+    }
+
     // ── Terminal guidance message ────────────────────────────────────────
     function exhaustedMessage(): string {
         return JSON.stringify({
@@ -336,14 +431,43 @@ export function withLoopGuard(
         });
     }
 
+    // Plan 24, C5: shell read command cache (keyed by normalised command)
+    const shellReadCache = new Map<string, string>();
+
     const wrappedTools = tools.map((originalTool) => {
         const wrappedFn = async (args: Record<string, any>, config?: unknown) => {
             const toolName = originalTool.name;
-            const category = classifyTool(toolName);
+            let category = classifyTool(toolName);
             const argSig = JSON.stringify(args);
             const key = `${toolName}::${argSig}`;
 
-            registerTurn(config);
+            // Plan 24, C6: extract read_file path for branch-scoped cache (checked post-exec)
+            const readFilePath = toolName === 'read_file' ? (args.filePath ?? args.path ?? '') as string : '';
+
+            // Plan 24, C5: reclassify pure-read shell commands as 'read'
+            const commandStr = toolName === 'run_command' ? (args.command ?? args.cmd ?? '') as string : '';
+            const isShellRead = toolName === 'run_command' && commandStr && isShellReadCommand(commandStr);
+            if (isShellRead) {
+                // Check file count limit
+                const fileCount = countShellReadFiles(commandStr);
+                if (fileCount > SHELL_READ_MAX_FILES) {
+                    return JSON.stringify({
+                        error: `This command reads ${fileCount} files (limit: ${SHELL_READ_MAX_FILES}). `
+                            + 'Use read_file instead for individual files.',
+                    });
+                }
+                category = 'read';
+
+                // Return cached result if available
+                const normCmd = normaliseShellReadCommand(commandStr);
+                const cachedResult = shellReadCache.get(normCmd);
+                if (cachedResult !== undefined) {
+                    guardLog.debug(`${agentId}: shell read cache hit for "${normCmd.slice(0, 60)}"`);
+                    return `[CACHED — identical to your earlier call. Do not call this again.]\n${cachedResult}`;
+                }
+            }
+
+            const currentTurnKey = registerTurn(config);
 
             // Fast path: if all budgets exhausted, return terminal guidance
             if (isExhausted()) {
@@ -378,13 +502,21 @@ export function withLoopGuard(
                 const ownCount = callCounts.get(key) ?? 0;
                 callCounts.clear();
                 resultCache.clear();
+                shellReadCache.clear(); // Plan 24, C5: clear shell read cache on mutation
+                // Plan 24, C6: invalidate branch-scoped read cache for this worktree
+                branchReadCacheInvalidate(agentId);
+                // If a specific file is being mutated, also invalidate it precisely
+                const mutatedFile = (args.filePath ?? args.path ?? '') as string;
+                if (mutatedFile) branchReadCacheInvalidateFile(agentId, mutatedFile);
                 if (ownCount > 0) callCounts.set(key, ownCount);
                 // Track progress
                 recentWriteCount++;
             }
 
-            if (SHELL_TOOL_NAMES.has(toolName)) {
+            if (SHELL_TOOL_NAMES.has(toolName) && !isShellRead) {
                 resultCache.clear();
+                shellReadCache.clear(); // Plan 24, C5: mutating shell clears read cache
+                branchReadCacheInvalidate(agentId); // Plan 24, C6: shell mutation clears branch cache
             }
 
             // ── Repeat detection ─────────────────────────────────────────
@@ -486,14 +618,36 @@ export function withLoopGuard(
 
             // ── Execute the tool ─────────────────────────────────────────
             const result = await originalTool.invoke(args);
+            const resultStr = typeof result === 'string' ? result : JSON.stringify(result);
 
             // Cache the result for read-only tools
             if (CACHEABLE_TOOL_NAMES.has(toolName)) {
-                const resultStr = typeof result === 'string' ? result : JSON.stringify(result);
                 resultCache.set(key, resultStr);
             }
 
-            return withFooter(result);
+            // Plan 24, C5: cache shell read results by normalised command
+            if (isShellRead) {
+                const normCmd = normaliseShellReadCommand(commandStr);
+                shellReadCache.set(normCmd, resultStr);
+            }
+
+            // Plan 24, C6: branch-scoped read cache for read_file (full reads only)
+            // When content is unchanged since the last read, replace the bulky
+            // result with a compact marker.  The read still counts against the
+            // budget (the tool did execute), but the much-smaller response saves
+            // input tokens on subsequent turns.
+            if (toolName === 'read_file' && readFilePath && !args.offset && !args.limit) {
+                if (branchReadCacheHit(agentId, readFilePath, resultStr)) {
+                    guardLog.debug(`${agentId}: branch read cache hit for "${readFilePath}"`);
+                    return withFooter('[CACHED — file unchanged since your last read. Do not re-read.]');
+                }
+                // Store in cache for future comparisons
+                branchReadCacheStore(agentId, readFilePath, resultStr);
+            }
+
+            // Plan 24, C4: enforce per-turn aggregate tool-result budget
+            const budgeted = applyTurnResultBudget(result, currentTurnKey);
+            return withFooter(budgeted);
         };
 
         return tool(wrappedFn, {

@@ -15,12 +15,13 @@ import type { TokenCallRecord, RunUsageSummary, RunStatus, InvocationEfficiencyR
 import { tokenTracker } from './token-tracker';
 import { getCumulativeCompactionStats } from '../agents/_shared/history-compactor';
 import { getTruncationStats } from '../tools/_shared/truncate';
+import { estimateRunCost } from './cost';
 
 const log = getLogger('[TokenReport]', 220);
 
 // ─── Cost helper ────────────────────────────────────────────────────────────
 
-function estimateCost(model: string, inputTokens: number, outputTokens: number): number {
+function estimateCostLocal(model: string, inputTokens: number, outputTokens: number): number {
     const pricing = MODEL_PRICING[model];
     if (!pricing) return 0;
     return (inputTokens / 1000) * pricing.inputPer1k + (outputTokens / 1000) * pricing.outputPer1k;
@@ -95,7 +96,11 @@ function generateHtml(
     runStatus: RunStatus = 'completed',
 ): string {
     const agentRows = buildAgentCostRows(summary);
-    const totalCost = agentRows.reduce((s, r) => s + r.totalCost, 0);
+    const totalListCost = agentRows.reduce((s, r) => s + r.totalCost, 0);
+    // Plan 24, C3: cache-aware billed cost
+    const totalBilledCost = estimateRunCost(summary);
+    const totalCost = totalBilledCost;
+    const cacheSavings = totalListCost - totalBilledCost;
     const runDate = new Date().toISOString();
 
     // Prepare chart data as JSON for inline script
@@ -119,7 +124,7 @@ function generateHtml(
 
     // Build detail table rows
     const detailRows = records.map(r => {
-        const cost = estimateCost(r.model, r.inputTokens, r.outputTokens);
+        const cost = estimateCostLocal(r.model, r.inputTokens, r.outputTokens);
         return `<tr>
             <td>${escapeHtml(r.agentId)}</td>
             <td>${escapeHtml(r.phase)}</td>
@@ -160,7 +165,7 @@ function generateHtml(
 
     // Model table rows
     const modelTableRows = summary.byModel.map(r => {
-        const cost = estimateCost(r.model, r.inputTokens, r.outputTokens);
+        const cost = estimateCostLocal(r.model, r.inputTokens, r.outputTokens);
         return `<tr>
             <td>${escapeHtml(r.model)}</td>
             <td class="num">${r.callCount}</td>
@@ -500,6 +505,21 @@ ${invocationRows.length > 0 ? `<h2>Invocation Efficiency</h2>
     </thead>
     <tbody>${invocationTableRows}</tbody>
 </table>` : '<!-- No invocation data -->'}
+
+<!-- Billed vs List Cost (Plan 24, C3) -->
+${cacheSavings > 0.001 ? `<h2>Billed vs List Cost</h2>
+<table>
+    <thead>
+        <tr><th>Metric</th><th>Value</th></tr>
+    </thead>
+    <tbody>
+        <tr><td>List price (no cache discounts)</td><td class="num">${formatCost(totalListCost)}</td></tr>
+        <tr><td>Billed cost (cache-aware)</td><td class="num">${formatCost(totalBilledCost)}</td></tr>
+        <tr><td>Savings from prompt caching</td><td class="num">${formatCost(cacheSavings)} (${totalListCost > 0 ? ((cacheSavings / totalListCost) * 100).toFixed(1) : '0'}%)</td></tr>
+        <tr><td>Cache read tokens</td><td class="num">${formatNumber(summary.totalCacheReadTokens)}</td></tr>
+        <tr><td>Cache creation tokens</td><td class="num">${formatNumber(summary.totalCacheCreationTokens)}</td></tr>
+    </tbody>
+</table>` : '<!-- No cache savings to report -->'}
 
 <!-- History Compaction & Truncation -->
 ${(compaction.invocations > 0 || truncation.truncated > 0) ? `<h2>History Compaction &amp; Truncation</h2>

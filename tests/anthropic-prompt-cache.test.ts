@@ -83,12 +83,14 @@ describe('withSystemCacheBreakpoint (Plan 22 D1)', () => {
 // ─── D1: message breakpoints ────────────────────────────────────────────────
 
 describe('withMessageCacheBreakpoints (Plan 22 D1)', () => {
-    /** A history with 5 tool-calling turns and a large task message. */
+    /** A history with 5 tool-calling turns and a large task message.
+     *  AI message content must exceed the model-aware cache minimum
+     *  (Plan 24, C2: default 1024 tokens × ~4 chars/token = 4096 chars). */
     function history(): BaseMessage[] {
         const out: BaseMessage[] = [new HumanMessage(`## Architecture\n${big(8000)}`)];
         for (let t = 1; t <= 5; t++) {
             out.push(new AIMessage({
-                content: `reasoning ${t} ${big(3000)}`,
+                content: `reasoning ${t} ${big(5000)}`,
                 tool_calls: [{ id: `t${t}`, name: 'read_file', args: { filePath: `f${t}.ts` }, type: 'tool_call' }],
             }));
             out.push(new ToolMessage({ content: big(2000), tool_call_id: `t${t}`, name: 'read_file' }));

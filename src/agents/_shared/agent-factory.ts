@@ -186,7 +186,9 @@ export function buildAgent(apiKey: string, cfg: AgentConfig) {
             }
 
             if (HISTORY_COMPACTION_ENABLED) {
-                const { messages, stats } = compactHistory(incoming);
+                // Plan 24, C1: pass agent id as threadId so the compaction
+                // memo is scoped per agent instance and clears on respawn.
+                const { messages, stats } = compactHistory(incoming, { threadId: cfg.id });
                 recordCompaction(stats);
                 if (stats.originalChars !== stats.compactedChars) {
                     factoryLog.debug(
@@ -213,12 +215,17 @@ export function buildAgent(apiKey: string, cfg: AgentConfig) {
                 next.toolChoice = 'none';
             }
 
-            // ── Plan 22 D1: Anthropic prompt-cache breakpoints ───────────
+            // ── Plan 22 D1 + Plan 24 C2: Anthropic prompt-cache breakpoints
             if (cacheEligible) {
-                next.systemMessage = withSystemCacheBreakpoint(request.systemMessage);
+                next.systemMessage = withSystemCacheBreakpoint(request.systemMessage, {
+                    model: modelName,
+                    tools: next.tools,
+                    agentId: cfg.id,
+                });
                 const systemBreakpoints = next.systemMessage === request.systemMessage ? 0 : 1;
                 const cached = withMessageCacheBreakpoints(
                     next.messages, MAX_CACHE_BREAKPOINTS - systemBreakpoints,
+                    { model: modelName, agentId: cfg.id },
                 );
                 next.messages = cached.messages;
                 if (!cacheBreakpointsLogged) {

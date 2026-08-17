@@ -23,10 +23,12 @@ export type RunEventType =
     | 'phase:start' | 'phase:end'
     | 'agent:start' | 'agent:end' | 'agent:respawn' | 'agent:budget-exhausted'
     | 'tool:call'
-    | 'pr:opened' | 'pr:reviewed' | 'pr:merged' | 'pr:blocked' | 'pr:conflict' | 'pr:salvage' | 'pr:strong-fixer'
+    | 'pr:opened' | 'pr:reviewed' | 'pr:merged' | 'pr:blocked' | 'pr:conflict' | 'pr:salvage' | 'pr:strong-fixer' | 'pr:config-change-flagged'
     // Plan 22 G3: a branch is pushed long before its PR is opened. Without these
     // a pushed-but-PR-less branch is indistinguishable from a crashed run.
     | 'branch:pushed' | 'branch:pr-pending'
+    // Plan 24 D2: branch exceeded its per-branch cost or wall-time cap.
+    | 'branch:budget-exceeded'
     | 'gate:result'
     | 'acceptance:result'
     | 'plan:coverage'
@@ -40,6 +42,7 @@ export type RunEventType =
     | 'test-run:result'
     | 'salvage:written'
     | 'run:blocked'
+    | 'run:paused'
     | 'run:error'
     | 'tokens:update'
     | 'budget:level'

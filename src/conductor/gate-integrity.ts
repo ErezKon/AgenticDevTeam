@@ -15,7 +15,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import { getLogger } from '../utils/logger';
-import { GATE_INTEGRITY_MODE, REJECT_TRIVIAL_TESTS } from '../config';
+import { GATE_INTEGRITY_MODE, REJECT_TRIVIAL_TESTS, GATE_REACHABILITY_MIN_CLOSURE } from '../config';
 import type { StackRoot } from './quality-gates';
 
 const log = getLogger('[GateIntegrity]', 214);
@@ -51,7 +51,8 @@ export type TamperKind =
     | 'trivial-test-added'
     | 'typecheck-weakened'
     | 'lint-weakened'
-    | 'gitignore-widened';
+    | 'gitignore-widened'
+    | 'config-change-by-feature-branch';
 
 export interface TamperFinding {
     kind: TamperKind;
@@ -710,6 +711,15 @@ export function detectTrivialTests(
     // Compute reachable set from all entry points
     const reachable = computeReachable(importGraph, entryPoints, workspacePath);
 
+    // Plan 24 B4: skip import-graph checks when the reachable set is degenerate
+    // (covers fewer than GATE_REACHABILITY_MIN_CLOSURE product modules).
+    // A tiny closure means the resolver missed path aliases, barrel re-exports,
+    // or the project uses a framework that doesn't follow import conventions.
+    const skipReachabilityChecks = reachable.size < GATE_REACHABILITY_MIN_CLOSURE;
+    if (skipReachabilityChecks) {
+        log.info(`Reachability check skipped: entry closure is degenerate (${reachable.size} modules)`);
+    }
+
     for (const relTestFile of testFiles) {
         const absFile = path.join(workspacePath, relTestFile);
         let content: string;
@@ -737,6 +747,9 @@ export function detectTrivialTests(
             }
             continue;
         }
+
+        // Plan 24 B4: skip import-graph checks when entry closure is degenerate
+        if (skipReachabilityChecks) continue;
 
         // Rule 1: no-product-import
         const imports = extractImports(content);

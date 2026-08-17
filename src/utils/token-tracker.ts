@@ -323,6 +323,15 @@ class TokenTracker {
         return rows.sort((a, b) => b.invocations - a.invocations);
     }
 
+    /** Sum of input tokens for all calls tagged with a given invocation ID (Plan 24, D1). */
+    getInvocationInputTokens(invocationId: string): number {
+        let total = 0;
+        for (const r of this.ledger) {
+            if (r.invocationId === invocationId) total += r.inputTokens;
+        }
+        return total;
+    }
+
     /** Return the raw ledger as a serializable snapshot for state storage. */
     getSnapshot(): TokenCallRecord[] {
         return [...this.ledger];

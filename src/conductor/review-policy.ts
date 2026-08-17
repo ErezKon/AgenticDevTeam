@@ -203,7 +203,21 @@ export function selectEscalationCandidate(
     excludeIds: string[],
 ): string | null {
     const author = getDevAgent(authorId);
-    if (!author) return null;
+
+    // Plan 24 B1: if the authorId is not a valid dev agent (e.g. 'strong-fixer'),
+    // fall back to the first principal dev agent not in excludeIds.
+    if (!author) {
+        const excludeSet = new Set(excludeIds);
+        const fallback = DEV_AGENTS
+            .filter(a => !excludeSet.has(a.id) && a.rank === 'principal')
+            .sort((a, b) => a.id.localeCompare(b.id));
+        if (fallback.length > 0) return fallback[0].id;
+        // No principal available — pick any agent not excluded
+        const anyAgent = DEV_AGENTS
+            .filter(a => !excludeSet.has(a.id))
+            .sort((a, b) => a.id.localeCompare(b.id));
+        return anyAgent.length > 0 ? anyAgent[0].id : null;
+    }
 
     const rankOrder: Record<string, number> = { junior: 0, senior: 1, principal: 2 };
     const authorRank = rankOrder[author.rank] ?? 0;

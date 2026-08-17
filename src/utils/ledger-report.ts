@@ -196,17 +196,31 @@ export function renderRunReport(entries: LedgerEntry[], systemName: string): str
     const phaseEntries = entries.filter(e => e.kind === 'phase') as
         Extract<LedgerEntry, { kind: 'phase' }>[];
     const starts = new Map<string, string>();
+    // Collect completed phases for alignment padding
+    const completedPhases: Array<{ phase: string; startTs: string; endTs: string; durSec: string }> = [];
     for (const e of phaseEntries) {
         if (e.event === 'start') {
             starts.set(e.phase, e.t);
         } else if (e.event === 'end') {
             const start = starts.get(e.phase);
-            const dur = e.durationMs != null
-                ? `${(e.durationMs / 1000).toFixed(0)}s`
+            const durSec = e.durationMs != null
+                ? (e.durationMs / 1000).toFixed(0)
                 : start
-                ? `${((new Date(e.t).getTime() - new Date(start).getTime()) / 1000).toFixed(0)}s`
+                ? ((new Date(e.t).getTime() - new Date(start).getTime()) / 1000).toFixed(0)
                 : '?';
-            lines.push(`- ${e.phase}: ${dur}`);
+            const startTs = start ?? '?';
+            completedPhases.push({ phase: e.phase, startTs, endTs: e.t, durSec });
+        }
+    }
+    if (completedPhases.length > 0) {
+        const maxLen = Math.max(...completedPhases.map(p => p.phase.length));
+        const fmtTime = (iso: string): string => {
+            if (iso === '?') return '?';
+            return new Date(iso).toLocaleTimeString('en-GB', { hour12: false });
+        };
+        for (const p of completedPhases) {
+            const pad = ' '.repeat(maxLen - p.phase.length);
+            lines.push(`  ${p.phase}:${pad} ${fmtTime(p.startTs)} → ${fmtTime(p.endTs)} (${p.durSec}s)`);
         }
     }
     lines.push('');
