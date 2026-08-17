@@ -52,9 +52,12 @@ describe('selectEscalationCandidate', () => {
         expect(candidate).toBe('principal-frontend');
     });
 
-    it('returns null for unknown agent id', () => {
+    it('falls back to a principal for unknown agent id (Plan 24 B1)', () => {
+        // Plan 24 B1: unknown agents (e.g. 'strong-fixer') fall back to the
+        // first principal dev agent rather than returning null.
         const candidate = selectEscalationCandidate('nonexistent-agent', []);
-        expect(candidate).toBeNull();
+        expect(candidate).not.toBeNull();
+        expect(typeof candidate).toBe('string');
     });
 
     it('senior-backend escalates to principal-backend', () => {

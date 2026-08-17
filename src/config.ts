@@ -371,9 +371,11 @@ export const BUDGET_DEGRADE_AT =
 export const LLM_MAX_OUTPUT_TOKENS =
     parseInt(process.env.LLM_MAX_OUTPUT_TOKENS ?? '16000', 10);
 
-/** Output-token ceiling for planning agents (architect, PM, DBA, team-leader). Default 32 000. */
+/** Output-token ceiling for planning agents (architect, PM, DBA, team-leader). Default 64 000.
+ *  Raised from 32 000: PM on complex specs (e.g. Pac-Man, 35 stories + 66 tasks) hit the
+ *  ceiling at exactly 32 005 tokens, truncating the last task mid-word and crashing the run. */
 export const PLANNING_MAX_OUTPUT_TOKENS =
-    parseInt(process.env.PLANNING_MAX_OUTPUT_TOKENS ?? '32000', 10);
+    parseInt(process.env.PLANNING_MAX_OUTPUT_TOKENS ?? '64000', 10);
 
 /** Per-request LLM timeout (ms). The hardcoded 120 000 was too short for long planning generations. */
 export const LLM_REQUEST_TIMEOUT_MS =
@@ -901,16 +903,17 @@ export const SNAPSHOT_MAX_FILES =
     parseInt(process.env.SNAPSHOT_MAX_FILES ?? '400', 10);
 
 /**
- * Write agent mission reports and the architecture contract into the generated
- * project repo (Plan 22, G4).
+ * Write agent mission reports into the generated project repo (Plan 22, G4 revised).
  *
- * Default `false`: they go to `outputs/<run>/agents/` instead, and `docs/agents/`
- * + `.agent/` are gitignored in the product repo. Mission reports are pipeline
- * telemetry — committing them produced six `chore: pipeline artifacts` commits on
- * a single feature branch in the pacmanclaude run and put them in every PR diff.
+ * Default `true`: mission reports go to `docs/agents/` in the product repo.
+ * Reviewers are instructed to skip `docs/agents/*.md` files, so they stay
+ * available for cross-agent reference without adding reviewer noise.
+ *
+ * Set to `false` to redirect mission reports to `outputs/<run>/agents/` instead,
+ * and gitignore `docs/agents/` + `.agent/` in the product repo.
  */
 export const AGENT_ARTIFACTS_IN_REPO =
-    (process.env.AGENT_ARTIFACTS_IN_REPO ?? 'false') === 'true';
+    (process.env.AGENT_ARTIFACTS_IN_REPO ?? 'true') === 'true';
 
 /** Char budget for the injected workspace snapshot. */
 export const SNAPSHOT_MAX_CHARS =

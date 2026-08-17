@@ -6,6 +6,7 @@ import { z } from 'zod';
 import {
     parseAgentJson, detectTruncation,
     repairFieldViolations, buildRepairMessage,
+    trimTruncatedArrayTails,
 } from '../src/utils/structured-output';
 
 // ─── detectTruncation ───────────────────────────────────────────────────────
@@ -148,5 +149,59 @@ describe('buildRepairMessage', () => {
     it('omits raw JSON section when not provided', () => {
         const msg = buildRepairMessage('bad field', 'original');
         expect(msg).not.toContain('Your previous (invalid) JSON:');
+    });
+});
+
+// ─── trimTruncatedArrayTails ────────────────────────────────────────────────
+
+describe('trimTruncatedArrayTails', () => {
+    const TaskSchema = z.object({
+        id: z.string(),
+        title: z.string(),
+        layer: z.string(),
+        suggestedTech: z.string(),
+    });
+    const PMSchema = z.object({
+        userStories: z.array(z.object({ id: z.string(), title: z.string() })),
+        tasks: z.array(TaskSchema),
+    });
+
+    it('passes through valid data unchanged', () => {
+        const data = {
+            userStories: [{ id: 'US-001', title: 'Story 1' }],
+            tasks: [{ id: 'T-001', title: 'Task', layer: 'frontend', suggestedTech: 'React' }],
+        };
+        const result = trimTruncatedArrayTails(data, PMSchema);
+        expect(result.ok).toBe(true);
+        expect(result.trimmed).toHaveLength(0);
+    });
+
+    it('trims incomplete trailing task from truncated PM output', () => {
+        const data = {
+            userStories: [{ id: 'US-001', title: 'Story 1' }],
+            tasks: [
+                { id: 'T-001', title: 'Complete task', layer: 'frontend', suggestedTech: 'React' },
+                { id: 'T-002', title: 'Truncated', layer: undefined, suggestedTech: undefined },
+            ],
+        };
+        const result = trimTruncatedArrayTails(data, PMSchema);
+        expect(result.ok).toBe(true);
+        expect(result.trimmed).toHaveLength(1);
+        expect(result.trimmed[0].path).toBe('tasks');
+        expect(result.trimmed[0].removedCount).toBe(1);
+        expect((result.value as any).tasks).toHaveLength(1);
+        expect((result.value as any).tasks[0].id).toBe('T-001');
+    });
+
+    it('returns ok=false when errors are not at array tail', () => {
+        const data = {
+            userStories: [{ id: 'US-001', title: 'Story 1' }],
+            tasks: [
+                { id: 'T-001', title: 'Bad', layer: undefined, suggestedTech: undefined },
+                { id: 'T-002', title: 'Good', layer: 'backend', suggestedTech: 'Node' },
+            ],
+        };
+        const result = trimTruncatedArrayTails(data, PMSchema);
+        expect(result.ok).toBe(false);
     });
 });

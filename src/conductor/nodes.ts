@@ -68,7 +68,7 @@ import { getTruncationStats } from '../tools/_shared/truncate';
 import type { ContextSection } from './context-builder';
 import {
     parseAgentJson, validateAgentOutput, buildRepairMessage,
-    repairFieldViolations, extractAgentText,
+    repairFieldViolations, extractAgentText, trimTruncatedArrayTails,
     getValidationStats, logValidationStats,
     _recordValidated, _recordRepaired, _recordFailed,
 } from '../utils/structured-output';
@@ -477,6 +477,30 @@ async function invokeAgent(
             // No schema, JSON parsed fine — return as-is
             emitEnd();
             return { output: parsed, tokenUsage };
+        }
+
+        // ── Truncation recovery: trim incomplete trailing array elements ──
+        // When jsonrepair salvaged a truncated response, the last element(s)
+        // of arrays (e.g. tasks, userStories) are often incomplete — missing
+        // required fields. Rather than rejecting the entire 32K+ token output
+        // or burning LLM repair attempts, trim those incomplete tails.
+        if (parseResult.ok && parseResult.wasTruncated && schema && parsed !== undefined) {
+            const trimResult = trimTruncatedArrayTails(parsed, schema);
+            if (trimResult.ok && trimResult.trimmed.length > 0) {
+                _recordRepaired();
+                for (const t of trimResult.trimmed) {
+                    invokeLog.info(`Truncation recovery: trimmed ${t.removedCount} incomplete element(s) from "${t.path}" for "${threadSuffix}"`);
+                }
+                if (extraction.truncatedByTokenLimit) {
+                    invokeLog.warn(
+                        `Agent "${threadSuffix}" output was truncated by token limit — `
+                        + `accepted valid prefix after trimming ${trimResult.trimmed.length} array tail(s). `
+                        + `Consider raising PLANNING_MAX_OUTPUT_TOKENS if this repeats.`,
+                    );
+                }
+                emitEnd({ repaired: true, truncationRecovery: true });
+                return { output: trimResult.value, tokenUsage };
+            }
         }
 
         // ── Repair loop: fix JSON parse failures OR schema violations ─────

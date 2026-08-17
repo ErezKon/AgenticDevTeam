@@ -1128,3 +1128,17 @@ Key failure classes (all fixed by Plan 19 sub-plans 01-12):
     even when `verifyDeployment` returned `skipped`. (SP-11)
 12. **No observability.** Both runs saturated the 500-event buffer. Diagnosing required reading
     a 2.1 MB log line by line. (SP-12)
+
+Additional failure modes found in `pacmanclaude2` run (2026-08-17, fixed post-Plan 24):
+
+13. **Anthropic truncation not detected.** `extractAgentText()` only checked `response_metadata`
+    for `stop_reason`, but Anthropic's LangChain adapter puts it in `additional_kwargs`. PM hit
+    `max_tokens` at 32005 tokens without the system knowing. Fixed: also check `additional_kwargs.stop_reason`.
+14. **Planning token ceiling too low.** `PLANNING_MAX_OUTPUT_TOKENS=32000` was insufficient for
+    complex PM outputs (35 stories + 66 tasks for Pac-Man). Raised to 64000.
+15. **No truncation recovery.** When `jsonrepair` salvaged truncated JSON, the last array element
+    had missing required fields (e.g. `layer: undefined`). The repair loop couldn't regenerate
+    32K+ tokens. Fixed: `trimTruncatedArrayTails()` trims incomplete trailing elements and accepts
+    the valid prefix rather than rejecting the entire output.
+16. **Stale tests after Plan 24.** `escalation.test.ts` expected `null` for unknown agents (Plan 24
+    B1 added fallback), `strong-fixer.test.ts` expected `MAX_TOOL_CALLS=40` (Plan 24 B2 changed to 18).

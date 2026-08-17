@@ -3,7 +3,10 @@
  *
  * Each agent calls writeArtifact() to produce a markdown file
  * documenting what it was asked to do and how it did it.
- * Files are written into the generated project's docs/agents/ directory.
+ *
+ * Default: files are written into the generated project's docs/agents/ directory.
+ * Reviewers are instructed to skip docs/agents/*.md files (Plan 22, G4 revised).
+ * Set AGENT_ARTIFACTS_IN_REPO=false to redirect to outputs/<run>/agents/ instead.
  */
 import * as fs from 'fs';
 import * as path from 'path';
@@ -20,9 +23,9 @@ interface ArtifactOptions {
     /** Root of the generated project workspace. */
     workspacePath: string;
     /**
-     * Run output directory. When `AGENT_ARTIFACTS_IN_REPO` is false (the default)
-     * and this is provided, mission reports are written here instead of into the
-     * product repo (Plan 22, G4).
+     * Run output directory. When `AGENT_ARTIFACTS_IN_REPO` is false and this is
+     * provided, mission reports are written here instead of into the product repo.
+     * Default is true (artifacts live in the repo; reviewers skip them).
      */
     outputPath?: string;
     /** Artifact title (e.g. "Architect Mission Report"). */
@@ -47,9 +50,9 @@ export function writeArtifact(opts: ArtifactOptions): ArtifactRef {
         ? `${opts.agentId}-${opts.suffix}-mission.md`
         : `${opts.agentId}-mission.md`;
 
-    // Plan 22 G4: mission reports are pipeline telemetry, not product source.
-    // Writing them into the product repo produced six `chore: pipeline artifacts`
-    // commits on one feature branch and put docs/agents/*.md into every PR diff.
+    // Plan 22 G4 (revised): artifacts default to the product repo (docs/agents/).
+    // Reviewers are instructed to skip docs/agents/*.md in review.
+    // Set AGENT_ARTIFACTS_IN_REPO=false to redirect to outputs/<run>/agents/.
     const inRepo = AGENT_ARTIFACTS_IN_REPO || !opts.outputPath;
     const baseDir = inRepo ? opts.workspacePath : opts.outputPath!;
     const docsDir = inRepo

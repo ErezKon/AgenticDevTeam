@@ -1011,7 +1011,7 @@ See [`.env.example`](.env.example) for the full template.
 | `LOOP_GUARD_HARD_CEILING` | `140` | Absolute per-invocation tool-call ceiling across all categories |
 | `LOOP_GUARD_PROGRESS_BONUS` | `10` | Extra read calls granted once an agent has produced verified writes |
 | `MAX_POST_EXHAUSTION_CALLS` | `2` | Terminal-guidance responses tolerated before tools are withheld from the next model call, forcing the ReAct loop to end |
-| `AGENT_ARTIFACTS_IN_REPO` | `false` | Write mission reports into the product repo. Default off: they go to `outputs/<run>/agents/` and `docs/agents/` + `.agent/` are gitignored |
+| `AGENT_ARTIFACTS_IN_REPO` | `true` | Write mission reports into the product repo under `docs/agents/`. Reviewers are instructed to skip `docs/agents/*.md` files. Set to `false` to redirect to `outputs/<run>/agents/` and gitignore `docs/agents/` + `.agent/` |
 | **Quality Gates** | | |
 | `QUALITY_GATES_ENABLED` | `true` | Enable multi-language quality gates (install/typecheck/build/lint/test) |
 | `QUALITY_GATE_STEPS` | `install,typecheck,build,lint,test` | Comma-separated gate steps to run |

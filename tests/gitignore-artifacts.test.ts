@@ -8,9 +8,9 @@
  * test-results/ files and 7 playwright-report/ files**. The reviewer spent a
  * CRITICAL comment on them.
  *
- * G4 — mission reports were written into the product repo, producing six
- * `chore: pipeline artifacts` commits on one feature branch and putting
- * `docs/agents/*.md` into every PR diff.
+ * G4 (revised) — mission reports live in the product repo by default (docs/agents/).
+ * Reviewers are instructed to skip docs/agents/*.md files.
+ * Set AGENT_ARTIFACTS_IN_REPO=false to redirect to outputs/<run>/agents/.
  */
 import * as fs from 'fs';
 import * as os from 'os';
@@ -24,7 +24,7 @@ describe('getGitignoreEntriesForStack (Plan 22 G1)', () => {
         jest.doMock('../src/config', () => ({
             GENERATED_PROJECTS_DIR: '/tmp/generated',
             OUTPUTS_DIR: '/tmp/outputs',
-            AGENT_ARTIFACTS_IN_REPO: false,
+            AGENT_ARTIFACTS_IN_REPO: true,
             ...configOverrides,
         }));
         // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -105,7 +105,18 @@ describe('writeArtifact placement (Plan 22 G4)', () => {
         fs.rmSync(out, { recursive: true, force: true });
     });
 
-    it('writes to outputs/<run>/agents/ by default, keeping the repo clean', () => {
+    it('writes into the repo by default (reviewers skip docs/agents/)', () => {
+        const { writeArtifact } = load(true);
+        const ref = writeArtifact({
+            agentId: 'architect', colorCode: 1, workspacePath: ws, outputPath: out,
+            title: 'Architect Mission Report', content: 'body',
+        });
+
+        expect(fs.existsSync(path.join(ws, 'docs', 'agents', 'architect-mission.md'))).toBe(true);
+        expect(ref.filePath).toBe(path.join('docs', 'agents', 'architect-mission.md'));
+    });
+
+    it('writes to outputs/<run>/agents/ when AGENT_ARTIFACTS_IN_REPO is false', () => {
         const { writeArtifact } = load(false);
         const ref = writeArtifact({
             agentId: 'architect', colorCode: 1, workspacePath: ws, outputPath: out,
@@ -115,17 +126,6 @@ describe('writeArtifact placement (Plan 22 G4)', () => {
         expect(fs.existsSync(path.join(out, 'agents', 'architect-mission.md'))).toBe(true);
         expect(fs.existsSync(path.join(ws, 'docs', 'agents'))).toBe(false);
         expect(ref.filePath).toBe(path.join('agents', 'architect-mission.md'));
-    });
-
-    it('writes into the repo when AGENT_ARTIFACTS_IN_REPO is true', () => {
-        const { writeArtifact } = load(true);
-        const ref = writeArtifact({
-            agentId: 'architect', colorCode: 1, workspacePath: ws, outputPath: out,
-            title: 'Architect Mission Report', content: 'body',
-        });
-
-        expect(fs.existsSync(path.join(ws, 'docs', 'agents', 'architect-mission.md'))).toBe(true);
-        expect(ref.filePath).toBe(path.join('docs', 'agents', 'architect-mission.md'));
     });
 
     it('falls back to the repo when no outputPath is supplied', () => {

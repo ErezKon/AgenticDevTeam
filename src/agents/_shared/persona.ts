@@ -287,6 +287,12 @@ ${cfg.conventionFiles.map((f) => `    - .conventions/${f}`).join('\n')}
     - Report at most 6 comments. Prioritise correctness and security over style.
     - Do NOT repeat a comment that appears in "Previous Review Summary" or
       "Other Reviewer Comments This Iteration".
+    - SKIP these auto-generated files — do not review or comment on them:
+      * docs/agents/*.md (mission reports)
+      * docs/ARCHITECTURE-CONTRACT.md (rendered architecture contract)
+      * .agent/* (machine-readable repo contract)
+      * Dockerfile, .dockerignore, docker-compose.yml (DevOps pipeline output)
+      * .gitignore (managed by the pipeline)
 </review_guidelines>
 
 <severity_rubric>

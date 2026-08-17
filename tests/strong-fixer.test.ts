@@ -156,10 +156,11 @@ describe('strong fixer config defaults', () => {
         expect(typeof config.STRONG_FIXER_ENABLED).toBe('boolean');
     });
 
-    it('STRONG_FIXER_MAX_TOOL_CALLS defaults to 40', () => {
+    it('STRONG_FIXER_MAX_TOOL_CALLS defaults to 18 (Plan 24 B2)', () => {
         jest.mock('../src/config', () => jest.requireActual('../src/config'));
         const config = require('../src/config');
-        expect(config.STRONG_FIXER_MAX_TOOL_CALLS).toBe(40);
+        // Plan 24 B2: reduced from 40 to 18 — runaway fixers waste budget
+        expect(config.STRONG_FIXER_MAX_TOOL_CALLS).toBe(18);
     });
 
     it('PR_EXHAUSTION_STRATEGY defaults to escalate-then-fix', () => {

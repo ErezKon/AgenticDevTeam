@@ -120,10 +120,13 @@ export function extractAgentText(messages: unknown): AgentTextExtraction {
     const list = Array.isArray(messages) ? messages : [];
     const lastMsg: any = list.length > 0 ? list[list.length - 1] : undefined;
     const blockTypes = lastMsg ? describeContentBlocks(lastMsg.content) : 'no messages';
+    // Anthropic's LangChain adapter puts stop_reason in additional_kwargs,
+    // not response_metadata. Check both locations to detect max_tokens truncation.
     const stopReason = String(
         lastMsg?.response_metadata?.finish_reason
         ?? lastMsg?.response_metadata?.stop_reason
         ?? lastMsg?.response_metadata?.status
+        ?? lastMsg?.additional_kwargs?.stop_reason
         ?? '',
     ).toLowerCase();
     const truncatedByTokenLimit = stopReason === 'length' || stopReason === 'max_tokens' || stopReason === 'incomplete';
@@ -441,6 +444,79 @@ export function repairFieldViolations<T>(
     }
 
     return { value: mutable, unrepairable: remaining, repaired };
+}
+
+// ─── Truncation Recovery ────────────────────────────────────────────────────
+
+/**
+ * When jsonrepair salvages a truncated response, the last element(s) of arrays
+ * are often incomplete (missing required fields like `layer`, `suggestedTech`).
+ * Rather than rejecting the entire 32K+ token output, trim those incomplete
+ * trailing elements so the valid prefix is accepted.
+ *
+ * Strategy: collect all array paths that have validation errors on their last
+ * element(s). Remove those elements from the end of the array, then re-validate.
+ * Repeat until validation passes or no more trimmable arrays remain.
+ */
+export function trimTruncatedArrayTails<T>(
+    raw: unknown,
+    schema: z.ZodType<T>,
+): { value: unknown; trimmed: Array<{ path: string; removedCount: number }>; ok: boolean } {
+    const trimmed: Array<{ path: string; removedCount: number }> = [];
+    let current = structuredClone(raw) as Record<string, unknown>;
+
+    // Collect array paths where the LAST element has validation errors
+    const result = schema.safeParse(current);
+    if (result.success) return { value: current, trimmed, ok: true };
+
+    // Group issues by their array parent path + index
+    const arrayTailIssues = new Map<string, { maxIndex: number; path: (string | number)[] }>();
+    for (const issue of result.error.issues) {
+        if (issue.path.length < 2) continue;
+        // Find the array-level path: everything up to (but not including) the numeric index
+        let arrayPathParts: (string | number)[] = [];
+        let elementIndex = -1;
+        for (let i = issue.path.length - 1; i >= 0; i--) {
+            if (typeof issue.path[i] === 'number') {
+                arrayPathParts = issue.path.slice(0, i) as (string | number)[];
+                elementIndex = issue.path[i] as number;
+                break;
+            }
+        }
+        if (elementIndex < 0) continue;
+
+        const arrayPathStr = arrayPathParts.join('.');
+        const existing = arrayTailIssues.get(arrayPathStr);
+        if (!existing || elementIndex > existing.maxIndex) {
+            arrayTailIssues.set(arrayPathStr, { maxIndex: elementIndex, path: arrayPathParts });
+        }
+    }
+
+    if (arrayTailIssues.size === 0) return { value: current, trimmed, ok: false };
+
+    // For each affected array, check if the errored element is the LAST element
+    // and remove it
+    for (const [pathStr, { maxIndex, path: arrayPath }] of arrayTailIssues) {
+        let arr = current as any;
+        for (const key of arrayPath) {
+            if (arr == null || typeof arr !== 'object') { arr = undefined; break; }
+            arr = arr[key];
+        }
+        if (!Array.isArray(arr)) continue;
+
+        // Only trim if the errored index is the very last element
+        if (maxIndex < arr.length - 1) continue;
+
+        const removeCount = arr.length - maxIndex;
+        arr.splice(maxIndex, removeCount);
+        trimmed.push({ path: pathStr, removedCount: removeCount });
+    }
+
+    if (trimmed.length === 0) return { value: current, trimmed, ok: false };
+
+    // Re-validate after trimming
+    const recheck = schema.safeParse(current);
+    return { value: current, trimmed, ok: recheck.success };
 }
 
 /** Walk a nested path and return the parent container + last key. */
