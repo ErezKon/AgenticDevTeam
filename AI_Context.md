@@ -360,7 +360,13 @@ The development phase uses a sophisticated PR workflow for each branch:
 5. **Security gate** (optional) -- Secret scan before PR
 6. **PR creation** -- Checks for existing open PR first (`findExistingPR`), then creates via Octokit or curl.
    422 "already exists" errors reuse the existing PR instead of deadlocking. Auth errors (`classifyPrFailure`)
-   are fatal and halt the run immediately.
+   are fatal and halt the run immediately. Transient failures (GitHub 5xx, network errors) retry up to 3
+   times with exponential backoff (2s base).
+6b. **PR creation failure** -- If all retries fail, `executePRWorkflow` returns a `PullRequest` with
+   `status: 'pr-creation-failed'` instead of throwing. The dispatcher sets a `prCreationFailed` flag,
+   skips all remaining branches (scaffold, bootstrap, serialised, parallel), and stops the run
+   gracefully. The failed PR entry is persisted in `state.json` so continue-run can retry just the PR
+   creation — the branch code is already pushed. See `retryFailedPRCreation()` in `pr-workflow.ts`.
 7. **Review loop** -- Sequential per-reviewer; each reviewer sees code after previous fixes.
    Fix agents wrapped in `try/finally` with `commitWorktree()`.
 8. **Fix cycle** -- Dev agent fixes review comments; no-progress detection after 2 unchanged iterations
@@ -872,9 +878,21 @@ collectRunState() → reconstructState() → rehydrateSingletons() → reconcile
 
 Phases are walked in pipeline order; each phase requires both ledger evidence (end event) and state evidence (e.g., `architecture != null`, `epics.length > 0`). The first phase without evidence is the resume point. Special cases:
 - **Intake**: always skipped (workspace already exists)
-- **Development**: counts pending assignments; all completed → advances past
+- **Development**: counts pending assignments; all completed → advances past. If any PRs have `status: 'pr-creation-failed'`, `developmentNode` retries PR creation via `retryFailedPRCreation()` before dispatching new assignments — no dev agent re-run, just the GitHub API call
 - **Bugfix loop**: `iteration.bugfix` and `fixedBugIds` are preserved
 - **Finalize**: always re-run
+
+### PR Branch Status on Continue-Run
+
+`inferPRBranchStatus()` maps PR status to branch handling:
+
+| PR Status | Branch Status | Git Action |
+|-----------|--------------|------------|
+| `merged` | `merged` | Delete local branch |
+| `open` / `approved` / `escalated_open` | `open` | Delete local branch (re-created on dispatch) |
+| `pr-creation-failed` | `pr-creation-failed` | **Keep** branch — PR creation will be retried |
+| `blocked` / `closed` (local branch exists) | `open` | Delete local branch |
+| salvaged | `failed-salvaged` | Delete local branch |
 
 ### Node Idempotency
 
@@ -1142,3 +1160,10 @@ Additional failure modes found in `pacmanclaude2` run (2026-08-17, fixed post-Pl
     the valid prefix rather than rejecting the entire output.
 16. **Stale tests after Plan 24.** `escalation.test.ts` expected `null` for unknown agents (Plan 24
     B1 added fallback), `strong-fixer.test.ts` expected `MAX_TOOL_CALLS=40` (Plan 24 B2 changed to 18).
+17. **Transient GitHub 503 crashed the run and burned tokens.** PR creation hit "No server is
+    currently available" (GitHub 503). No retry logic existed, so the error threw, was swallowed
+    by `Promise.allSettled` in the dispatcher, and the run continued dispatching all remaining
+    branches (wasting tokens on branches that depended on the failed scaffold). Fixed: (a) retry
+    with exponential backoff (3 attempts); (b) `pr-creation-failed` status persisted in state
+    instead of throwing; (c) dispatcher stops all subsequent branches on failure; (d) continue-run
+    retries just the PR creation via `retryFailedPRCreation()` without re-running dev agents.

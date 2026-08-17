@@ -495,6 +495,12 @@ function cleanupStaleBranches(
                 deleteLocalBranch(workspacePath, branch, cleaned, errors);
                 break;
 
+            case 'pr-creation-failed':
+                // Branch code is pushed but PR creation failed — keep the branch
+                // so continue-run can retry PR creation without re-running dev agents
+                log.info(`Keeping branch ${branch} — PR creation will be retried`);
+                break;
+
             case 'unknown':
                 // Leave unknown branches alone — err on the side of caution
                 break;

@@ -21,7 +21,7 @@ const log = getLogger('[StateCollector]', 177);
 // ─── Types ──────────────────────────────────────────────────────────────────
 
 /** Status of a feature branch from the previous run. */
-export type PRBranchStatus = 'merged' | 'open' | 'failed-salvaged' | 'unknown';
+export type PRBranchStatus = 'merged' | 'open' | 'failed-salvaged' | 'pr-creation-failed' | 'unknown';
 
 /** A branch and its inferred status. */
 export interface BranchStatus {
@@ -434,6 +434,9 @@ function inferPRBranchStatus(collected: CollectedRunState): BranchStatus[] {
 
         if (pr.status === 'merged') {
             status = 'merged';
+        } else if (pr.status === 'pr-creation-failed') {
+            // Branch code is pushed but PR creation failed — continue-run should retry PR creation
+            status = 'pr-creation-failed';
         } else if (salvageBranches.has(pr.branchName)) {
             status = 'failed-salvaged';
         } else if (pr.status === 'open' || pr.status === 'approved' || pr.status === 'escalated_open') {

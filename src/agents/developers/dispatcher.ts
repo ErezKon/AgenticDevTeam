@@ -384,6 +384,9 @@ export async function dispatchDevelopers(
     const allCompletionEvidence: CompletionEvidence[] = [];
     const allSalvageBranches: string[] = [];
 
+    // Flag: set when any branch returns pr-creation-failed — stops further branches
+    let prCreationFailed = false;
+
     // Plan 24 D3: wall-clock-aware admission control
     let branchesDeferred = 0;
     const completedBranchDurationsMs: number[] = [];
@@ -483,6 +486,18 @@ export async function dispatchDevelopers(
         // Helper to run a batch of branches
         const runBranches = async (branches: string[]) => {
             for (let j = 0; j < branches.length; j += MAX_CONCURRENT_DEVS) {
+                // Stop dispatching if a previous branch's PR creation failed
+                if (prCreationFailed) {
+                    const skipped = branches.slice(j);
+                    log.warn(`Skipping ${skipped.length} branch(es) due to PR creation failure — run will stop gracefully`);
+                    transcript.push({
+                        timestamp: new Date().toISOString(),
+                        agentId: 'dispatcher',
+                        phase: 'development' as PhaseName,
+                        message: `Skipped ${skipped.length} branch(es) due to PR creation failure: ${skipped.join(', ')}`,
+                    });
+                    break;
+                }
                 if (!getEffectiveLimits().allowNewBranchWorkflows) {
                     const undispatched = branches.slice(j);
                     log.error(`Budget exhausted — stopping dispatch. ${undispatched.length} branch(es) not started: ${undispatched.join(', ')}`);
@@ -573,6 +588,11 @@ export async function dispatchDevelopers(
                         newlyCompletedIds.push(...completedIdsFromPullRequests([prResult.pullRequest]));
                         if (prResult.completionEvidence) allCompletionEvidence.push(...prResult.completionEvidence);
                         if (prResult.salvageBranch) allSalvageBranches.push(prResult.salvageBranch);
+
+                        // PR creation failed — flag for graceful stop
+                        if (prResult.pullRequest.status === 'pr-creation-failed') {
+                            prCreationFailed = true;
+                        }
                     } else {
                         // Plan 24, A3: classify the failure — provider-level errors
                         // (billing, auth, quota) should not consume the branch's attempt.
@@ -613,6 +633,7 @@ export async function dispatchDevelopers(
         if (scaffoldBranches.length > 0) {
             log.info(`Scaffold barrier: running ${scaffoldBranches.length} scaffold branch(es) first`);
             for (const scaffoldBranch of scaffoldBranches) {
+                if (prCreationFailed) break;
                 await runBranches([scaffoldBranch]);
                 // Sync workspace after scaffold merge so feature worktrees cut from the merged tree
                 const scaffoldPR = pullRequests.find(pr => pr.branchName === scaffoldBranch);
@@ -632,9 +653,10 @@ export async function dispatchDevelopers(
 
         // Plan 24, E4: Run bootstrap/wiring branches right after scaffold, before features.
         // These branches wire up the entry point and other feature branches depend on them.
-        if (bootstrapBranches.length > 0) {
+        if (!prCreationFailed && bootstrapBranches.length > 0) {
             log.info(`Bootstrap barrier: running ${bootstrapBranches.length} bootstrap branch(es) after scaffold`);
             for (const bootstrapBranch of bootstrapBranches) {
+                if (prCreationFailed) break;
                 await runBranches([bootstrapBranch]);
                 const bootstrapPR = pullRequests.find(pr => pr.branchName === bootstrapBranch);
                 if (bootstrapPR?.status === 'merged') {
@@ -652,15 +674,19 @@ export async function dispatchDevelopers(
         }
 
         // Run serialised (overlapping) branches sequentially
-        for (const chain of serialisedFeatures) {
-            log.info(`Serialising ${chain.length} overlapping branches: ${chain.join(', ')}`);
-            for (const branch of chain) {
-                await runBranches([branch]);
+        if (!prCreationFailed) {
+            for (const chain of serialisedFeatures) {
+                if (prCreationFailed) break;
+                log.info(`Serialising ${chain.length} overlapping branches: ${chain.join(', ')}`);
+                for (const branch of chain) {
+                    if (prCreationFailed) break;
+                    await runBranches([branch]);
+                }
             }
         }
 
         // Run parallel (non-overlapping) feature branches
-        if (parallelFeatures.length > 0) {
+        if (!prCreationFailed && parallelFeatures.length > 0) {
             await runBranches(parallelFeatures);
         }
     }
@@ -670,12 +696,25 @@ export async function dispatchDevelopers(
     // for a round that delivered nothing at all (Plan 21, E3).
     const mergedPrs = pullRequests.filter(pr => pr.status === 'merged').length;
     const skippedPrs = pullRequests.filter(pr => pr.id.startsWith('PR-SKIPPED-')).length;
+    const failedPrCreation = pullRequests.filter(pr => pr.status === 'pr-creation-failed').length;
     log.info(
         `Dispatch complete: ${fileChanges.length} total file changes, ${pullRequests.length} PRs `
-        + `(${mergedPrs} merged, ${skippedPrs} skipped), ${artifacts.length} artifacts, `
+        + `(${mergedPrs} merged, ${skippedPrs} skipped`
+        + (failedPrCreation > 0 ? `, ${failedPrCreation} pr-creation-failed` : '')
+        + `), ${artifacts.length} artifacts, `
         + `${newlyCompletedIds.length} completed assignments`
         + (branchesDeferred > 0 ? `, ${branchesDeferred} branch(es) deferred` : ''),
     );
+
+    if (prCreationFailed) {
+        log.error(`Run stopped early: PR creation failed — use continue-run to retry`);
+        transcript.push({
+            timestamp: new Date().toISOString(),
+            agentId: 'dispatcher',
+            phase: 'development' as PhaseName,
+            message: `Run stopped early: PR creation failed for ${failedPrCreation} branch(es) — use continue-run to retry`,
+        });
+    }
 
     // Systemic failure: every branch in the round produced nothing. Individually these
     // surface only as per-branch WARNs, which is how 34 identical provider 400s scrolled

@@ -47,7 +47,7 @@ import { sanitizeMermaidLabels } from '../tools/diagram/diagram-tools';
 import { createGitHubRepo, validateGitHubRepo, initializeRepoLocally } from '../utils/github-repo-manager';
 import { gitExec, gitPush, findGitRoot } from '../utils/git-exec';
 import { GITHUB_MODE } from '../utils/github-local';
-import { setLocalBareRepoPath } from './pr-workflow';
+import { setLocalBareRepoPath, retryFailedPRCreation } from './pr-workflow';
 import { syncWorkspaceToBranch, looksSourceless } from './workspace-sync';
 import { selectPendingAssignments, dedupeBugs, namespaceBugfixAssignments, sanitizeAssignmentStoryIds } from './assignment-policy';
 import { runAssemblyGate, buildAssemblyAssignment } from './assembly-gate';
@@ -86,6 +86,7 @@ import { DevOpsOutputSchema } from '../agents/devops/schemas/devops-output.schem
 import { execSync } from 'child_process';
 import type { ProjectStateType } from './state';
 import type { PhaseName, TranscriptMessage, Bug, CodebaseAnalysis, GitContext } from '../agents/_shared/base-schemas';
+import type { PullRequest } from '../agents/_shared/schemas/pr.schema';
 import { tokenTracker, type TokenCallRecord } from '../utils/token-tracker';
 import { extractTokenUsageFromMessages } from '../utils/token-usage-extractor';
 import { generateTokenReport, refreshTokenReport } from '../utils/token-report';
@@ -1392,6 +1393,44 @@ export async function developmentNode(state: ProjectStateType): Promise<Partial<
     if (haltUpdate) return { ...haltUpdate, phase: 'development' as PhaseName };
     const rerunUpdate = checkRerun(state, 'development', devLog);
     devLog.info(`Starting development with ${state.assignments.length} assignments...`);
+
+    // ── Retry any PR-creation-failed branches from a previous run ─────────
+    const failedPRs = (state.pullRequests ?? []).filter((pr: PullRequest) => pr.status === 'pr-creation-failed');
+    if (failedPRs.length > 0) {
+        devLog.info(`Found ${failedPRs.length} branch(es) with pr-creation-failed — retrying PR creation`);
+        const retriedPRs: PullRequest[] = [];
+        const retriedTranscript: TranscriptMessage[] = [];
+        for (const failedPR of failedPRs) {
+            try {
+                const updatedPR = await retryFailedPRCreation(failedPR, state.systemBranch, state.gitContext);
+                retriedPRs.push(updatedPR);
+                retriedTranscript.push(msg('conductor', 'development', `PR creation retry succeeded for ${failedPR.branchName}: PR #${updatedPR.prNumber}`));
+            } catch (retryErr: any) {
+                devLog.error(`PR creation retry failed again for ${failedPR.branchName}: ${retryErr.message}`);
+                retriedTranscript.push(msg('conductor', 'development', `PR creation retry failed again for ${failedPR.branchName}: ${retryErr.message} — stopping run`));
+                // Return immediately — stop the run gracefully so continue-run can try again later
+                return {
+                    ...rerunUpdate,
+                    phase: 'development' as PhaseName,
+                    pullRequests: [failedPR], // preserve the failed PR in state
+                    transcript: retriedTranscript,
+                };
+            }
+        }
+        // If all retries succeeded, update the PR entries and mark their assignments as needing
+        // review (they'll flow through the normal review/merge path on the next dispatch)
+        if (retriedPRs.length > 0) {
+            devLog.info(`Successfully retried ${retriedPRs.length} PR(s) — updating state`);
+            // Replace the failed PRs with the retried ones in state
+            const otherPRs = (state.pullRequests ?? []).filter((pr: PullRequest) => pr.status !== 'pr-creation-failed');
+            return {
+                ...rerunUpdate,
+                phase: 'development' as PhaseName,
+                pullRequests: [...otherPRs, ...retriedPRs],
+                transcript: retriedTranscript,
+            };
+        }
+    }
 
     // ── Filter to only pending assignments (fixes A2) ────────────────────
     const pending = selectPendingAssignments(state.assignments, state.completedAssignmentIds);

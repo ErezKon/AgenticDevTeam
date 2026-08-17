@@ -360,6 +360,7 @@ flowchart LR
 - **Iterative review** — reviewers can request changes, developers fix, re-review up to `MAX_REVIEW_ITERATIONS`
 - **Shared branches** — multiple agents on the same feature share one branch
 - **TDD enforcement** — developers write tests first (red), implement (green), then refactor
+- **PR creation resilience** — transient GitHub failures (5xx, network errors) are retried up to 3 times with exponential backoff. If all retries fail, the run stops gracefully with a `pr-creation-failed` PR entry persisted in state — continue-run retries just the PR creation without re-running dev agents
 
 ### Review Rules
 
@@ -505,6 +506,16 @@ POST /api/run/continue             # Continue a stopped run
 | `CONTINUE_TOKEN_CARRY_FORWARD` | `true` | Include previous run's token usage in budget calculations |
 | `CONTINUE_GIT_RECONCILE` | `true` | Auto-fix git state issues (worktree cleanup, branch sync) before resuming |
 | `CONTINUE_CLOSE_STALE_PRS` | `true` | Close open GitHub PRs from previous run that will be re-dispatched |
+
+### PR Creation Recovery
+
+If a run stopped because PR creation failed (GitHub 503, network timeout, etc.), continue-run handles it automatically:
+
+1. The failed PR is stored in `state.json` with `status: 'pr-creation-failed'`
+2. On continue-run, `developmentNode` detects these PRs and calls `retryFailedPRCreation()` 
+3. The retry only creates the GitHub PR — no dev agents are re-run (the branch code is already pushed)
+4. If the retry succeeds, the PR transitions to `open` and the run continues normally
+5. If the retry fails again, the run stops gracefully — continue-run can be used again later
 
 ### Limitations
 

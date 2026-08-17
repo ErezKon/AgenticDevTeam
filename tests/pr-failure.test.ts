@@ -110,6 +110,34 @@ describe('classifyPrFailure', () => {
         expect(result.retryable).toBe(true);
     });
 
+    it('classifies "No server is currently available" as server-error (retryable)', () => {
+        const err = new Error('GitHub API error: No server is currently available to service your request. Sorry about that. Please try resubmitting your request and contact us if the problem persists. ([])');
+        const result = classifyPrFailure(err);
+        expect(result.kind).toBe('server-error');
+        expect(result.retryable).toBe(true);
+    });
+
+    it('classifies "Internal Server Error" as server-error (retryable)', () => {
+        const err = new Error('Internal Server Error');
+        const result = classifyPrFailure(err);
+        expect(result.kind).toBe('server-error');
+        expect(result.retryable).toBe(true);
+    });
+
+    it('classifies numeric 502 status as server-error (retryable)', () => {
+        const err = Object.assign(new Error('Bad Gateway'), { status: 502 });
+        const result = classifyPrFailure(err);
+        expect(result.kind).toBe('server-error');
+        expect(result.retryable).toBe(true);
+    });
+
+    it('classifies numeric 503 status as server-error (retryable)', () => {
+        const err = Object.assign(new Error('Service Unavailable'), { status: 503 });
+        const result = classifyPrFailure(err);
+        expect(result.kind).toBe('server-error');
+        expect(result.retryable).toBe(true);
+    });
+
     it('classifies ECONNRESET as network (retryable)', () => {
         const err = new Error('read ECONNRESET');
         const result = classifyPrFailure(err);
@@ -165,6 +193,11 @@ describe('isFatalPrFailure', () => {
 
     it('returns false for rate-limit errors', () => {
         const result = classifyPrFailure(new Error('rate limit exceeded'));
+        expect(isFatalPrFailure(result)).toBe(false);
+    });
+
+    it('returns false for server-error', () => {
+        const result = classifyPrFailure(new Error('No server is currently available'));
         expect(isFatalPrFailure(result)).toBe(false);
     });
 

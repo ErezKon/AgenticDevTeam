@@ -16,6 +16,7 @@ export type PrFailureKind =
     | 'push-rejected'
     | 'auth'
     | 'rate-limit'
+    | 'server-error'
     | 'network'
     | 'unknown';
 
@@ -84,10 +85,21 @@ const MATCHERS: Array<{ kind: PrFailureKind; patterns: RegExp[]; retryable: bool
         retryable: true,
     },
     {
+        kind: 'server-error',
+        patterns: [
+            /No server is currently available/i,
+            /Server Error/i,
+            /Internal Server Error/i,
+            /\b50[0-4]\b/,
+        ],
+        retryable: true,
+    },
+    {
         kind: 'network',
         patterns: [
             /ECONNRESET/i,
             /ETIMEDOUT/i,
+            /ENOTFOUND/i,
             /Connection error/i,
             /socket hang up/i,
         ],
@@ -121,6 +133,9 @@ export function classifyPrFailure(err: unknown): PrFailureClassification {
     }
     if (status === 429) {
         return { kind: 'rate-limit', message: msg, retryable: true };
+    }
+    if (status && status >= 500 && status < 600) {
+        return { kind: 'server-error', message: msg, retryable: true };
     }
 
     return { kind: 'unknown', message: msg, retryable: false };

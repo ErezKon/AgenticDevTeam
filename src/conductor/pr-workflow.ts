@@ -780,6 +780,94 @@ function resolveBaseRef(worktreeDir: string, baseBranch: string): string {
     return baseBranch;
 }
 
+// ─── Retry PR creation for continue-run ──────────────────────────────────────
+
+/**
+ * Retry PR creation for a branch that had `pr-creation-failed` status.
+ * The branch code is already pushed — this only creates the GitHub PR.
+ * Returns the updated PullRequest with a real PR number on success,
+ * or re-throws on failure so the caller can stop gracefully.
+ */
+export async function retryFailedPRCreation(
+    failedPR: PullRequest,
+    baseBranch: string,
+    gitContext?: GitContext | null,
+): Promise<PullRequest> {
+    const ghOwner = gitContext?.owner ?? GITHUB_OWNER;
+    const ghRepo = gitContext?.repo ?? GITHUB_REPO;
+    const octokit = getOctokit(gitContext);
+    const branchName = failedPR.branchName;
+
+    log.info(`Retrying PR creation for branch ${branchName}...`);
+
+    // Check if a PR was created manually or by a previous retry
+    const existingPR = await findExistingPR(octokit, ghOwner, ghRepo, branchName);
+    if (existingPR) {
+        log.info(`Found existing PR #${existingPR.number} for ${branchName} — reusing`);
+        return {
+            ...failedPR,
+            id: `PR-${existingPR.number}`,
+            prNumber: existingPR.number,
+            prUrl: existingPR.html_url,
+            status: 'open',
+        };
+    }
+
+    // Retry with the same retry/backoff logic
+    const PR_RETRY_MAX = 3;
+    const PR_RETRY_BASE_DELAY_MS = 2_000;
+    let lastErr: Error | null = null;
+
+    for (let attempt = 1; attempt <= PR_RETRY_MAX; attempt++) {
+        try {
+            const { data } = await octokit.pulls.create({
+                owner: ghOwner,
+                repo: ghRepo,
+                title: failedPR.title,
+                body: failedPR.description,
+                head: branchName,
+                base: baseBranch,
+            });
+            log.info(`PR #${data.number} created on retry for ${branchName}`);
+            emitRunEvent('pr:opened', { prNumber: data.number, title: failedPR.title, branch: branchName, baseBranch });
+            return {
+                ...failedPR,
+                id: `PR-${data.number}`,
+                prNumber: data.number,
+                prUrl: data.html_url,
+                status: 'open',
+            };
+        } catch (err: any) {
+            const classification = classifyPrFailure(err);
+            if (isFatalPrFailure(classification)) {
+                throw new Error(`Fatal PR error on retry (${classification.kind}): ${classification.message}`);
+            }
+            if (classification.kind === 'pr-already-exists') {
+                const reusePR = await findExistingPR(octokit, ghOwner, ghRepo, branchName);
+                if (reusePR) {
+                    return {
+                        ...failedPR,
+                        id: `PR-${reusePR.number}`,
+                        prNumber: reusePR.number,
+                        prUrl: reusePR.html_url,
+                        status: 'open',
+                    };
+                }
+            }
+
+            lastErr = err;
+            if (classification.retryable && attempt < PR_RETRY_MAX) {
+                const delay = PR_RETRY_BASE_DELAY_MS * Math.pow(2, attempt - 1);
+                log.warn(`PR retry attempt ${attempt}/${PR_RETRY_MAX} failed (${classification.kind}) — retrying in ${delay}ms`);
+                await new Promise(r => setTimeout(r, delay));
+            }
+        }
+    }
+
+    // All retries failed — throw so the caller can stop gracefully again
+    throw lastErr ?? new Error(`PR creation retry failed for ${branchName}`);
+}
+
 // ─── Main PR workflow ────────────────────────────────────────────────────────
 
 export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkflowResult> {
@@ -1512,7 +1600,7 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
 
         log.info(`Creating PR: "${prTitle}"`);
         const octokit = getOctokit(gitContext);
-        let ghPr: { number: number; html_url: string; node_id: string; head?: { ref: string } };
+        let ghPr!: { number: number; html_url: string; node_id: string; head?: { ref: string } };
 
         // Sub-Plan 06 §4: Check for existing open PR before creating (prevents 422 deadlock)
         const existingPR = await findExistingPR(octokit, ghOwner, ghRepo, branchName);
@@ -1530,56 +1618,106 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                 log.warn(`Failed to update existing PR body: ${updateErr.message}`);
             }
         } else {
-            try {
-                const { data } = await octokit.pulls.create({
-                    owner: ghOwner,
-                    repo: ghRepo,
-                    title: prTitle,
-                    body: prBody,
-                    head: branchName,
-                    base: baseBranch,
-                });
-                ghPr = { number: data.number, html_url: data.html_url, node_id: data.node_id };
-            } catch (octokitErr: any) {
-                // Sub-Plan 06 §4: classify the error
-                const classification = classifyPrFailure(octokitErr);
+            // Retry loop for transient GitHub failures (server-error, network, rate-limit)
+            const PR_CREATE_MAX_RETRIES = 3;
+            const PR_CREATE_BASE_DELAY_MS = 2_000;
+            let prCreationFailed: Error | null = null;
+            for (let attempt = 1; attempt <= PR_CREATE_MAX_RETRIES; attempt++) {
+                try {
+                    const { data } = await octokit.pulls.create({
+                        owner: ghOwner,
+                        repo: ghRepo,
+                        title: prTitle,
+                        body: prBody,
+                        head: branchName,
+                        base: baseBranch,
+                    });
+                    ghPr = { number: data.number, html_url: data.html_url, node_id: data.node_id };
+                    break; // success
+                } catch (octokitErr: any) {
+                    // Sub-Plan 06 §4: classify the error
+                    const classification = classifyPrFailure(octokitErr);
 
-                // Auth errors are fatal — stop the entire run
-                if (isFatalPrFailure(classification)) {
-                    throw new Error(`Fatal PR error (${classification.kind}): ${classification.message}`);
-                }
-
-                // pr-already-exists: list and reuse instead of falling back to curl
-                if (classification.kind === 'pr-already-exists') {
-                    const reusePR = await findExistingPR(octokit, ghOwner, ghRepo, branchName);
-                    if (reusePR) {
-                        ghPr = reusePR;
-                        log.info(`Reusing existing PR #${ghPr.number} after 422`);
-                    } else {
-                        throw octokitErr; // cannot recover
+                    // Auth errors are fatal — stop the entire run
+                    if (isFatalPrFailure(classification)) {
+                        throw new Error(`Fatal PR error (${classification.kind}): ${classification.message}`);
                     }
-                } else if (GITHUB_MODE === 'local') {
-                    // In local mode, Octokit is a local stand-in — do not fall back to curl
-                    throw octokitErr;
-                } else {
-                    log.warn(`Octokit PR creation failed (${classification.kind}), falling back to curl`);
-                    try {
-                        ghPr = createPRViaCurl(prTitle, prBody, branchName, baseBranch, gitContext);
-                    } catch (curlErr: any) {
-                        const curlClassification = classifyPrFailure(curlErr);
-                        if (curlClassification.kind === 'pr-already-exists') {
-                            const reusePR = await findExistingPR(octokit, ghOwner, ghRepo, branchName);
-                            if (reusePR) {
-                                ghPr = reusePR;
-                                log.info(`Reusing existing PR #${ghPr.number} after curl 422`);
-                            } else {
-                                throw curlErr;
-                            }
+
+                    // pr-already-exists: list and reuse instead of falling back to curl
+                    if (classification.kind === 'pr-already-exists') {
+                        const reusePR = await findExistingPR(octokit, ghOwner, ghRepo, branchName);
+                        if (reusePR) {
+                            ghPr = reusePR;
+                            log.info(`Reusing existing PR #${ghPr.number} after 422`);
                         } else {
-                            throw curlErr;
+                            prCreationFailed = octokitErr;
+                        }
+                        break;
+                    } else if (GITHUB_MODE === 'local') {
+                        // In local mode, Octokit is a local stand-in — do not fall back to curl
+                        prCreationFailed = octokitErr;
+                        break;
+                    } else {
+                        log.warn(`Octokit PR creation failed (${classification.kind}), falling back to curl`);
+                        try {
+                            ghPr = createPRViaCurl(prTitle, prBody, branchName, baseBranch, gitContext);
+                            break; // curl succeeded
+                        } catch (curlErr: any) {
+                            const curlClassification = classifyPrFailure(curlErr);
+                            if (curlClassification.kind === 'pr-already-exists') {
+                                const reusePR = await findExistingPR(octokit, ghOwner, ghRepo, branchName);
+                                if (reusePR) {
+                                    ghPr = reusePR;
+                                    log.info(`Reusing existing PR #${ghPr.number} after curl 422`);
+                                } else {
+                                    prCreationFailed = curlErr;
+                                }
+                                break;
+                            } else if (curlClassification.retryable && attempt < PR_CREATE_MAX_RETRIES) {
+                                const delay = PR_CREATE_BASE_DELAY_MS * Math.pow(2, attempt - 1);
+                                log.warn(`PR creation attempt ${attempt}/${PR_CREATE_MAX_RETRIES} failed (${curlClassification.kind}) — retrying in ${delay}ms`);
+                                await new Promise(r => setTimeout(r, delay));
+                                prCreationFailed = curlErr; // will be cleared if next attempt succeeds
+                                continue; // retry the whole attempt
+                            } else {
+                                prCreationFailed = curlErr;
+                                break;
+                            }
                         }
                     }
                 }
+            }
+
+            // PR creation failed after all retries — return a failed result
+            // so the dispatcher can persist state and stop gracefully.
+            // The branch code is already pushed; continue-run will retry PR creation.
+            if (prCreationFailed) {
+                const failMsg = prCreationFailed.message || String(prCreationFailed);
+                log.error(`PR creation failed after ${PR_CREATE_MAX_RETRIES} attempts: ${failMsg}`);
+                allTranscript.push(msg('conductor', `PR creation failed for ${branchName}: ${failMsg}`));
+
+                const failedPullRequest: PullRequest = {
+                    id: `PR-FAILED-${branchName}`,
+                    prNumber: 0,
+                    prUrl: '',
+                    title: prTitle,
+                    description: prBody.slice(0, 500),
+                    branchName,
+                    authorAgentId: assignments[0].devAgentId,
+                    reviewerAgentIds,
+                    reviews: [],
+                    status: 'pr-creation-failed',
+                    assignmentIds: assignments.map(a => a.id),
+                    taskType,
+                    currentState,
+                };
+                return {
+                    pullRequest: failedPullRequest,
+                    fileChanges: allFileChanges,
+                    artifacts: allArtifacts,
+                    transcript: allTranscript,
+                    tokenUsage: allTokenUsage,
+                };
             }
         }
         log.info(`PR #${ghPr.number} created: ${ghPr.html_url}`);
