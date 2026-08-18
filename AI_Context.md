@@ -66,7 +66,7 @@ src/
     graph.ts                       # StateGraph wiring + conditional edges + HITL
     nodes.ts                       # 12 phase node functions (~3250 lines, largest file) + checkBudgetStop()
     run.ts                         # Autonomous & HITL run helpers + continueRun
-    pr-workflow.ts                 # Full PR lifecycle orchestrator (~1392 lines)
+    pr-workflow.ts                 # Full PR lifecycle orchestrator (~2939 lines)
     context-builder.ts             # Compact context summarizers with char budgets
     quality-gates.ts               # Multi-language build/lint/test gates
     security-gates.ts              # Secret scan + dependency audit + licence check
@@ -1072,7 +1072,7 @@ npm run test:replay
 
 ### Adding a New Environment Variable
 
-1. Add to `src/config.ts` with `process.env` reading and default value
+1. Add to `src/config.ts` using `envInt()`, `envFloat()`, `envBool()`, or `envEnum()` helpers (never raw `parseInt`/`parseFloat`)
 2. Add to `.env.example` with documentation comment
 3. Add to README.md Environment Variables table
 4. Update this file if it affects architecture or flow

@@ -387,7 +387,7 @@ The workflow supports two GitHub modes:
 | `GITHUB_OWNER` | Live only | Repository owner (org or user) |
 | `GITHUB_REPO` | Live only | Repository name |
 | `GIT_DEFAULT_BRANCH` | No | Default branch (default: `main`) |
-| `MAX_REVIEW_ITERATIONS` | No | Max review rounds (default: `5`) |
+| `MAX_REVIEW_ITERATIONS` | No | Max review rounds (default: `3`) |
 
 > **Note:** In `local` mode, intake can initialize a bare repo under the run outputs (e.g. `outputs/<run>/origin.git`) and use that as `origin`.
 
@@ -577,7 +577,7 @@ In a ReAct agent loop, every tool-call step re-sends the entire conversation his
 
 #### 1. Tool Result Capping
 
-Every tool result is truncated to `MAX_TOOL_RESULT_CHARS` (default: 6,000) using a head/tail split that preserves both the beginning and end of the output. Shell output uses a **tail-weighted split** (20% head, 80% tail) because build/test failures print at the end. Truncated results include a marker so agents know content was elided and can request specific regions via `read_file` with `offset`/`limit`.
+Every tool result is truncated to `MAX_TOOL_RESULT_CHARS` (default: 10,000) using a head/tail split that preserves both the beginning and end of the output. Shell output uses a **tail-weighted split** (20% head, 80% tail) because build/test failures print at the end. Truncated results include a marker so agents know content was elided and can request specific regions via `read_file` with `offset`/`limit`.
 
 #### 2. ReAct History Compaction (`wrapModelCall` middleware)
 
@@ -586,7 +586,7 @@ Before each LLM call, a `history-compaction` middleware compacts the message his
 - The **first message** (the task) and the **last N tool results** (default: 3) are always kept verbatim
 - Older tool results are replaced with one-line receipts: `[read_file src/App.tsx -> 4,210 chars, elided]`
 - Large `write_file`/`edit_file` arguments in older messages are elided (the file is already on disk)
-- A hard ceiling (`HISTORY_MAX_CHARS`, default: 40,000) drops the oldest stubbed messages if still over budget
+- A hard ceiling (`HISTORY_MAX_CHARS`, default: 60,000) drops the oldest stubbed messages if still over budget
 
 The compaction operates on a **copy** of the message history -- the durable `messages` state used by checkpointing, token extraction, and output parsing is untouched.
 
@@ -633,16 +633,16 @@ All compaction features default to **on**. To disable any feature, set its envir
 | Variable | Default | Effect of disabling |
 |----------|---------|-------------------|
 | `HISTORY_COMPACTION_ENABLED` | `true` | Disables the compaction middleware; full history replayed on every call |
-| `MAX_TOOL_RESULT_CHARS` | `6000` | Set higher to allow longer tool results |
+| `MAX_TOOL_RESULT_CHARS` | `10000` | Set higher to allow longer tool results |
 | `HISTORY_KEEP_RECENT_TOOL_RESULTS` | `4` | Increase to keep more recent results verbatim (lower bound) |
 | `HISTORY_KEEP_RECENT_TURNS` | `3` | Increase to keep more whole model turns verbatim |
 | `HISTORY_KEEP_RECENT_WRITE_ARGS` | `2` | Increase to keep more recent write arguments un-elided |
-| `HISTORY_MAX_CHARS` | `40000` | Raise the hard ceiling for compacted history |
+| `HISTORY_MAX_CHARS` | `60000` | Raise the hard ceiling for compacted history |
 | `CONVENTIONS_INLINE_DIGEST` | `true` | Revert to agents reading convention files via `read_file` |
 | `DEV_GIT_TOOLS_ENABLED` | `false` | Set `true` to restore git tools for dev agents |
 | `PERSONA_COMPACT` | `true` | Revert to the verbose ~7,000-char persona |
 | `AGENT_RESPAWN_ENABLED` | `true` | Revert to tool poisoning at the ceiling |
-| `AGENT_RESPAWN_MAX_GENERATIONS` | `2` | Max additional agent lifetimes per task |
+| `AGENT_RESPAWN_MAX_GENERATIONS` | `4` | Max additional agent lifetimes per task |
 | `RESPONSE_SCHEMA_STRIP_ALL_DESCRIPTIONS` | `true` | Keep all JSON schema descriptions |
 
 ### Measurement
@@ -987,14 +987,14 @@ npm run build
 | `LLM_BASE_URL` | — | OpenAI-compatible API base URL |
 | `LLM_MODEL` | `gpt-oss-120b` | Global fallback model identifier |
 | `ARCHITECT_MODEL` | `gpt-oss-120b` | Architect agent model (system design) |
-| `PRODUCT_MANAGER_MODEL` | `llama-3-3-70b-instruct` | Product Manager agent model (PRDs, user stories, acceptance criteria) |
-| `DBA_MODEL` | `llama-3-3-70b-instruct` | DBA agent model (schema design, migrations, query optimization) |
-| `TEAM_LEADER_MODEL` | `gemma-3-27b-it` | Team Leader agent model (task breakdown, assignments, bug triage) |
-| `DEVOPS_MODEL` | `mistral-small-3-1-24b-instruct-2503` | DevOps agent model (CI/CD, Docker, infra-as-code) |
+| `PRODUCT_MANAGER_MODEL` | `claude-sonnet-5` | Product Manager agent model (PRDs, user stories, acceptance criteria) |
+| `DBA_MODEL` | `gpt-oss-120b` | DBA agent model (schema design, migrations, query optimization) |
+| `TEAM_LEADER_MODEL` | `claude-sonnet-5` | Team Leader agent model (task breakdown, assignments, bug triage) |
+| `DEVOPS_MODEL` | `gpt-oss-120b` | DevOps agent model (CI/CD, Docker, infra-as-code) |
 | `CODEBASE_ANALYZER_MODEL` | `gpt-oss-120b` | Codebase Analyzer agent model (existing-project analysis) |
-| `PRINCIPAL_DEV_MODEL` | `llama-3-3-70b-instruct` | Principal developer agents model (core frameworks, complex features) |
-| `SENIOR_DEV_MODEL` | `mistral-small-3-1-24b-instruct-2503` | Senior developer agents model (feature modules, refactoring) |
-| `JUNIOR_DEV_MODEL` | `llama-3-2-3b-instruct` | Junior developer agents model (boilerplate, utilities, minor fixes) |
+| `PRINCIPAL_DEV_MODEL` | `gpt-oss-120b` | Principal developer agents model (core frameworks, complex features) |
+| `SENIOR_DEV_MODEL` | `gpt-oss-120b` | Senior developer agents model (feature modules, refactoring) |
+| `JUNIOR_DEV_MODEL` | `gpt-oss-20b` | Junior developer agents model (boilerplate, utilities, minor fixes) |
 | `QA_MODEL` | `gpt-oss-20b` | QA agents model (test plans, unit/integration/E2E tests) |
 | **Multi-Provider LLM (Plan 20)** | | |
 | `OPENAI_API_KEY` | — | API key for OpenAI models. When set, used directly instead of OAuth. Falls back to OAuth if empty |
@@ -1010,7 +1010,7 @@ npm run build
 | **Strong Model PR Fixer (Plan 20)** | | |
 | `STRONG_FIXER_MODEL` | — | Model for the strong fixer agent (e.g. `claude-opus-4-20250514`). Empty uses `PRINCIPAL_DEV_MODEL` |
 | `STRONG_FIXER_ENABLED` | `true` | Enable/disable the strong model PR fixer |
-| `STRONG_FIXER_MAX_TOOL_CALLS` | `40` | **Model-turn** ceiling for the strong fixer agent (Plan 22 changed the unit from tool calls to turns) |
+| `STRONG_FIXER_MAX_TOOL_CALLS` | `18` | **Model-turn** ceiling for the strong fixer agent (Plan 22 changed the unit from tool calls to turns) |
 | `PR_EXHAUSTION_STRATEGY` | `escalate-then-fix` | PR exhaustion strategy: `escalate-then-fix`, `fix-only`, or `escalate-only` |
 | `OAUTH_TOKEN_URL` | — | OAuth2 token endpoint URL |
 | `OAUTH_CLIENT_ID` | — | OAuth2 client ID |
@@ -1021,13 +1021,13 @@ npm run build
 | `CASSETTE_MAX_MB` | `25` | Warn when a cassette exceeds this size (MB) |
 | `RUN_MODE` | `human` | Default run mode: `autonomous` or `human` |
 | `MAX_BUGFIX_ITERATIONS` | `3` | Max QA → bugfix → dev cycles |
-| `MAX_CONCURRENT_DEVS` | `3` | Max parallel developer agents |
+| `MAX_CONCURRENT_DEVS` | `2` | Max parallel developer agents |
 | `GENERATED_PROJECTS_DIR` | `./generated-projects` | Where generated codebases are written |
 | `OUTPUTS_DIR` | `./outputs` | Where run logs and artifacts are saved |
 | `DOCKER_HOST` | — | Docker daemon URL (default: local socket) |
 | `SHELL_ALLOW_HOST` | `false` | Allow the Shell tool to execute commands on the host (default: blocked) |
-| `SHELL_DEFAULT_TIMEOUT_S` | `120` | Default shell command timeout (seconds) |
-| `SHELL_MAX_TIMEOUT_S` | `600` | Maximum shell command timeout (seconds) |
+| `SHELL_DEFAULT_TIMEOUT_S` | `60` | Default shell command timeout (seconds) |
+| `SHELL_MAX_TIMEOUT_S` | `900` | Maximum shell command timeout (seconds) |
 | `PLAYWRIGHT_MCP_CMD` | `npx` | Playwright MCP server command |
 | `PLAYWRIGHT_MCP_ARGS` | `@playwright/mcp@latest` | Playwright MCP server arguments |
 | `GITHUB_MODE` | `live` | GitHub mode: `live` (Octokit + PAT) or `local` (offline bare-repo stand-in) |
@@ -1035,20 +1035,20 @@ npm run build
 | `GITHUB_OWNER` | — | GitHub repository owner (org or user) |
 | `GITHUB_REPO` | — | GitHub repository name |
 | `GIT_DEFAULT_BRANCH` | `main` | Default branch name for merging PRs |
-| `MAX_REVIEW_ITERATIONS` | `5` | Max PR review rounds before escalation |
+| `MAX_REVIEW_ITERATIONS` | `3` | Max PR review rounds before escalation |
 | `GITHUB_PROJECT_TOKEN` | — | Separate PAT for project-specific repos (falls back to `GITHUB_TOKEN`) |
 | `GITHUB_PROJECT_OWNER` | — | Owner for project-specific repos (falls back to `GITHUB_OWNER`) |
 | `DASHBOARD_PORT` | `3000` | HTTP/WS server port |
-| `MAX_TOOL_RESULT_CHARS` | `6000` | Max characters any single tool result may contribute to agent history |
+| `MAX_TOOL_RESULT_CHARS` | `10000` | Max characters any single tool result may contribute to agent history |
 | `HISTORY_COMPACTION_ENABLED` | `true` | Enable middleware-based ReAct history compaction |
 | `SANITIZE_STREAM_BLOCKS` | `true` | Strip streaming residue (`*_delta` blocks, id-less `tool_use` blocks) from AIMessage content before every LLM call |
 | `GIT_NETWORK_TIMEOUT_MS` | `120000` | Timeout for git subcommands that hit the network (`fetch`/`push`/`pull`/`clone`/`ls-remote`); local subcommands stay at 30 s |
-| `HISTORY_MAX_CHARS` | `40000` | Hard character ceiling for compacted ReAct history |
+| `HISTORY_MAX_CHARS` | `60000` | Hard character ceiling for compacted ReAct history |
 | `CONVENTIONS_INLINE_DIGEST` | `true` | Inject conventions digest instead of read_file instructions |
 | `DEV_GIT_TOOLS_ENABLED` | `false` | Give dev agents git tools (PR workflow handles git) |
 | `PERSONA_COMPACT` | `true` | Use compact ~2,500-char developer persona |
 | `AGENT_RESPAWN_ENABLED` | `true` | Fresh-context respawn instead of tool poisoning |
-| `AGENT_RESPAWN_MAX_GENERATIONS` | `2` | Max respawn generations per dev task |
+| `AGENT_RESPAWN_MAX_GENERATIONS` | `4` | Max respawn generations per dev task |
 | `RESPONSE_SCHEMA_STRIP_ALL_DESCRIPTIONS` | `true` | Strip all JSON schema descriptions |
 
 See [`.env.example`](.env.example) for the full template.
@@ -1057,17 +1057,17 @@ See [`.env.example`](.env.example) for the full template.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MAX_TOOL_RESULT_CHARS` | `6000` | Max characters any single tool result may contribute to agent history |
+| `MAX_TOOL_RESULT_CHARS` | `10000` | Max characters any single tool result may contribute to agent history |
 | `HISTORY_KEEP_RECENT_TOOL_RESULTS` | `4` | Number of most-recent tool results kept verbatim in ReAct history (lower bound only) |
 | `HISTORY_KEEP_RECENT_TURNS` | `3` | Number of most-recent **model turns** whose tool results are kept verbatim. Primary recent-window control — counting individual results preserved only one turn when a model batches 8–11 calls (Plan 22) |
 | `HISTORY_KEEP_RECENT_WRITE_ARGS` | `2` | Number of most-recent write turns whose tool-call arguments are never elided (Plan 22) |
 | `HISTORY_COMPACTION_ENABLED` | `true` | Enable the middleware that compacts ReAct history before each LLM call |
-| `HISTORY_MAX_CHARS` | `40000` | Hard character ceiling for the assembled ReAct history passed to the LLM |
+| `HISTORY_MAX_CHARS` | `60000` | Hard character ceiling for the assembled ReAct history passed to the LLM |
 | `CONVENTIONS_INLINE_DIGEST` | `true` | Inject a distilled conventions digest instead of agents reading convention files |
 | `DEV_GIT_TOOLS_ENABLED` | `false` | Give developer agents git tools (the PR workflow already commits/pushes) |
 | `PERSONA_COMPACT` | `true` | Use the short persona variant (~2,500 chars vs ~7,000) for developer agents |
 | `AGENT_RESPAWN_ENABLED` | `true` | Respawn a dev agent with summarised handoff instead of poisoning tools at the ceiling |
-| `AGENT_RESPAWN_MAX_GENERATIONS` | `2` | Max respawn generations per logical dev task |
+| `AGENT_RESPAWN_MAX_GENERATIONS` | `4` | Max respawn generations per logical dev task |
 | `RESPONSE_SCHEMA_STRIP_ALL_DESCRIPTIONS` | `true` | Strip ALL descriptions from injected JSON Schema for maximum token savings |
 | **Tool Budgets (Plan 22)** | | |
 | `TOOL_BUDGETS_JSON` | — | Per-rank read/write/shell/**turn** budgets, merged over the built-in defaults (principal 60/30/14/28, senior 50/25/12/24, junior 40/20/12/20). A turn costs 1 regardless of how many tools the model calls in parallel |

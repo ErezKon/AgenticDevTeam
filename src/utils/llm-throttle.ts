@@ -6,31 +6,14 @@
  * the gateway returns 429. Without this, N parallel agents each retry
  * independently and sustain the rate-limit storm (runs 5 & 6: 1,171 retries).
  */
+import {
+    LLM_MAX_CONCURRENT_REQUESTS, LLM_MIN_REQUEST_INTERVAL_MS,
+    LLM_MAX_REQUEST_INTERVAL_MS, LLM_COOLDOWN_BASE_MS, LLM_COOLDOWN_MAX_MS,
+    PROVIDER_PAUSE_MAX_MS, OPENAI_BASE_URL, OPENAI_API_KEY, ANTHROPIC_API_KEY,
+} from '../config';
 import { getLogger } from './logger';
 
 const log = getLogger('[llm-throttle]', 214);
-
-// ─── Configuration (env-driven with sane defaults) ──────────────────────────
-
-/** Max concurrent LLM requests in flight process-wide. */
-const LLM_MAX_CONCURRENT_REQUESTS =
-    parseInt(process.env.LLM_MAX_CONCURRENT_REQUESTS ?? '2', 10);
-
-/** Minimum spacing between request starts (ms). */
-const LLM_MIN_REQUEST_INTERVAL_MS =
-    parseInt(process.env.LLM_MIN_REQUEST_INTERVAL_MS ?? '400', 10);
-
-/** Maximum adaptive interval ceiling (ms). */
-const LLM_MAX_REQUEST_INTERVAL_MS =
-    parseInt(process.env.LLM_MAX_REQUEST_INTERVAL_MS ?? '5000', 10);
-
-/** Base cooldown duration on 429 (ms). Doubles per consecutive 429. */
-const LLM_COOLDOWN_BASE_MS =
-    parseInt(process.env.LLM_COOLDOWN_BASE_MS ?? '5000', 10);
-
-/** Maximum cooldown duration (ms). */
-const LLM_COOLDOWN_MAX_MS =
-    parseInt(process.env.LLM_COOLDOWN_MAX_MS ?? '90000', 10);
 
 // ─── Module-level singleton state ───────────────────────────────────────────
 
@@ -217,10 +200,6 @@ function handleSuccess(): void {
 
 // ─── Provider Pause Gate (Plan 24, A3) ──────────────────────────────────────
 
-/** Max time to wait for a provider outage to clear (ms). */
-const PROVIDER_PAUSE_MAX_MS =
-    parseInt(process.env.PROVIDER_PAUSE_MAX_MS ?? '900000', 10);
-
 /** Whether the process-wide provider pause gate is active. */
 let providerPaused = false;
 
@@ -300,15 +279,10 @@ export async function awaitProviderRecovery(
  * is assumed to be back.
  */
 export function createProviderProbe(baseUrl?: string): () => Promise<boolean> {
-    // Use the OpenAI base URL from env, falling back to the standard URL
-    const url = baseUrl
-        ?? process.env.OPENAI_BASE_URL
-        ?? process.env.OPENAI_API_BASE
-        ?? 'https://api.openai.com/v1';
+    // Use the OpenAI base URL from config, falling back to the standard URL
+    const url = baseUrl || OPENAI_BASE_URL || 'https://api.openai.com/v1';
     const modelsUrl = `${url.replace(/\/+$/, '')}/models`;
-    const apiKey = process.env.OPENAI_API_KEY
-        ?? process.env.ANTHROPIC_API_KEY
-        ?? '';
+    const apiKey = OPENAI_API_KEY || ANTHROPIC_API_KEY;
 
     return async (): Promise<boolean> => {
         try {
