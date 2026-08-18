@@ -79,7 +79,22 @@ src/
       acceptance.ts                # acceptanceNode (Phase 10)
       finalize.ts                  # finalizeNode (Phase 11, reporting + teardown)
     run.ts                         # Autonomous & HITL run helpers + continueRun
-    pr-workflow.ts                 # Full PR lifecycle orchestrator (~2939 lines)
+    pr-workflow.ts                 # Backward-compatible re-export shim (~80 lines)
+    pr/                            # PR workflow modules (Sub-Plan 26-08)
+      index.ts                     # Barrel re-export
+      orchestrator.ts              # Top-level PR lifecycle orchestrator (~300 lines)
+      worktree.ts                  # Worktree creation, disposal, salvage, eviction
+      pr-github.ts                 # Octokit wrapper, PR creation/retry/merge, postComment
+      pr-body.ts                   # PR title & description builders (pure, testable)
+      dev-prompts.ts               # Prompt fragments & message builders (fix, repair, escalation)
+      diff.ts                      # DIFF_EXCLUDE_SPECS + getReviewDiff with stat fallback
+      agent-invoke.ts              # invokeDevAgent/invokeReviewerAgent with respawn
+      commit.ts                    # commitWorktree (durable stage+commit+push)
+      gates.ts                     # Gate running with tamper detection & repair
+      review-loop.ts               # Sequential reviewer passes with interleaved fixes
+      escalation.ts                # Senior dev + reviewer escalation on CRITICALs
+      strong-fixer.ts              # Strong model fixer (Sub-Plan 20)
+      merge-ladder.ts              # Base integration & conflict resolution
     context-builder.ts             # Compact context summarizers with char budgets
     quality-gates.ts               # Multi-language build/lint/test gates
     security-gates.ts              # Secret scan + dependency audit + licence check
@@ -373,9 +388,11 @@ The `ProjectState` in `src/conductor/state.ts` is a LangGraph `Annotation.Root` 
 
 ---
 
-## PR Workflow (pr-workflow.ts)
+## PR Workflow (pr/ modules, re-exported via pr-workflow.ts)
 
-The development phase uses a sophisticated PR workflow for each branch:
+The development phase uses a sophisticated PR workflow for each branch.
+The implementation is split into focused modules under `src/conductor/pr/` (Sub-Plan 26-08).
+`pr-workflow.ts` is a backward-compatible re-export shim; the real orchestrator is `pr/orchestrator.ts`.
 
 1. **Worktree creation** -- `git worktree add .worktrees/<branch>` for parallel isolation
 2. **Dev agent invocation** -- Agent writes code with TDD (tests first), commits with conventional format.
