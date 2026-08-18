@@ -12,7 +12,7 @@
 4. **Never break the pipeline.** The LangGraph state machine is the backbone. Changes to `state.ts`, `graph.ts`, or `nodes.ts` require understanding the full flow and how reducers merge state.
 5. **Schema changes cascade.** Modifying a Zod schema in `src/agents/_shared/schemas/` affects every agent that uses it, the conductor nodes, and the tests. Trace all consumers before changing.
 6. **Environment variables are the API.** All configuration is via `.env`. When adding a new config, add it to `src/config.ts`, `.env.example` (with documentation), and the README's Environment Variables table.
-7. **Test what you change.** Run `npm run test:unit` for unit tests. Use `npm run test:greenfield` or `npm run test:maintain` for integration tests. The test timeout is 15 minutes due to LLM-heavy tests.
+7. **Test what you change.** Run `npm run test:unit` for unit tests. Use `npm run test:greenfield` or `npm run test:maintain` for integration tests. Default test timeout is 10 seconds; integration tests set their own per-test timeouts. Use `npm run typecheck` for type checking and `npm run lint` for unused-code detection.
 8. **Do not hardcode vendor-specific values.** The system is designed to work with any OpenAI-compatible LLM endpoint. All URLs, tokens, and model names come from environment variables.
 9. **Never commit and push changes without explicit consent.** The user will review the changes and approve them, he will commit and push manually. Unless user specifically requests you to commit/push the changes.
 
@@ -183,8 +183,13 @@ dashboard/                         # Angular 19 standalone web UI
 
 tests/                             # Jest test suite (ts-jest)
   setup.ts                         # Polyfill crypto, load env, validate vars
+  setup-env-guard.ts               # Env snapshot/restore (prevents cross-test pollution)
   utils.ts                         # Spec discovery helpers
-  *.test.ts                        # 70+ test files
+  helpers/                         # Shared test utilities
+    state-factory.ts               # makeState(overrides?) — canonical ProjectStateType fixture
+    tmp.ts                         # makeTempDir(), withTempDir() — temp dir lifecycle
+    git.ts                         # git(), createTestRepo() — isolated git helpers
+  *.test.ts                        # 80+ test files
 
 Plans/                             # Historical plan documents (01 … 21) + implementation reports
 specs/
@@ -996,18 +1001,29 @@ tests/continue-integration.test.ts  # Integration tests (full flow, singletons, 
 
 | Command | Scope |
 |---------|-------|
-| `npm test` | All tests (15-min timeout) |
+| `npm test` | Unit tests only (integration tests excluded via `testPathIgnorePatterns`) |
 | `npm run test:unit` | Unit tests only (excludes greenfield/maintain/replay) |
-| `npm run test:greenfield` | Greenfield integration test |
-| `npm run test:maintain` | Maintain-mode integration test |
+| `npm run test:greenfield` | Greenfield integration test (requires LLM keys) |
+| `npm run test:maintain` | Maintain-mode integration test (requires LLM keys) |
 | `npm run test:replay` | Cassette replay test |
 | `npm run test:oauth` | OAuth integration test |
+| `npm run typecheck` | `tsc --noEmit` |
+| `npm run lint` | `tsc --noEmit --noUnusedLocals --noUnusedParameters` |
 
 ### Test Infrastructure
 - **Framework**: Jest with ts-jest
-- **Setup**: `tests/setup.ts` -- Polyfills crypto, loads env, validates required vars
-- **Timeout**: 900,000ms (15 min) for LLM-heavy integration tests
+- **Setup**: `tests/setup.ts` (crypto polyfill, env loading) + `tests/setup-env-guard.ts` (env snapshot/restore per test)
+- **Timeout**: 10,000ms (10s) default; integration tests set per-test timeouts
+- **restoreMocks**: `true` — all mocks auto-restored after each test
+- **testPathIgnorePatterns**: `greenfield`, `maintain`, `oauth`, `pipeline-replay`, `/tests/fixtures/`
 - **Transform**: Handles ESM packages (`@octokit`, `universal-user-agent`, `before-after-hook`)
+- **Logger mock**: Manual mock at `src/utils/__mocks__/logger.ts` — call `jest.mock('../src/utils/logger')` (no factory needed)
+- **CI**: `.github/workflows/ci.yml` — typecheck, unit tests, dashboard build
+
+### Shared Test Helpers (`tests/helpers/`)
+- **`state-factory.ts`**: `makeState(overrides?)` — canonical `ProjectStateType` fixture with all 48 fields. Use instead of copy-pasting the state literal.
+- **`tmp.ts`**: `makeTempDir(prefix)`, `cleanupDir(dir)`, `withTempDir(prefix, fn)` — temp directory lifecycle.
+- **`git.ts`**: `git(cwd, args, timeout?)`, `createTestRepo(prefix)` — isolated git execution (no system config, deterministic author/committer).
 
 ### Cassette Recording
 ```bash

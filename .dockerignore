@@ -7,3 +7,10 @@ generated-projects/
 *.log
 dashboard/node_modules/
 dashboard/dist/
+.env
+.git
+tests/
+Plans/
+.worktrees/
+.worktrees-failed/
+failed-run/

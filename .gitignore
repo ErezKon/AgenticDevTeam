@@ -8,4 +8,8 @@ outputs/
 _verify*
 dashboard/.angular/*
 .worktrees/
+.worktrees-failed/
 generated-projects/*
+failed-run/
+coverage/
+.DS_Store

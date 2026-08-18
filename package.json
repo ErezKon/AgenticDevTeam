@@ -13,7 +13,9 @@
     "test:unit": "jest --runInBand --verbose --testPathIgnorePatterns='greenfield|maintain|pipeline-replay'",
     "test:regression": "jest --runInBand --verbose --testPathPattern=regression-plan19",
     "test:replay": "jest --runInBand --verbose --testPathPattern=pipeline-replay",
-    "record:cassette": "LLM_CASSETTE_MODE=record CASSETTE_NAME=greenfield-smoke GITHUB_MODE=local tsx src/cli.ts"
+    "record:cassette": "LLM_CASSETTE_MODE=record CASSETTE_NAME=greenfield-smoke GITHUB_MODE=local tsx src/cli.ts",
+    "typecheck": "tsc --noEmit",
+    "lint": "tsc --noEmit --noUnusedLocals --noUnusedParameters"
   },
   "author": "",
   "license": "ISC",

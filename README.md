@@ -787,7 +787,18 @@ AgenticDevTeam/
 │   ├── proxy.conf.json                     # Dev proxy → backend :3000
 │   └── package.json
 │
+├── tests/                                   # Jest test suite
+│   ├── setup.ts                            # Polyfill crypto, load env
+│   ├── setup-env-guard.ts                  # Env snapshot/restore per test
+│   ├── helpers/                            # Shared test utilities
+│   │   ├── state-factory.ts               # makeState(overrides?) fixture
+│   │   ├── tmp.ts                         # Temp dir lifecycle helpers
+│   │   └── git.ts                         # Isolated git test helpers
+│   └── *.test.ts                           # 80+ test files
+│
+├── .github/workflows/ci.yml               # CI: typecheck + unit tests + dashboard build
 ├── package.json                            # Backend dependencies & scripts
+├── jest.config.js                          # Jest configuration
 ├── tsconfig.json                           # TypeScript config
 ├── Dockerfile                              # Orchestrator container
 ├── docker-compose.yml                      # Orchestrator + Playwright MCP
