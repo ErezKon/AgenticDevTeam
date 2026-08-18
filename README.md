@@ -761,7 +761,13 @@ AgenticDevTeam/
 │   │   ├── conventions-digest.ts           # Compact in-prompt conventions digest
 │   │   ├── token-tracker.ts                # Per-invocation token tracking + efficiency metrics
 │   │   ├── token-report.ts                 # HTML token usage report (+ Invocation Efficiency table)
-│   │   └── codebase-analysis-writer.ts     # Write analysis markdown to project + outputs
+│   │   ├── codebase-analysis-writer.ts     # Write analysis markdown to project + outputs
+│   │   ├── fs-walk.ts                      # Shared filesystem walker (walkDir, collectFiles, isTestFile)
+│   │   ├── source-graph.ts                 # Import extraction, graph building, transitive reachability
+│   │   ├── markdown-table.ts               # Shared mdTable() + mdSection() with pipe-escaping
+│   │   ├── shell-exec.ts                   # Shared ExecFn, safeChildEnv, defaultExec, isToolAvailable
+│   │   ├── branch-naming.ts                # Canonical slugify, systemBranch, featureBranch, isSystemBranch
+│   │   └── artifact-writer.ts              # writeOutputFile + appendOutputLine for output-dir artifacts
 │   │
 │   ├── templates/
 │   │   └── codebase-analysis.template.ts   # Markdown renderer for CodebaseAnalysis

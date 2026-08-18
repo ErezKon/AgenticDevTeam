@@ -60,6 +60,7 @@ import {
     type ConfigBaseline, type TamperFinding,
 } from './gate-integrity';
 import { GATE_INTEGRITY_MODE, GATE_INTEGRITY_DELETE_TRIVIAL_TESTS } from '../config';
+import { mdTable } from '../utils/markdown-table';
 import { classifyPrFailure, isFatalPrFailure } from './pr-failure';
 import { resolveKnownConflicts, listConflictedFiles } from './merge-resolve';
 import type { CompletionEvidence } from './assignment-policy';
@@ -1566,9 +1567,10 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
             }
             if (majorFindings.length > 0) {
                 prBody += `\n\n## Heuristic findings (informational)\n\n`
-                    + '| Severity | Kind | File | Detail |\n'
-                    + '|----------|------|------|--------|\n'
-                    + majorFindings.map(f => `| ${f.severity.toUpperCase()} | ${f.kind} | \`${f.file}\` | ${f.detail} |`).join('\n');
+                    + mdTable(
+                        ['Severity', 'Kind', 'File', 'Detail'],
+                        majorFindings.map(f => [f.severity.toUpperCase(), f.kind, `\`${f.file}\``, f.detail]),
+                    );
             }
         }
 

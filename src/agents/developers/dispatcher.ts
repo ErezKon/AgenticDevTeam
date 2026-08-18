@@ -9,6 +9,7 @@
  * owners are serialised instead of batched.
  */
 import { MAX_CONCURRENT_DEVS, INTER_BATCH_DELAY_MS, MAX_BRANCH_WALL_MS } from '../../config';
+import { slugify, featureBranch } from '../../utils/branch-naming';
 import { getLogger } from '../../utils/logger';
 import { executePRWorkflow } from '../../conductor/pr-workflow';
 import { completedIdsFromPullRequests } from '../../conductor/assignment-policy';
@@ -107,7 +108,7 @@ export function canonicalBranchName(
     const existing = storyBranches.get(storyKey);
     if (existing) return existing;
 
-    let branch = a.branchName ?? `${projectSlug}/feature/${slugify(storyKey)}-${slugify(a.description)}`;
+    let branch = a.branchName ?? featureBranch(projectSlug, storyKey, a.description);
     if (!branch.startsWith(`${projectSlug}/`)) branch = `${projectSlug}/${branch}`;
     // Sanitize the entire branch name to prevent command injection via LLM-controlled
     // branchName or storyId values (Plan 26-02, A4).
@@ -134,14 +135,6 @@ function groupByBranch(
         groups.set(branch, existing);
     }
     return groups;
-}
-
-function slugify(text: string): string {
-    return text
-        .toLowerCase()
-        .replace(/[^a-z0-9]+/g, '-')
-        .replace(/^-|-$/g, '')
-        .slice(0, 50);
 }
 
 // ─── Scaffold barrier (Sub-Plan 06 §5a) ─────────────────────────────────────

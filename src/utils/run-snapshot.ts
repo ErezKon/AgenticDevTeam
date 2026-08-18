@@ -7,6 +7,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { getLogger } from './logger';
+import { writeOutputFile } from './artifact-writer';
 import { tokenTracker } from './token-tracker';
 import { getBudgetStatus } from './run-budget';
 import { getRecentEvents, type RunEvent } from './event-bus';
@@ -43,16 +44,12 @@ export function redactState(state: any): any {
  * Returns the path written, or null on failure.
  */
 export function writeStateSnapshot(outputPath: string, state: any): string | null {
-    try {
-        const dest = path.join(outputPath, 'state.json');
-        const redacted = redactState(state);
-        fs.writeFileSync(dest, JSON.stringify(redacted, null, 2), 'utf-8');
+    const redacted = redactState(state);
+    const dest = writeOutputFile(outputPath, 'state.json', JSON.stringify(redacted, null, 2));
+    if (dest) {
         log.info(`State snapshot written: ${dest}`);
-        return dest;
-    } catch (err: any) {
-        log.warn(`Failed to write state snapshot: ${err?.message ?? err}`);
-        return null;
     }
+    return dest;
 }
 
 // ─── Periodic phase snapshot (Plan 25) ──────────────────────────────────────
@@ -71,20 +68,15 @@ export function writePeriodicSnapshot(
     currentPhase: string,
 ): void {
     if (!outputPath) return;
-    try {
-        // Write the full state snapshot (overwrites previous)
-        writeStateSnapshot(outputPath, state);
-        // Write a lightweight marker with the phase and timestamp
-        const marker = {
-            phase: currentPhase,
-            timestamp: new Date().toISOString(),
-            reason: 'periodic',
-        };
-        const markerPath = path.join(outputPath, 'latest-phase.json');
-        fs.writeFileSync(markerPath, JSON.stringify(marker, null, 2), 'utf-8');
-    } catch (err: any) {
-        log.warn(`Periodic snapshot failed (non-fatal): ${err?.message ?? err}`);
-    }
+    // Write the full state snapshot (overwrites previous)
+    writeStateSnapshot(outputPath, state);
+    // Write a lightweight marker with the phase and timestamp
+    const marker = {
+        phase: currentPhase,
+        timestamp: new Date().toISOString(),
+        reason: 'periodic',
+    };
+    writeOutputFile(outputPath, 'latest-phase.json', JSON.stringify(marker, null, 2));
 }
 
 // ─── Run manifest ───────────────────────────────────────────────────────────
@@ -443,9 +435,10 @@ export function writeRunManifest(
             });
         }
 
-        const dest = path.join(outputPath, 'run-manifest.json');
-        fs.writeFileSync(dest, JSON.stringify(manifest, null, 2), 'utf-8');
-        log.info(`Run manifest written: ${dest}`);
+        const dest = writeOutputFile(outputPath, 'run-manifest.json', JSON.stringify(manifest, null, 2));
+        if (dest) {
+            log.info(`Run manifest written: ${dest}`);
+        }
         return dest;
     } catch (err: any) {
         log.warn(`Failed to write run manifest: ${err?.message ?? err}`);

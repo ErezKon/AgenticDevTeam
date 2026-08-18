@@ -24,6 +24,7 @@ import { parseRequirementsFile } from './tools/requirements/parse-requirements';
 import type { ProjectStateType } from './conductor/state';
 import type { RepoTarget } from './agents/_shared/base-schemas';
 import { tokenTracker } from './utils/token-tracker';
+import { slugify } from './utils/branch-naming';
 import { refreshTokenReport } from './utils/token-report';
 import { redactState } from './utils/run-snapshot';
 
@@ -236,7 +237,7 @@ async function getRepoTarget(systemName: string): Promise<RepoTarget | undefined
             return { type: 'same-repo', isPrivate: true };
 
         case '2': {
-            const defaultName = systemName.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-');
+            const defaultName = slugify(systemName);
             const repoName = (await ask(`Repository name [${defaultName}]: `)) || defaultName;
             const privateAnswer = await ask('Private repository? [Y/n]: ');
             const isPrivate = !privateAnswer || privateAnswer.toLowerCase() !== 'n';

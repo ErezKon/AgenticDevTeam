@@ -7,6 +7,7 @@
 import type { ExecutedTestReport } from './test-runner';
 import type { UserStory } from '../agents/_shared/schemas/user-story.schema';
 import type { Bug } from '../agents/_shared/schemas/bug.schema';
+import { makeGateBug } from './bug-factory';
 import {
     QA_ENFORCE_SUFFICIENCY,
     QA_MIN_TOTAL_TESTS,
@@ -155,21 +156,21 @@ export function checkTestSufficiency(input: {
  * Convert sufficiency violations into Bugs with stable ids `QA-<kind>[-<storyId>]`.
  */
 export function sufficiencyViolationsToBugs(violations: SufficiencyViolation[]): Bug[] {
-    return violations.map(v => ({
-        id: v.storyId ? `QA-${v.kind}-${v.storyId}` : `QA-${v.kind}`,
-        title: `Test sufficiency: ${v.kind}${v.storyId ? ` (${v.storyId})` : ''}`,
-        severity: v.severity,
-        stepsToReproduce: v.detail,
-        expectedBehavior: getExpectedBehavior(v.kind),
-        actualBehavior: v.detail,
-        // Carry the real story id as structured data. It used to live only in
-        // `suspectedArea` prose, so triage copied the synthetic BUG id into
-        // `assignment.storyId` and developers lost their acceptance criteria
-        // (Plan 21, E5).
-        ...(v.storyId && { storyId: v.storyId }),
-        suspectedArea: v.storyId ? `Story ${v.storyId}` : 'Test suite',
-        reportedBy: 'test-sufficiency',
-    }));
+    // Carry the real story id as structured data. It used to live only in
+    // `suspectedArea` prose, so triage copied the synthetic BUG id into
+    // `assignment.storyId` and developers lost their acceptance criteria
+    // (Plan 21, E5).
+    return violations.map(v => makeGateBug(
+        v.storyId ? `QA-${v.kind}-${v.storyId}` : `QA-${v.kind}`,
+        `Test sufficiency: ${v.kind}${v.storyId ? ` (${v.storyId})` : ''}`,
+        v.severity,
+        'test-sufficiency',
+        v.detail,
+        getExpectedBehavior(v.kind),
+        v.detail,
+        v.storyId ? `Story ${v.storyId}` : 'Test suite',
+        v.storyId ? { storyId: v.storyId } : undefined,
+    ));
 }
 
 function getExpectedBehavior(kind: SufficiencyViolation['kind']): string {

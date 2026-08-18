@@ -12,9 +12,9 @@
  */
 import * as fs from 'fs';
 import * as path from 'path';
-import { execSync } from 'child_process';
 import { getLogger } from '../utils/logger';
 import { emitRunEvent } from '../utils/event-bus';
+import { mdTable } from '../utils/markdown-table';
 import {
     QUALITY_GATES_ENABLED,
     QUALITY_GATE_STEPS,
@@ -23,25 +23,14 @@ import {
     QUALITY_GATE_SCAN_DEPTH,
     QUALITY_GATE_MAX_ROOTS,
 } from '../config';
+import { PRUNE_DIRS as SHARED_PRUNE_DIRS } from '../utils/fs-walk';
+import { type ExecFn, defaultExec as sharedDefaultExec, isToolAvailable } from '../utils/shell-exec';
 import type { TestReport } from '../agents/_shared/schemas/testing.schema';
 import type { Bug } from '../agents/_shared/schemas/bug.schema';
+import { makeGateBug } from './bug-factory';
 import type { ProductVerifyReport } from './product-verify';
 
 const log = getLogger('[QualityGates]', 220);
-
-/** Build a child-process env from a safe allowlist — never leaks API keys. */
-function safeChildEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
-    const SAFE_KEYS = [
-        'PATH', 'HOME', 'USER', 'SHELL', 'LANG', 'LC_ALL', 'TERM',
-        'TMPDIR', 'TMP', 'TEMP', 'HOSTNAME',
-        'PROGRAMFILES', 'SYSTEMROOT', 'WINDIR', // Windows
-    ];
-    const env: Record<string, string | undefined> = {};
-    for (const key of SAFE_KEYS) {
-        if (process.env[key]) env[key] = process.env[key];
-    }
-    return { ...env, ...extra };
-}
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -98,11 +87,7 @@ const STACK_MARKERS: [StackKind, string[]][] = [
     ['rust',    ['Cargo.toml']],
 ];
 
-/** Directories to prune when scanning for stack roots. */
-const PRUNE_DIRS = new Set([
-    'node_modules', '.git', '.worktrees', 'dist', 'build', '.next', 'out',
-    'coverage', '.venv', 'venv', 'vendor', 'target', '.conventions',
-]);
+// Prune set delegated to ../utils/fs-walk (SHARED_PRUNE_DIRS).
 
 /**
  * Check whether a directory contains markers for a given stack.
@@ -156,7 +141,7 @@ export function detectStackRoots(workspacePath: string): StackRoot[] {
 
         // Recurse into subdirectories
         for (const entry of entries) {
-            if (PRUNE_DIRS.has(entry)) continue;
+            if (SHARED_PRUNE_DIRS.has(entry)) continue;
             const childPath = path.join(dir, entry);
             try {
                 if (fs.statSync(childPath).isDirectory()) {
@@ -360,33 +345,11 @@ const TOOL_EXECUTABLES: Record<StackKind, string> = {
 
 const REQUIRED_STEPS = new Set<GateStep>(['build', 'test']);
 
-// ─── Internal exec seam ────────────────────────────────────────────────────
+// ─── Internal exec seam (delegates to shared shell-exec) ───────────────────
 
-type ExecFn = (cmd: string, opts: { cwd: string; timeout: number }) => string;
-
+/** Quality-gates wrapper: 5 MB buffer, CI + NODE_ENV=test env. */
 function defaultExec(cmd: string, opts: { cwd: string; timeout: number }): string {
-    return execSync(cmd + ' 2>&1', {
-        cwd: opts.cwd,
-        encoding: 'utf-8',
-        timeout: opts.timeout,
-        maxBuffer: 1024 * 1024 * 5,
-        env: safeChildEnv({ CI: 'true', NODE_ENV: 'test' }),
-    });
-}
-
-// ─── Tool availability check ────────────────────────────────────────────────
-
-function isToolAvailable(tool: string, workspacePath: string, exec: ExecFn): boolean {
-    // For ./gradlew, check file existence instead of which
-    if (tool === './gradlew') {
-        return fs.existsSync(path.join(workspacePath, 'gradlew'));
-    }
-    try {
-        exec(`which ${tool}`, { cwd: workspacePath, timeout: 10_000 });
-        return true;
-    } catch {
-        return false;
-    }
+    return sharedDefaultExec(cmd, opts, 5 * 1024 * 1024, { CI: 'true', NODE_ENV: 'test' });
 }
 
 // ─── Python install command adjustment ──────────────────────────────────────
@@ -725,16 +688,16 @@ export function synthesiseGateBugs(report: GateReport): Bug[] {
 
         const dirSuffix = r.relDir ? ` [${r.relDir}]` : '';
         const severity = (r.step === 'build' || r.step === 'test' || r.step === 'typecheck') ? 'critical' : 'major';
-        bugs.push({
-            id: `GATE-${stackLabel}-${r.step}${r.relDir ? `-${r.relDir.replace(/\//g, '-')}` : ''}`,
-            title: `Quality gate failed: ${r.step} (${stackLabel})${dirSuffix}`,
-            severity: severity as 'critical' | 'major',
-            stepsToReproduce: `Run: ${r.command} in ${r.relDir || '.'}`,
-            expectedBehavior: `The ${r.step} step should pass`,
-            actualBehavior: r.output.slice(0, 500),
-            suspectedArea: `${stackLabel} ${r.step} configuration or source code`,
-            reportedBy: 'quality-gates',
-        });
+        bugs.push(makeGateBug(
+            `GATE-${stackLabel}-${r.step}${r.relDir ? `-${r.relDir.replace(/\//g, '-')}` : ''}`,
+            `Quality gate failed: ${r.step} (${stackLabel})${dirSuffix}`,
+            severity,
+            'quality-gates',
+            `Run: ${r.command} in ${r.relDir || '.'}`,
+            `The ${r.step} step should pass`,
+            r.output.slice(0, 500),
+            `${stackLabel} ${r.step} configuration or source code`,
+        ));
     }
 
     // Product verification failures
@@ -744,16 +707,16 @@ export function synthesiseGateBugs(report: GateReport): Bug[] {
         // Artifact check failures
         for (const ac of pv.artifacts) {
             if (!ac.passed) {
-                bugs.push({
-                    id: `PRODUCT-ARTIFACTS-${ac.root || 'root'}`,
-                    title: `Build produced no artifacts: ${ac.root || '.'}`,
-                    severity: 'critical',
-                    stepsToReproduce: `Run build in ${ac.root || '.'} and check for output in ${ac.expectedDirs.join(', ')}`,
-                    expectedBehavior: `Build should produce artifacts in ${ac.expectedDirs.join(' or ')}`,
-                    actualBehavior: ac.reason,
-                    suspectedArea: `build configuration in ${ac.root || '.'}`,
-                    reportedBy: 'product-verify',
-                });
+                bugs.push(makeGateBug(
+                    `PRODUCT-ARTIFACTS-${ac.root || 'root'}`,
+                    `Build produced no artifacts: ${ac.root || '.'}`,
+                    'critical',
+                    'product-verify',
+                    `Run build in ${ac.root || '.'} and check for output in ${ac.expectedDirs.join(', ')}`,
+                    `Build should produce artifacts in ${ac.expectedDirs.join(' or ')}`,
+                    ac.reason,
+                    `build configuration in ${ac.root || '.'}`,
+                ));
             }
         }
 
@@ -762,30 +725,30 @@ export function synthesiseGateBugs(report: GateReport): Bug[] {
             const issueList = pv.resolveIssues.slice(0, 10)
                 .map(i => `${i.file}:${i.line} → '${i.specifier}' (${i.reason})`)
                 .join('\n');
-            bugs.push({
-                id: 'PRODUCT-RESOLVE',
-                title: `${pv.resolveIssues.length} unresolved import(s)/reference(s)`,
-                severity: 'critical',
-                stepsToReproduce: 'Check import/require/src/href paths in source files',
-                expectedBehavior: 'All imports and references should resolve to existing files or packages',
-                actualBehavior: issueList,
-                suspectedArea: 'source file imports and asset references',
-                reportedBy: 'product-verify',
-            });
+            bugs.push(makeGateBug(
+                'PRODUCT-RESOLVE',
+                `${pv.resolveIssues.length} unresolved import(s)/reference(s)`,
+                'critical',
+                'product-verify',
+                'Check import/require/src/href paths in source files',
+                'All imports and references should resolve to existing files or packages',
+                issueList,
+                'source file imports and asset references',
+            ));
         }
 
         // Smoke test failure
         if (pv.smoke && !pv.smoke.passed) {
-            bugs.push({
-                id: 'PRODUCT-SMOKE',
-                title: 'Smoke test failed: app does not serve or render',
-                severity: 'critical',
-                stepsToReproduce: 'Build the app and serve it, then access the root URL',
-                expectedBehavior: 'App should serve and return meaningful content',
-                actualBehavior: pv.smoke.reason,
-                suspectedArea: 'build output, entry HTML, or referenced assets',
-                reportedBy: 'product-verify',
-            });
+            bugs.push(makeGateBug(
+                'PRODUCT-SMOKE',
+                'Smoke test failed: app does not serve or render',
+                'critical',
+                'product-verify',
+                'Build the app and serve it, then access the root URL',
+                'App should serve and return meaningful content',
+                pv.smoke.reason,
+                'build output, entry HTML, or referenced assets',
+            ));
         }
     }
 
@@ -810,8 +773,7 @@ export function gateReportToMarkdown(report: GateReport): string {
     } else {
         lines.push(':warning: **Some quality gates failed.**\n');
     }
-    lines.push('| Dir | Stack | Step | Mode | Status | Duration |');
-    lines.push('|-----|-------|------|------|--------|----------|');
+    const tableRows: (string | number)[][] = [];
     for (const r of report.results) {
         // Derive the stack from the roots
         let stackLabel = '—';
@@ -835,8 +797,9 @@ export function gateReportToMarkdown(report: GateReport): string {
         const status = r.skipped ? 'Skipped' : r.mode === 'absent' ? 'Absent' : r.passed ? 'Passed' : 'Failed';
         const dur = r.durationMs > 0 ? `${(r.durationMs / 1000).toFixed(1)}s` : '—';
         const dirLabel = r.relDir || '.';
-        lines.push(`| ${dirLabel} | ${stackLabel} | ${r.step} | ${r.mode} | ${icon} ${status} | ${dur} |`);
+        tableRows.push([dirLabel, stackLabel, r.step, r.mode, `${icon} ${status}`, dur]);
     }
+    lines.push(mdTable(['Dir', 'Stack', 'Step', 'Mode', 'Status', 'Duration'], tableRows));
 
     // Show failing outputs
     const failures = report.results.filter(r => !r.passed && !r.skipped && r.mode !== 'absent');

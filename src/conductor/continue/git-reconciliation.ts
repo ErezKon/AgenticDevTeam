@@ -24,6 +24,7 @@ import * as path from 'path';
 import { getLogger } from '../../utils/logger';
 import { gitExec, gitExecVerbose } from '../../utils/git-exec';
 import { appendLedger } from '../../utils/run-ledger';
+import { systemBranch, isSystemBranch } from '../../utils/branch-naming';
 import { CONTINUE_GIT_RECONCILE, CONTINUE_CLOSE_STALE_PRS } from '../../config';
 import { GITHUB_MODE } from '../../utils/github-local';
 import type { CollectedRunState, BranchStatus } from './state-collector';
@@ -196,14 +197,13 @@ function detectSystemBranch(
     const systemName = state.input?.systemName
         ?? collected.manifest?.systemName;
     if (systemName) {
-        const slug = systemName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/-+$/, '');
-        return `project/${slug}`;
+        return systemBranch(systemName);
     }
 
     // Last resort: check current branch in git
     if (collected.workspaceIsGitRepo) {
         const currentBranch = gitExec(collected.workspacePath, 'rev-parse --abbrev-ref HEAD');
-        if (!currentBranch.startsWith('Error:') && currentBranch.startsWith('project/')) {
+        if (!currentBranch.startsWith('Error:') && isSystemBranch(currentBranch)) {
             return currentBranch;
         }
     }

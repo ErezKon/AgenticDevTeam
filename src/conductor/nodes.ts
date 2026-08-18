@@ -91,21 +91,25 @@ import { extractTokenUsageFromMessages } from '../utils/token-usage-extractor';
 import { generateTokenReport, refreshTokenReport } from '../utils/token-report';
 import { getThrottleStats, logThrottleStats } from '../utils/llm-throttle';
 import { estimateCost } from '../utils/cost';
+import { mdTable } from '../utils/markdown-table';
 import { startRunBudget, getBudgetStatus, getEffectiveLimits, shouldStopRun } from '../utils/run-budget';
 import { emitRunEvent, getAllEvents } from '../utils/event-bus';
 import { writeStateSnapshot, writeRunManifest, writePeriodicSnapshot, countPRsByStatus, extractPhaseTimeline, renderPhaseTimeline } from '../utils/run-snapshot';
 import { generateRunDiagnosis } from '../utils/run-diagnosis';
 import { buildTraceabilityReport, renderTraceabilityMarkdown } from '../utils/traceability';
 import { evaluateAcceptance, haltIfUnrecoverable, detectUnrecoverable, acceptanceBlockersToBugs, acceptanceReportToMarkdown } from './acceptance-gate';
-import type { DispatchRound } from './acceptance-gate';
+import type { DispatchRound } from './gate-types';
 import { initLedger, appendLedger } from '../utils/run-ledger';
 import { generateRunReport } from '../utils/ledger-report';
 import { checkInvariants } from './run-invariants';
+import { slugify, systemBranch as buildSystemBranch, projectSlugFromBranch } from '../utils/branch-naming';
 import { writeRepoContract } from '../utils/repo-contract-writer';
 import { REPO_CONTRACT_MAX_MODULES, QA_TEST_TIMEOUT_MS } from '../config';
 import { runTests, executedToTestReports, compareClaimVsReality, type ExecutedTestReport, type ClaimDiscrepancy } from './test-runner';
 import { checkTestSufficiency, sufficiencyViolationsToBugs } from './test-sufficiency';
+import { makeGateBug } from './bug-factory';
 import { detectTrivialTests } from './gate-integrity';
+import { writeOutputFile } from '../utils/artifact-writer';
 import * as path from 'path';
 import * as fs from 'fs';
 
@@ -751,8 +755,7 @@ export async function intakeNode(state: ProjectStateType): Promise<Partial<Proje
             );
         }
 
-        const repoName = repoTarget!.repoName ?? state.input.systemName
-            .toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 100);
+        const repoName = repoTarget!.repoName ?? slugify(state.input.systemName, 100);
 
         if (repoTarget!.type === 'new-repo') {
             // Create a new GitHub repository
@@ -858,12 +861,7 @@ export async function intakeNode(state: ProjectStateType): Promise<Partial<Proje
     intakeLog.info(`Git repo validated. Default branch: ${defaultBranch}, separate repo: ${isSeparateRepo}`);
 
     // ── Create or checkout the system branch (project/<system-name>) ─────
-    const systemSlug = state.input.systemName
-        .toLowerCase()
-        .replace(/[^a-z0-9]+/g, '-')
-        .replace(/^-|-$/g, '')
-        .slice(0, 50);
-    const systemBranch = `project/${systemSlug}`;
+    const systemBranch = buildSystemBranch(state.input.systemName);
 
     // Check if the system branch already exists (remote or local)
     const remoteBranches = gitExec(gitRoot, 'branch -r').split('\n').map((b: string) => b.trim());
@@ -1305,7 +1303,7 @@ export async function teamLeaderNode(state: ProjectStateType): Promise<Partial<P
     const apiKey = await getAccessToken();
     const agent = createTeamLeaderAgent(apiKey);
 
-    const projectSlug = state.systemBranch.replace(/^project\//, '');
+    const projectSlug = projectSlugFromBranch(state.systemBranch);
 
     let userMsg: string;
     {
@@ -1541,7 +1539,7 @@ export async function developmentNode(state: ProjectStateType): Promise<Partial<
     }
     devLog.info(`Context [development]: ${contextPrompt.length} chars`);
     recordContextChars('development', contextPrompt.length);
-    const projectSlug = state.systemBranch.replace(/^project\//, '');
+    const projectSlug = projectSlugFromBranch(state.systemBranch);
 
     const isMaintainMode = state.codebaseAnalysis != null;
     const result = await dispatchDevelopers(apiKey, pending, state.workspacePath, contextPrompt, state.systemBranch, projectSlug, state.gitContext, state.techStack, state.completedAssignmentIds, state.userStories, isMaintainMode, state.outputPath, state.tasks);
@@ -1614,28 +1612,28 @@ export async function developmentNode(state: ProjectStateType): Promise<Partial<
 
             // Synthesize bugs for the assembly issues
             if (assemblyResult.missingAssets.length > 0) {
-                assemblyBugs.push({
-                    id: 'ASSEMBLY-MISSING-ASSETS',
-                    title: `${assemblyResult.missingAssets.length} referenced asset(s) missing from disk`,
-                    severity: 'major' as const,
-                    stepsToReproduce: `Check referenced assets in HTML: ${assemblyResult.missingAssets.slice(0, 5).join(', ')}`,
-                    expectedBehavior: 'All referenced assets should exist on disk',
-                    actualBehavior: `${assemblyResult.missingAssets.length} assets not found`,
-                    suspectedArea: 'public/ or src/assets/ directory',
-                    reportedBy: 'assembly-gate',
-                });
+                assemblyBugs.push(makeGateBug(
+                    'ASSEMBLY-MISSING-ASSETS',
+                    `${assemblyResult.missingAssets.length} referenced asset(s) missing from disk`,
+                    'major',
+                    'assembly-gate',
+                    `Check referenced assets in HTML: ${assemblyResult.missingAssets.slice(0, 5).join(', ')}`,
+                    'All referenced assets should exist on disk',
+                    `${assemblyResult.missingAssets.length} assets not found`,
+                    'public/ or src/assets/ directory',
+                ));
             }
             if (assemblyResult.unwiredModules.length > 0) {
-                assemblyBugs.push({
-                    id: 'ASSEMBLY-UNWIRED',
-                    title: 'Entry point does not import product modules',
-                    severity: 'critical' as const,
-                    stepsToReproduce: 'Check the entry point (main.ts/index.ts) for module imports',
-                    expectedBehavior: 'Entry point should import all declared modules',
-                    actualBehavior: `Entry point has no imports: ${assemblyResult.unwiredModules.join(', ')}`,
-                    suspectedArea: 'src/main.ts or src/index.ts',
-                    reportedBy: 'assembly-gate',
-                });
+                assemblyBugs.push(makeGateBug(
+                    'ASSEMBLY-UNWIRED',
+                    'Entry point does not import product modules',
+                    'critical',
+                    'assembly-gate',
+                    'Check the entry point (main.ts/index.ts) for module imports',
+                    'Entry point should import all declared modules',
+                    `Entry point has no imports: ${assemblyResult.unwiredModules.join(', ')}`,
+                    'src/main.ts or src/index.ts',
+                ));
             }
             result.transcript.push(msg('conductor', 'development', `Assembly gate synthesized ${assemblyBugs.length} bug(s)`));
         } else {
@@ -1778,16 +1776,16 @@ export async function qaNode(state: ProjectStateType): Promise<Partial<ProjectSt
             }
             if (uncoveredAcs.length > 0) {
                 qaLog.warn(`QA plan missing ${uncoveredAcs.length} AC(s) — recording QA-PLAN-GAP bugs`);
-                const planGapBugs: Bug[] = uncoveredAcs.slice(0, 15).map(gap => ({
-                    id: `QA-PLAN-GAP-${gap.storyId}-${gap.acIndex}`,
-                    title: `QA plan omits AC: ${gap.storyId} AC#${gap.acIndex}`,
-                    severity: 'major' as const,
-                    stepsToReproduce: `Story ${gap.storyId}, AC#${gap.acIndex}: "${gap.acText}"`,
-                    expectedBehavior: `QA test plan should include at least one item for this criterion`,
-                    actualBehavior: `No test plan item references ${gap.storyId} AC#${gap.acIndex}`,
-                    suspectedArea: `Story ${gap.storyId}`,
-                    reportedBy: 'qa-plan-coverage',
-                }));
+                const planGapBugs: Bug[] = uncoveredAcs.slice(0, 15).map(gap => makeGateBug(
+                    `QA-PLAN-GAP-${gap.storyId}-${gap.acIndex}`,
+                    `QA plan omits AC: ${gap.storyId} AC#${gap.acIndex}`,
+                    'major',
+                    'qa-plan-coverage',
+                    `Story ${gap.storyId}, AC#${gap.acIndex}: "${gap.acText}"`,
+                    `QA test plan should include at least one item for this criterion`,
+                    `No test plan item references ${gap.storyId} AC#${gap.acIndex}`,
+                    `Story ${gap.storyId}`,
+                ));
                 allBugs.push(...planGapBugs);
             }
         }
@@ -1842,16 +1840,16 @@ export async function qaNode(state: ProjectStateType): Promise<Partial<ProjectSt
         transcript.push(msg('qa-unit', 'qa', `QA Unit failed: ${err.message}`));
         qaUnitErrors.push({ stage: 'qa-unit', message: err.message });
         // Sub-Plan 09 §6: QA crash synthesises a bug — silence must never be an option
-        allBugs.push({
-            id: 'QA-UNIT-FAILED',
-            title: 'QA Unit agent crashed',
-            severity: 'critical' as const,
-            stepsToReproduce: `QA Unit agent threw: ${err.message}`,
-            expectedBehavior: 'QA should write and run tests successfully',
-            actualBehavior: `Agent crashed: ${err.message}`,
-            suspectedArea: 'QA agent invocation',
-            reportedBy: 'qa-node',
-        });
+        allBugs.push(makeGateBug(
+            'QA-UNIT-FAILED',
+            'QA Unit agent crashed',
+            'critical',
+            'qa-node',
+            `QA Unit agent threw: ${err.message}`,
+            'QA should write and run tests successfully',
+            `Agent crashed: ${err.message}`,
+            'QA agent invocation',
+        ));
     }
 
     // Commit QA-generated files via the shared helper (includes sync + retry)
@@ -1948,16 +1946,16 @@ export async function qaNode(state: ProjectStateType): Promise<Partial<ProjectSt
 
     // If QA Lead also failed, synthesise a bug (Q6)
     if (qaLeadFailed) {
-        allBugs.push({
-            id: 'QA-LEAD-FAILED',
-            title: 'QA Lead agent produced no test plan',
-            severity: 'critical' as const,
-            stepsToReproduce: 'QA Lead agent either crashed or returned an empty test plan',
-            expectedBehavior: 'QA Lead should produce a test plan covering all acceptance criteria',
-            actualBehavior: 'No test plan was produced',
-            suspectedArea: 'QA Lead agent invocation',
-            reportedBy: 'qa-node',
-        });
+        allBugs.push(makeGateBug(
+            'QA-LEAD-FAILED',
+            'QA Lead agent produced no test plan',
+            'critical',
+            'qa-node',
+            'QA Lead agent either crashed or returned an empty test plan',
+            'QA Lead should produce a test plan covering all acceptance criteria',
+            'No test plan was produced',
+            'QA Lead agent invocation',
+        ));
     }
 
     const artifacts = [...(leadArtifact ? [leadArtifact] : []), ...(unitArtifact ? [unitArtifact] : [])];
@@ -2086,20 +2084,20 @@ export async function qaNode(state: ProjectStateType): Promise<Partial<ProjectSt
                 const blockedGaps = traceReport.rows.filter(r => r.status === 'blocked');
                 const prioritised = [...missingGaps, ...failingGaps, ...blockedGaps, ...untestedGaps];
 
-                const acBugs: Bug[] = prioritised.slice(0, MIN_AC_COVERAGE_MAX_BUGS).map(row => ({
-                    id: `AC-${row.storyId}-${row.acIndex}`,
-                    title: `Acceptance criterion not verified: ${row.storyId} AC#${row.acIndex}`,
-                    severity: 'critical' as const,
-                    stepsToReproduce: `Story ${row.storyId}, AC#${row.acIndex}: "${row.acText}"`,
-                    expectedBehavior: `A test named "[${row.storyId}#${row.acIndex}] ..." exists, is executed, and passes`,
-                    actualBehavior: `Status "${row.status}" — ${
+                const acBugs: Bug[] = prioritised.slice(0, MIN_AC_COVERAGE_MAX_BUGS).map(row => makeGateBug(
+                    `AC-${row.storyId}-${row.acIndex}`,
+                    `Acceptance criterion not verified: ${row.storyId} AC#${row.acIndex}`,
+                    'critical',
+                    'ac-coverage-gate',
+                    `Story ${row.storyId}, AC#${row.acIndex}: "${row.acText}"`,
+                    `A test named "[${row.storyId}#${row.acIndex}] ..." exists, is executed, and passes`,
+                    `Status "${row.status}" — ${
                         row.status === 'missing' ? 'no assignment references this story'
                         : row.status === 'tested-failing' ? 'test exists but fails'
                         : row.status === 'blocked' ? 'PR blocked/conflicted'
                         : 'code merged but no tagged test executed'}`,
-                    suspectedArea: row.assignmentIds[0] ? `Assignment ${row.assignmentIds[0]}` : `Story ${row.storyId}`,
-                    reportedBy: 'ac-coverage-gate',
-                }));
+                    row.assignmentIds[0] ? `Assignment ${row.assignmentIds[0]}` : `Story ${row.storyId}`,
+                ));
                 if (acBugs.length > 0) {
                     allBugs.push(...acBugs);
                     qaLog.info(`AC coverage gate: verified ${vPct.toFixed(0)}% < ${MIN_AC_COVERAGE_PCT}%, implemented ${iPct.toFixed(0)}% — synthesised ${acBugs.length} bug(s)`);
@@ -2410,29 +2408,29 @@ export async function devopsNode(state: ProjectStateType): Promise<Partial<Proje
     // ── Synthesise deployment bugs (D5) ──────────────────────────────────
     const deployBugs: Bug[] = [];
     if (verified.buildStatus === 'failed') {
-        deployBugs.push({
-            id: 'DEPLOY-BUILD-FAILED',
-            title: 'Deployment build failed',
-            severity: 'critical',
-            stepsToReproduce: 'Run docker build / docker compose up --build',
-            expectedBehavior: 'Docker build should succeed',
-            actualBehavior: `Build failed: ${(verified.logs ?? '').slice(-500)}`,
-            suspectedArea: 'Dockerfile / docker-compose.yml',
-            reportedBy: 'devops-verify',
-        });
+        deployBugs.push(makeGateBug(
+            'DEPLOY-BUILD-FAILED',
+            'Deployment build failed',
+            'critical',
+            'devops-verify',
+            'Run docker build / docker compose up --build',
+            'Docker build should succeed',
+            `Build failed: ${(verified.logs ?? '').slice(-500)}`,
+            'Dockerfile / docker-compose.yml',
+        ));
     }
     if (verified.runStatus === 'unhealthy') {
         const failedChecks = (verified.healthChecks ?? []).filter(h => h.status !== 'healthy');
-        deployBugs.push({
-            id: 'DEPLOY-UNHEALTHY',
-            title: 'Deployment services unhealthy',
-            severity: 'critical',
-            stepsToReproduce: 'Start containers and health-check all published ports',
-            expectedBehavior: 'All services should respond with HTTP 200',
-            actualBehavior: `${failedChecks.length} health check(s) failed: ${failedChecks.map(h => `${h.service}=${h.status}`).join(', ')}`,
-            suspectedArea: 'Service health endpoints / port bindings',
-            reportedBy: 'devops-verify',
-        });
+        deployBugs.push(makeGateBug(
+            'DEPLOY-UNHEALTHY',
+            'Deployment services unhealthy',
+            'critical',
+            'devops-verify',
+            'Start containers and health-check all published ports',
+            'All services should respond with HTTP 200',
+            `${failedChecks.length} health check(s) failed: ${failedChecks.map(h => `${h.service}=${h.status}`).join(', ')}`,
+            'Service health endpoints / port bindings',
+        ));
     }
 
     const artifactContent = [
@@ -2678,16 +2676,16 @@ export async function e2eNode(state: ProjectStateType): Promise<Partial<ProjectS
         if (err?.stack) e2eLog.error(err.stack);
         transcript.push(msg('qa-e2e', 'e2e', `E2E testing failed: ${err.message}`));
 
-        allBugs.push({
-            id: 'E2E-INFRA-FAILED',
-            title: 'E2E testing infrastructure failure',
-            severity: 'major',
-            stepsToReproduce: 'Run E2E phase with Playwright MCP',
-            expectedBehavior: 'E2E agent should connect to the MCP server and execute tests',
-            actualBehavior: `E2E failed: ${err.message}`,
-            suspectedArea: 'Playwright MCP setup / browser installation',
-            reportedBy: 'e2e-node',
-        });
+        allBugs.push(makeGateBug(
+            'E2E-INFRA-FAILED',
+            'E2E testing infrastructure failure',
+            'major',
+            'e2e-node',
+            'Run E2E phase with Playwright MCP',
+            'E2E agent should connect to the MCP server and execute tests',
+            `E2E failed: ${err.message}`,
+            'Playwright MCP setup / browser installation',
+        ));
 
         emitRunEvent('e2e:status', { status: 'error', error: err.message });
         emitRunEvent('phase:end', { phase: 'e2e', nextPhase: 'acceptance-gate', error: err.message });
@@ -2743,8 +2741,7 @@ export async function acceptanceNode(state: ProjectStateType): Promise<Partial<P
             content: reportMd,
         });
         // Also write to outputs/<run>/acceptance-report.md
-        const reportPath = path.join(state.outputPath, 'acceptance-report.md');
-        fs.writeFileSync(reportPath, reportMd, 'utf-8');
+        writeOutputFile(state.outputPath, 'acceptance-report.md', reportMd);
     } catch (err: any) {
         acceptLog.warn(`Failed to write acceptance report artifact: ${err.message}`);
     }
@@ -3021,62 +3018,55 @@ export async function finalizeNode(state: ProjectStateType): Promise<Partial<Pro
         ``,
         `## Totals`,
         ``,
-        `| Metric | Value |`,
-        `|--------|-------|`,
-        `| Total LLM Calls | ${usageSummary.totalCalls} |`,
-        `| Input Tokens | ${usageSummary.totalInputTokens.toLocaleString()} |`,
-        `| Output Tokens | ${usageSummary.totalOutputTokens.toLocaleString()} |`,
-        `| **Total Tokens** | **${usageSummary.totalTokens.toLocaleString()}** |`,
-        `| **Estimated Cost** | **$${totalEstimatedCost.toFixed(4)}** |`,
+        mdTable(
+            ['Metric', 'Value'],
+            [
+                ['Total LLM Calls', usageSummary.totalCalls],
+                ['Input Tokens', usageSummary.totalInputTokens.toLocaleString()],
+                ['Output Tokens', usageSummary.totalOutputTokens.toLocaleString()],
+                ['**Total Tokens**', `**${usageSummary.totalTokens.toLocaleString()}**`],
+                ['**Estimated Cost**', `**$${totalEstimatedCost.toFixed(4)}**`],
+            ],
+        ),
         ``,
         `## By Agent`,
         ``,
-        `| Agent | Model | Calls | Input | Output | Total | Est. Cost |`,
-        `|-------|-------|------:|------:|-------:|------:|----------:|`,
-    ];
-    for (const a of usageSummary.byAgent) {
-        const cost = estimateCost(a.model, a.inputTokens, a.outputTokens);
-        usageReportLines.push(
-            `| ${a.agentId} | ${a.model} | ${a.callCount} | ${a.inputTokens.toLocaleString()} | ${a.outputTokens.toLocaleString()} | ${a.totalTokens.toLocaleString()} | $${cost.toFixed(4)} |`,
-        );
-    }
-    usageReportLines.push(
+        mdTable(
+            ['Agent', 'Model', 'Calls', 'Input', 'Output', 'Total', 'Est. Cost'],
+            usageSummary.byAgent.map(a => {
+                const cost = estimateCost(a.model, a.inputTokens, a.outputTokens);
+                return [a.agentId, a.model, a.callCount, a.inputTokens.toLocaleString(), a.outputTokens.toLocaleString(), a.totalTokens.toLocaleString(), `$${cost.toFixed(4)}`];
+            }),
+            ['left', 'left', 'right', 'right', 'right', 'right', 'right'],
+        ),
         ``,
         `## By Phase`,
         ``,
-        `| Phase | Calls | Input | Output | Total |`,
-        `|-------|------:|------:|-------:|------:|`,
-    );
-    for (const p of usageSummary.byPhase) {
-        usageReportLines.push(
-            `| ${p.phase} | ${p.callCount} | ${p.inputTokens.toLocaleString()} | ${p.outputTokens.toLocaleString()} | ${p.totalTokens.toLocaleString()} |`,
-        );
-    }
-    usageReportLines.push(
+        mdTable(
+            ['Phase', 'Calls', 'Input', 'Output', 'Total'],
+            usageSummary.byPhase.map(p => [p.phase, p.callCount, p.inputTokens.toLocaleString(), p.outputTokens.toLocaleString(), p.totalTokens.toLocaleString()]),
+            ['left', 'right', 'right', 'right', 'right'],
+        ),
         ``,
         `## By Model`,
         ``,
-        `| Model | Calls | Input | Output | Total | Est. Cost |`,
-        `|-------|------:|------:|-------:|------:|----------:|`,
-    );
-    for (const m of usageSummary.byModel) {
-        const cost = estimateCost(m.model, m.inputTokens, m.outputTokens);
-        usageReportLines.push(
-            `| ${m.model} | ${m.callCount} | ${m.inputTokens.toLocaleString()} | ${m.outputTokens.toLocaleString()} | ${m.totalTokens.toLocaleString()} | $${cost.toFixed(4)} |`,
-        );
-    }
-    usageReportLines.push(
+        mdTable(
+            ['Model', 'Calls', 'Input', 'Output', 'Total', 'Est. Cost'],
+            usageSummary.byModel.map(m => {
+                const cost = estimateCost(m.model, m.inputTokens, m.outputTokens);
+                return [m.model, m.callCount, m.inputTokens.toLocaleString(), m.outputTokens.toLocaleString(), m.totalTokens.toLocaleString(), `$${cost.toFixed(4)}`];
+            }),
+            ['left', 'right', 'right', 'right', 'right', 'right'],
+        ),
         ``,
         `## Pricing Rates`,
         ``,
-        `| Model | Input ($/1K tokens) | Output ($/1K tokens) |`,
-        `|-------|--------------------:|---------------------:|`,
-    );
-    for (const [model, pricing] of Object.entries(MODEL_PRICING)) {
-        usageReportLines.push(
-            `| ${model} | $${pricing.inputPer1k.toFixed(4)} | $${pricing.outputPer1k.toFixed(4)} |`,
-        );
-    }
+        mdTable(
+            ['Model', 'Input ($/1K tokens)', 'Output ($/1K tokens)'],
+            Object.entries(MODEL_PRICING).map(([model, pricing]) => [model, `$${pricing.inputPer1k.toFixed(4)}`, `$${pricing.outputPer1k.toFixed(4)}`]),
+            ['left', 'right', 'right'],
+        ),
+    ];
 
     writeArtifact({
         agentId: 'conductor',
@@ -3097,21 +3087,15 @@ export async function finalizeNode(state: ProjectStateType): Promise<Partial<Pro
             content: traceMd,
         });
         // Write to outputs/<run>/traceability.md
-        try {
-            const tracePath = path.join(state.outputPath, 'traceability.md');
-            fs.writeFileSync(tracePath, traceMd, 'utf-8');
+        const tracePath = writeOutputFile(state.outputPath, 'traceability.md', traceMd);
+        if (tracePath) {
             finalLog.info(`Traceability matrix: ${tracePath}`);
-        } catch (err: any) {
-            finalLog.warn(`Failed to write traceability.md: ${err.message}`);
         }
         // Write machine-readable outputs/<run>/traceability.json
         if (TRACEABILITY_JSON) {
-            try {
-                const traceJsonPath = path.join(state.outputPath, 'traceability.json');
-                fs.writeFileSync(traceJsonPath, JSON.stringify(traceReport, null, 2), 'utf-8');
+            const traceJsonPath = writeOutputFile(state.outputPath, 'traceability.json', JSON.stringify(traceReport, null, 2));
+            if (traceJsonPath) {
                 finalLog.info(`Traceability JSON: ${traceJsonPath}`);
-            } catch (err: any) {
-                finalLog.warn(`Failed to write traceability.json: ${err.message}`);
             }
         }
     }

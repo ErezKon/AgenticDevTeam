@@ -12,6 +12,7 @@ import { getLogger } from '../../utils/logger';
 import { readLedger, type LedgerEntry } from '../../utils/run-ledger';
 import { readResponseLogIndex, type ResponseLogEntry } from '../../utils/response-log';
 import { gitExec } from '../../utils/git-exec';
+import { slugify } from '../../utils/branch-naming';
 import { OUTPUTS_DIR } from '../../config';
 import type { RunManifest } from '../../utils/run-snapshot';
 import type { PullRequest } from '../../agents/_shared/base-schemas';
@@ -352,7 +353,7 @@ function resolveWorkspacePath(collected: CollectedRunState): string {
     const systemName = collected.stateSnapshot?.input?.systemName
         ?? collected.manifest?.systemName;
     if (systemName) {
-        const slug = systemName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/-+$/, '');
+        const slug = slugify(systemName);
         const candidate = path.resolve('generated-projects', slug);
         if (fs.existsSync(candidate)) {
             return candidate;

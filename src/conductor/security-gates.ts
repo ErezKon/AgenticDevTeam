@@ -11,9 +11,10 @@
  */
 import * as fs from 'fs';
 import * as path from 'path';
-import { execSync } from 'child_process';
+import { type ExecFn, defaultExec as sharedDefaultExec, isToolAvailable as isToolOnPath } from '../utils/shell-exec';
 import * as crypto from 'crypto';
 import { getLogger } from '../utils/logger';
+import { mdTable } from '../utils/markdown-table';
 import { gitExec } from '../utils/git-exec';
 import { detectStacks, type StackKind } from './quality-gates';
 import {
@@ -23,22 +24,11 @@ import {
     LICENCE_DENYLIST,
 } from '../config';
 import type { Bug } from '../agents/_shared/schemas/bug.schema';
+import { makeGateBug } from './bug-factory';
 
 const log = getLogger('[SecurityGates]', 196);
 
-/** Build a child-process env from a safe allowlist — never leaks API keys. */
-function safeChildEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
-    const SAFE_KEYS = [
-        'PATH', 'HOME', 'USER', 'SHELL', 'LANG', 'LC_ALL', 'TERM',
-        'TMPDIR', 'TMP', 'TEMP', 'HOSTNAME',
-        'PROGRAMFILES', 'SYSTEMROOT', 'WINDIR',
-    ];
-    const env: Record<string, string | undefined> = {};
-    for (const key of SAFE_KEYS) {
-        if (process.env[key]) env[key] = process.env[key];
-    }
-    return { ...env, ...extra };
-}
+// safeChildEnv imported from ../utils/shell-exec
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -238,26 +228,11 @@ export function scanForSecrets(workspacePath: string): SecurityFinding[] {
 
 // ─── Dependency audit ───────────────────────────────────────────────────────
 
-/** Exec seam for testing. */
-type ExecFn = (cmd: string, opts: { cwd: string; timeout: number }) => string;
+// ExecFn, defaultExec, isToolOnPath imported from ../utils/shell-exec
 
+/** Security-gates wrapper: 10 MB buffer, CI env. */
 function defaultExec(cmd: string, opts: { cwd: string; timeout: number }): string {
-    return execSync(cmd + ' 2>&1', {
-        cwd: opts.cwd,
-        encoding: 'utf-8',
-        timeout: opts.timeout,
-        maxBuffer: 1024 * 1024 * 10,
-        env: safeChildEnv({ CI: 'true' }),
-    });
-}
-
-function isToolOnPath(tool: string, cwd: string, exec: ExecFn): boolean {
-    try {
-        exec(`which ${tool}`, { cwd, timeout: 10_000 });
-        return true;
-    } catch {
-        return false;
-    }
+    return sharedDefaultExec(cmd, opts, 10 * 1024 * 1024, { CI: 'true' });
 }
 
 /** Audit commands by stack. All soft — missing tool => skip, never fail. */
@@ -535,22 +510,22 @@ export function synthesiseSecurityBugs(report: SecurityReport): Bug[] {
 
     return report.findings
         .filter(f => f.severity === 'critical' || f.severity === 'major')
-        .map(f => ({
-            id: f.id,
-            title: `Security: ${f.detail.slice(0, 80)}`,
-            severity: f.severity as 'critical' | 'major',
-            stepsToReproduce: f.file
+        .map(f => makeGateBug(
+            f.id,
+            `Security: ${f.detail.slice(0, 80)}`,
+            f.severity,
+            'security-gates',
+            f.file
                 ? `Check ${f.file}${f.line ? `:${f.line}` : ''}`
                 : 'Run security scan',
-            expectedBehavior: f.kind === 'secret'
+            f.kind === 'secret'
                 ? 'No hard-coded credentials in tracked files'
                 : f.kind === 'licence'
                     ? 'All dependencies use approved licences'
                     : 'No known vulnerabilities in dependencies',
-            actualBehavior: f.detail,
-            suspectedArea: f.file ?? 'project dependencies',
-            reportedBy: 'security-gates',
-        }));
+            f.detail,
+            f.file ?? 'project dependencies',
+        ));
 }
 
 // ─── SecurityReport -> Markdown ─────────────────────────────────────────────
@@ -570,14 +545,14 @@ export function securityReportToMarkdown(report: SecurityReport): string {
         lines.push(':x: **Critical security findings detected.**\n');
     }
 
-    lines.push('| Kind | Severity | Location | Detail |');
-    lines.push('|------|----------|----------|--------|');
-    for (const f of report.findings) {
+    const headers = ['Kind', 'Severity', 'Location', 'Detail'];
+    const rows = report.findings.map(f => {
         const location = f.file
             ? `\`${f.file}\`${f.line ? `:${f.line}` : ''}`
             : '—';
-        lines.push(`| ${f.kind} | ${f.severity} | ${location} | ${f.detail.slice(0, 120)} |`);
-    }
+        return [f.kind, f.severity, location, f.detail.slice(0, 120)];
+    });
+    lines.push(mdTable(headers, rows));
 
     return lines.join('\n');
 }

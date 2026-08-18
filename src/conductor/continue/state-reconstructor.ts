@@ -14,6 +14,7 @@ import {
     GITHUB_PROJECT_TOKEN, GITHUB_PROJECT_OWNER,
 } from '../../config';
 import { gitExec } from '../../utils/git-exec';
+import { isSystemBranch } from '../../utils/branch-naming';
 import type { PhaseName } from '../../agents/_shared/schemas/phase.schema';
 import type { LedgerEntry } from '../../utils/run-ledger';
 import type { CollectedRunState } from './state-collector';
@@ -675,14 +676,14 @@ function detectSystemBranch(collected: CollectedRunState): string {
     // Check current branch first
     if (collected.workspacePath) {
         const currentBranch = gitExec(collected.workspacePath, 'rev-parse --abbrev-ref HEAD');
-        if (!currentBranch.startsWith('Error:') && currentBranch.startsWith('project/')) {
+        if (!currentBranch.startsWith('Error:') && isSystemBranch(currentBranch)) {
             return currentBranch;
         }
     }
 
     // Scan local branches for project/* pattern
     for (const branch of collected.gitBranches.local) {
-        if (branch.startsWith('project/')) {
+        if (isSystemBranch(branch)) {
             return branch;
         }
     }

@@ -10,6 +10,7 @@
  * burning another hour and $50 on a dead run.
  */
 import { getLogger } from '../utils/logger';
+import { mdTable } from '../utils/markdown-table';
 import {
     ACCEPT_MIN_TESTS,
     ACCEPT_REQUIRE_SMOKE,
@@ -21,41 +22,21 @@ import {
 import { buildTraceabilityReport } from '../utils/traceability';
 import type { ProjectStateType } from './state';
 import type { GateReport } from './quality-gates';
+import type { Bug } from '../agents/_shared/schemas/bug.schema';
+import { makeGateBug } from './bug-factory';
 
 
 
-// ─── Types ──────────────────────────────────────────────────────────────────
+// ─── Types (re-exported from gate-types to preserve public API) ─────────────
 
-export type AcceptanceStatus = 'accepted' | 'partial' | 'rejected' | 'inconclusive';
+export type {
+    AcceptanceStatus,
+    AcceptanceCriterionResult,
+    AcceptanceReport,
+    DispatchRound,
+} from './gate-types';
 
-export interface AcceptanceCriterionResult {
-    /** Criterion identifier. */
-    id: string;
-    label: string;
-    required: boolean;
-    passed: boolean;
-    inconclusive: boolean;
-    /** One-line detail, quotable in a report. */
-    detail: string;
-}
-
-export interface AcceptanceReport {
-    status: AcceptanceStatus;
-    criteria: AcceptanceCriterionResult[];
-    /** Ordered, human-readable list of what must be fixed. Goes in the manifest and the final log. */
-    blockers: string[];
-    /** True when no further pipeline work can plausibly change the outcome. */
-    unrecoverable: boolean;
-    unrecoverableReason?: string;
-}
-
-export interface DispatchRound {
-    fileChanges: number;
-    /** **Merged** PRs only. `PR-SKIPPED-*` placeholders (status `closed`, prNumber 0)
-     *  are recorded for every no-commit branch and must never count as progress. */
-    prs: number;
-    completed: number;
-}
+import type { AcceptanceStatus, AcceptanceCriterionResult, AcceptanceReport } from './gate-types';
 
 // ─── Evaluate Acceptance ────────────────────────────────────────────────────
 
@@ -530,26 +511,18 @@ export function haltIfUnrecoverable(
  * Convert acceptance blockers into Bug objects with stable ids for the
  * bugfix loop. Each blocker gets an `ACCEPT-<criterionId>` id.
  */
-export function acceptanceBlockersToBugs(report: AcceptanceReport): Array<{
-    id: string;
-    title: string;
-    severity: 'critical' | 'major';
-    stepsToReproduce: string;
-    expectedBehavior: string;
-    actualBehavior: string;
-    suspectedArea: string;
-    reportedBy: string;
-}> {
+export function acceptanceBlockersToBugs(report: AcceptanceReport): Bug[] {
     return report.criteria
         .filter(c => !c.passed && !c.inconclusive && c.required)
-        .map(c => ({
-            id: `ACCEPT-${c.id}`,
-            title: `Acceptance criterion failed: ${c.label}`,
-            severity: 'critical' as const,
-            stepsToReproduce: `Run the acceptance gate — criterion ${c.id} fails`,
-            expectedBehavior: `${c.label} should pass`,
-            actualBehavior: c.detail,
-            suspectedArea: c.id === 'BUILD' ? 'package.json / source code'
+        .map(c => makeGateBug(
+            `ACCEPT-${c.id}`,
+            `Acceptance criterion failed: ${c.label}`,
+            'critical',
+            'acceptance-gate',
+            `Run the acceptance gate — criterion ${c.id} fails`,
+            `${c.label} should pass`,
+            c.detail,
+            c.id === 'BUILD' ? 'package.json / source code'
                 : c.id === 'RESOLVE' ? 'import/require statements'
                 : c.id === 'TESTS' ? 'test files and runner'
                 : c.id === 'ARTIFACTS' ? 'build output directory'
@@ -558,8 +531,7 @@ export function acceptanceBlockersToBugs(report: AcceptanceReport): Array<{
                 : c.id === 'DEPLOY' ? 'Dockerfile / docker-compose.yml'
                 : c.id === 'E2E' ? 'E2E test setup / Playwright MCP'
                 : 'general',
-            reportedBy: 'acceptance-gate',
-        }));
+        ));
 }
 
 /**
@@ -577,12 +549,12 @@ export function acceptanceReportToMarkdown(report: AcceptanceReport): string {
     lines.push('');
     lines.push('## Criteria');
     lines.push('');
-    lines.push('| Criterion | Required | Passed | Detail |');
-    lines.push('|-----------|----------|--------|--------|');
-    for (const c of report.criteria) {
+    const headers = ['Criterion', 'Required', 'Passed', 'Detail'];
+    const rows = report.criteria.map(c => {
         const passIcon = c.inconclusive ? '?' : c.passed ? 'Yes' : 'No';
-        lines.push(`| ${c.id} — ${c.label} | ${c.required ? 'Yes' : 'No'} | ${passIcon} | ${c.detail} |`);
-    }
+        return [`${c.id} — ${c.label}`, c.required ? 'Yes' : 'No', passIcon, c.detail];
+    });
+    lines.push(mdTable(headers, rows));
     if (report.blockers.length > 0) {
         lines.push('');
         lines.push('## Blockers');

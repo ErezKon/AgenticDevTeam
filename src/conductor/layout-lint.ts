@@ -11,8 +11,11 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { getLogger } from '../utils/logger';
+import { mdTable } from '../utils/markdown-table';
 import type { RepoContract, ModuleContract, StackRootContract } from '../agents/_shared/schemas/repo-contract.schema';
-import { buildImportGraph, findProductSourceFiles } from './gate-integrity';
+import { findProductSourceFiles } from './gate-integrity';
+import { buildImportGraph, extractImportSpecifiers, transitiveReachable } from '../utils/source-graph';
+import { SOURCE_EXTENSIONS, PRUNE_DIRS, walkDir as sharedWalkDir } from '../utils/fs-walk';
 
 const log = getLogger('[LayoutLint]', 208);
 
@@ -39,19 +42,9 @@ export interface LayoutViolation {
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
-const SOURCE_EXTENSIONS = new Set([
-    '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.vue', '.svelte',
-]);
+// SOURCE_EXTENSIONS, PRUNE_DIRS imported from ../utils/fs-walk
 
 const TEST_FILE_RE = /\.(?:test|spec)\./;
-
-const PRUNE_DIRS = new Set([
-    'node_modules', '.git', '.worktrees', 'dist', 'build', '.next', 'out',
-    'coverage', '.venv', 'venv', 'vendor', 'target', '.conventions',
-]);
-
-const IMPORT_RE = /(?:import\s+(?:.*?\s+from\s+)?['"]([^'"]+)['"]|export\s+(?:.*?\s+from\s+)?['"]([^'"]+)['"])/g;
-const REQUIRE_RE = /require\s*\(\s*['"]([^'"]+)['"]\s*\)/g;
 
 // ─── Naming convention patterns ─────────────────────────────────────────────
 
@@ -59,78 +52,16 @@ const PASCAL_CASE_RE = /^[A-Z][a-zA-Z0-9]*$/;
 const CAMEL_CASE_RE = /^[a-z][a-zA-Z0-9]*$/;
 const KEBAB_CASE_RE = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
 
-// ─── Transitive reachability helper ─────────────────────────────────────────
-
-/**
- * Walk the import graph from `startFile` and return every file transitively
- * reachable (including the start file itself).
- */
-function transitiveImports(
-    graph: Map<string, Set<string>>,
-    startFile: string,
-): Set<string> {
-    const visited = new Set<string>();
-    const queue = [startFile];
-    while (queue.length > 0) {
-        const file = queue.pop()!;
-        if (visited.has(file)) continue;
-        visited.add(file);
-        for (const dep of graph.get(file) ?? []) {
-            if (!visited.has(dep)) queue.push(dep);
-        }
-    }
-    return visited;
-}
-
-// ─── File-walking helper ────────────────────────────────────────────────────
+// ─── File-walking helper (delegating to shared fs-walk) ─────────────────────
 
 function collectSourceFiles(workspacePath: string): string[] {
     const files: string[] = [];
-    walkDir(workspacePath, workspacePath, (relPath) => {
+    sharedWalkDir(workspacePath, workspacePath, (relPath) => {
         if (SOURCE_EXTENSIONS.has(path.extname(relPath).toLowerCase())) {
             files.push(relPath);
         }
     });
     return files;
-}
-
-function walkDir(dir: string, root: string, cb: (relPath: string) => void): void {
-    let entries: string[];
-    try { entries = fs.readdirSync(dir); } catch { return; }
-    for (const entry of entries) {
-        if (PRUNE_DIRS.has(entry)) continue;
-        const abs = path.join(dir, entry);
-        try {
-            const stat = fs.statSync(abs);
-            if (stat.isDirectory()) {
-                walkDir(abs, root, cb);
-            } else {
-                cb(path.relative(root, abs));
-            }
-        } catch {
-            // skip
-        }
-    }
-}
-
-// ─── Import extraction helper ───────────────────────────────────────────────
-
-function extractImportSpecifiers(content: string): string[] {
-    const specs: string[] = [];
-    let match: RegExpExecArray | null;
-
-    IMPORT_RE.lastIndex = 0;
-    while ((match = IMPORT_RE.exec(content)) !== null) {
-        const spec = match[1] ?? match[2];
-        if (spec) specs.push(spec);
-    }
-
-    REQUIRE_RE.lastIndex = 0;
-    while ((match = REQUIRE_RE.exec(content)) !== null) {
-        if (match[1]) specs.push(match[1]);
-    }
-
-    return specs;
 }
 
 // ─── Normalise module basename ──────────────────────────────────────────────
@@ -488,7 +419,7 @@ export function lintLayout(
             const absEp = path.join(workspacePath, rootDir === '' ? ep : path.join(rootDir, ep));
             if (!fs.existsSync(absEp)) continue; // already flagged
 
-            const reachable = transitiveImports(importGraph, absEp);
+            const reachable = transitiveReachable(importGraph, [absEp]);
 
             // For each component, check if at least one of its modules is reachable
             for (const compName of componentNames) {
@@ -582,17 +513,14 @@ export function lintLayout(
  */
 export function layoutViolationsToMarkdown(violations: LayoutViolation[]): string {
     if (violations.length === 0) return '';
-    const lines = [
-        '## Layout Lint',
-        '',
-        '| Severity | Kind | Path | Detail |',
-        '|----------|------|------|--------|',
-    ];
-    for (const v of violations) {
-        const escapedDetail = v.detail.replace(/\|/g, '\\|');
-        lines.push(`| ${v.severity.toUpperCase()} | ${v.kind} | \`${v.path}\` | ${escapedDetail} |`);
-    }
-    return lines.join('\n');
+    const headers = ['Severity', 'Kind', 'Path', 'Detail'];
+    const rows = violations.map(v => [
+        v.severity.toUpperCase(),
+        v.kind,
+        `\`${v.path}\``,
+        v.detail,
+    ]);
+    return `## Layout Lint\n\n${mdTable(headers, rows)}`;
 }
 
 /**

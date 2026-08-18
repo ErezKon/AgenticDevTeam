@@ -30,7 +30,7 @@ import type {
 } from '../agents/_shared/base-schemas';
 import type { RepoContract } from '../agents/_shared/schemas/repo-contract.schema';
 // TechDecision is already imported above via base-schemas — mergeByLayerReducer uses it.
-import type { AcceptanceReport, DispatchRound } from './acceptance-gate';
+import type { AcceptanceReport, DispatchRound } from './gate-types';
 import type { GateReport } from './quality-gates';
 import type { CompletionEvidence } from './assignment-policy';
 

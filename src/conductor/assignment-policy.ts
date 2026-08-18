@@ -8,6 +8,7 @@
  * on every bug-fix iteration — up to 4x the intended development cost.
  */
 import type { Assignment, Bug, PullRequest } from '../agents/_shared/base-schemas';
+import { makeGateBug } from './bug-factory';
 
 // ─── Assignment Filtering ───────────────────────────────────────────────────
 
@@ -115,16 +116,16 @@ export function incompleteBugs(
             reasons.push(`only ${e.declaredModulesPresent}/${e.declaredModulesTotal} declared modules present`);
         }
 
-        bugs.push({
-            id: `INCOMPLETE-${e.assignmentId}`,
-            title: `Assignment ${e.assignmentId} merged without evidence`,
-            severity: 'major',
-            stepsToReproduce: `Check assignment ${e.assignmentId}: ${reasons.join('; ')}`,
-            expectedBehavior: 'Assignment should produce real source file changes that pass quality gates',
-            actualBehavior: `Re-dispatch needed: ${reasons.join('; ')}`,
-            suspectedArea: `Assignment ${e.assignmentId}`,
-            reportedBy: 'assignment-policy',
-        });
+        bugs.push(makeGateBug(
+            `INCOMPLETE-${e.assignmentId}`,
+            `Assignment ${e.assignmentId} merged without evidence`,
+            'major',
+            'assignment-policy',
+            `Check assignment ${e.assignmentId}: ${reasons.join('; ')}`,
+            'Assignment should produce real source file changes that pass quality gates',
+            `Re-dispatch needed: ${reasons.join('; ')}`,
+            `Assignment ${e.assignmentId}`,
+        ));
     }
     return bugs;
 }

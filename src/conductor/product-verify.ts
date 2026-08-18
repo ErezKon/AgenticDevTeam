@@ -14,6 +14,7 @@ import * as http from 'http';
 import * as net from 'net';
 import { getLogger } from '../utils/logger';
 import { emitRunEvent } from '../utils/event-bus';
+import { SOURCE_EXTENSIONS_WIDE, walkDir as sharedWalkDir } from '../utils/fs-walk';
 import {
     PRODUCT_VERIFY_ENABLED,
     PRODUCT_MIN_ARTIFACT_BYTES,
@@ -260,10 +261,8 @@ function countDirContents(dir: string): { count: number; bytes: number; hasHtml:
 
 // ─── 5b. Unresolved reference detection ─────────────────────────────────────
 
-const SOURCE_EXTENSIONS = new Set([
-    '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.vue', '.svelte',
-    '.html', '.css', '.scss',
-]);
+// SOURCE_EXTENSIONS_WIDE imported from ../utils/fs-walk
+const SOURCE_EXTENSIONS = SOURCE_EXTENSIONS_WIDE;
 
 const RESOLVE_EXTENSIONS = ['', '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.json', '.css', '.scss', '.vue', '.svelte'];
 
@@ -536,33 +535,11 @@ function loadPackageDeps(dir: string): Set<string> {
 
 function collectSourceFiles(workspacePath: string, maxFiles: number): string[] {
     const files: string[] = [];
-    const PRUNE_DIRS = new Set([
-        'node_modules', '.git', '.worktrees', 'dist', 'build', '.next', 'out',
-        'coverage', '.venv', 'venv', 'vendor', 'target', '.conventions',
-    ]);
-
-    function walk(dir: string): void {
-        if (files.length >= maxFiles) return;
-        let entries: string[];
-        try { entries = fs.readdirSync(dir); } catch { return; }
-        for (const entry of entries) {
-            if (files.length >= maxFiles) return;
-            if (PRUNE_DIRS.has(entry)) continue;
-            const absPath = path.join(dir, entry);
-            try {
-                const stat = fs.statSync(absPath);
-                if (stat.isDirectory()) {
-                    walk(absPath);
-                } else if (SOURCE_EXTENSIONS.has(path.extname(entry).toLowerCase())) {
-                    files.push(absPath);
-                }
-            } catch {
-                // skip
-            }
+    sharedWalkDir(workspacePath, workspacePath, (relPath) => {
+        if (SOURCE_EXTENSIONS.has(path.extname(relPath).toLowerCase())) {
+            files.push(path.join(workspacePath, relPath));
         }
-    }
-
-    walk(workspacePath);
+    }, { maxFiles });
     return files;
 }
 

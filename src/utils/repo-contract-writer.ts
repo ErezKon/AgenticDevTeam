@@ -18,6 +18,7 @@ import type {
 import { RepoContractSchema } from '../agents/_shared/schemas/repo-contract.schema';
 import type { CodebaseAnalysis } from '../agents/_shared/base-schemas';
 import { CONTRACT_PROMPT_MAX_CHARS } from '../config';
+import { mdTable } from './markdown-table';
 import { getLogger } from './logger';
 
 const log = getLogger('[ContractWriter]', 183);
@@ -518,11 +519,10 @@ function renderContractMarkdown(contract: RepoContract): string {
         // Scripts table
         const scriptEntries = Object.entries(root.scripts);
         if (scriptEntries.length > 0) {
-            lines.push('| Script | Command |');
-            lines.push('|--------|---------|');
-            for (const [name, cmd] of scriptEntries) {
-                lines.push(`| \`${name}\` | \`${cmd}\` |`);
-            }
+            lines.push(mdTable(
+                ['Script', 'Command'],
+                scriptEntries.map(([name, cmd]) => [`\`${name}\``, `\`${cmd}\``]),
+            ));
             lines.push('');
         }
     }
@@ -531,15 +531,16 @@ function renderContractMarkdown(contract: RepoContract): string {
     lines.push('## Modules');
     lines.push('');
     if (contract.modules.length > 0) {
-        lines.push('| ID | Path | Component | Exports | Depends On |');
-        lines.push('|----|------|-----------|---------|------------|');
-        for (const mod of contract.modules) {
-            const exports = mod.exports
-                .map(e => `\`${e.name}\` (${e.kind})`)
-                .join(', ');
-            const deps = mod.dependsOn.join(', ') || '—';
-            lines.push(`| ${mod.id} | \`${mod.path}\` | ${mod.componentName} | ${exports} | ${deps} |`);
-        }
+        lines.push(mdTable(
+            ['ID', 'Path', 'Component', 'Exports', 'Depends On'],
+            contract.modules.map(mod => {
+                const exports = mod.exports
+                    .map(e => `\`${e.name}\` (${e.kind})`)
+                    .join(', ');
+                const deps = mod.dependsOn.join(', ') || '—';
+                return [mod.id, `\`${mod.path}\``, mod.componentName, exports, deps];
+            }),
+        ));
         lines.push('');
     } else {
         lines.push('_No modules declared._');

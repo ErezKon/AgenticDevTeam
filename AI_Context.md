@@ -76,6 +76,8 @@ src/
     devops-verify.ts               # Real Docker build/run/health-check
     file-checkpointer.ts           # Persistent checkpoints for crash recovery
     provider-failure.ts              # Provider error classification + ProviderRecoveryFailedError
+    bug-factory.ts                 # Shared makeBug/makeGateBug Bug constructor helpers
+    gate-types.ts                  # Shared gate/report types (GateReport, GateStepResult, etc.)
     continue/                      # Continue Run feature (Plan 23)
       index.ts                     # Barrel export
       state-collector.ts           # Read-only artifact collector (listStoppedRuns with stopReason)
@@ -166,6 +168,12 @@ src/
     traceability.ts                # Requirements traceability matrix
     codebase-analysis-writer.ts    # Write analysis markdown
     log-colors.util.ts             # ANSI 256-color codes
+    fs-walk.ts                     # Shared filesystem walker (PRUNE_DIRS, SOURCE_EXTENSIONS, walkDir, collectFiles, isTestFile)
+    source-graph.ts                # Import extraction + resolution + graph building + transitive reachability
+    markdown-table.ts              # Shared mdTable() + mdSection() with automatic pipe-escaping
+    shell-exec.ts                  # Shared ExecFn type, safeChildEnv, defaultExec, isToolAvailable
+    branch-naming.ts               # Canonical slugify, systemBranch, featureBranch, projectSlugFromBranch, isSystemBranch
+    artifact-writer.ts             # writeOutputFile + appendOutputLine for output-dir artifacts
 
   templates/
     codebase-analysis.template.ts  # Markdown renderer for CodebaseAnalysis
@@ -1160,6 +1168,9 @@ The system evolved through 16+ iteration plans. Key milestones:
 | 22 | pacmanclaude forensics: tool-budget collapse under parallel tool calls, compaction placeholder corruption, blind respawn handoff, dead scaffold barrier, e2e integrity false positives, Anthropic prompt caching |
 | 23 | Continue Run: state reconstruction from persisted artifacts, singleton rehydration, git reconciliation, phase resolution, node idempotency |
 | 24 | Anthropic truncation detection, PM token ceiling, trimTruncatedArrayTails, PR creation resilience (retry + pr-creation-failed status + continue-run recovery), periodic snapshots, budget-exhaustion-to-cancellation bridge, provider-failure-to-cancellation bridge, budget-exhausted manifest status, continue-run stop-reason awareness |
+| 25 | Codebase audit remediation: config hardening, env-var centralisation |
+| 26-05 | Utility extraction: created 8 shared utilities (fs-walk, source-graph, markdown-table, shell-exec, bug-factory, branch-naming, artifact-writer, gate-types) |
+| 26-06 | Utility deduplication: migrated all consumers to shared utilities (shell-exec 3 files, markdown-table 11 files/23 tables, bug-factory 7 files/19 sites, branch-naming 6 files/13 sites, artifact-writer 8 files/13 sites). Fixed continue-run slug mismatch bug, added missing pipe-escaping to 9 of 11 table sites, added missing error handling to 3 output-write sites |
 
 When referenced in code comments, these plans are cited as "fixes A1", "fixes A2", etc. (referring to sub-plans within Plan 16).
 

@@ -11,10 +11,8 @@
 import * as path from 'path';
 import { lintLayout } from '../src/conductor/layout-lint';
 import type { RepoContract } from '../src/agents/_shared/schemas/repo-contract.schema';
-import {
-    buildImportGraph,
-    findProductSourceFiles,
-} from '../src/conductor/gate-integrity';
+import { findProductSourceFiles } from '../src/conductor/gate-integrity';
+import { buildImportGraph, transitiveReachable } from '../src/utils/source-graph';
 
 // ─── Mocks ──────────────────────────────────────────────────────────────────
 
@@ -35,12 +33,17 @@ jest.mock('../src/config', () => ({
     REPO_CONTRACT_MAX_MODULES: 60,
 }));
 jest.mock('../src/conductor/gate-integrity', () => ({
-    buildImportGraph: jest.fn().mockReturnValue(new Map()),
     findProductSourceFiles: jest.fn().mockReturnValue([]),
     NO_OP_SCRIPT_RE: /^\s*(echo\b.*|true|:|exit\s+0)\s*$/i,
 }));
+jest.mock('../src/utils/source-graph', () => ({
+    buildImportGraph: jest.fn().mockReturnValue(new Map()),
+    extractImportSpecifiers: jest.fn().mockReturnValue([]),
+    transitiveReachable: jest.fn().mockReturnValue(new Set()),
+}));
 
 const mockedBuildImportGraph = buildImportGraph as jest.MockedFunction<typeof buildImportGraph>;
+const mockedTransitiveReachable = transitiveReachable as jest.MockedFunction<typeof transitiveReachable>;
 const mockedFindProductSourceFiles = findProductSourceFiles as jest.MockedFunction<typeof findProductSourceFiles>;
 
 // ─── Fixture paths ──────────────────────────────────────────────────────────
@@ -203,6 +206,7 @@ describe('lintLayout', () => {
         graph.set(mainAbs, new Set([appAbs]));
         mockedBuildImportGraph.mockReturnValue(graph);
         mockedFindProductSourceFiles.mockReturnValue([mainAbs, appAbs]);
+        mockedTransitiveReachable.mockReturnValue(new Set([mainAbs, appAbs]));
 
         const violations = lintLayout(CLEAN, cleanContract);
         expect(violations.length).toBe(0);

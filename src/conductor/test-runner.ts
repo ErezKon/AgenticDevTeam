@@ -11,23 +11,10 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { execSync } from 'child_process';
 import { getLogger } from '../utils/logger';
+import { safeChildEnv } from '../utils/shell-exec';
 import type { StackRoot } from './quality-gates';
 
 const log = getLogger('[TestRunner]', 199);
-
-/** Build a child-process env from a safe allowlist — never leaks API keys. */
-function safeChildEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
-    const SAFE_KEYS = [
-        'PATH', 'HOME', 'USER', 'SHELL', 'LANG', 'LC_ALL', 'TERM',
-        'TMPDIR', 'TMP', 'TEMP', 'HOSTNAME',
-        'PROGRAMFILES', 'SYSTEMROOT', 'WINDIR',
-    ];
-    const env: Record<string, string | undefined> = {};
-    for (const key of SAFE_KEYS) {
-        if (process.env[key]) env[key] = process.env[key];
-    }
-    return { ...env, ...extra };
-}
 
 // ─── Tag regex for traceability ──────────────────────────────────────────────
 
