@@ -703,18 +703,25 @@ Provider errors during development dispatch are classified by severity. Fatal er
 ```
 AgenticDevTeam/
 ├── src/
-│   ├── cli.ts                              # Interactive CLI entry point
-│   ├── index.ts                            # Express REST + WebSocket server
+│   ├── cli.ts                              # CLI entry point (thin wrapper — delegates to cli/)
+│   ├── index.ts                            # Express REST + WebSocket server (testable — guarded listen())
 │   ├── config.ts                           # Environment-driven configuration
+│   │
+│   ├── cli/                                # CLI modules (Sub-Plan 26-09)
+│   │   ├── printers.ts                     # Display helpers (header, roster, artifacts, status)
+│   │   ├── prompts.ts                      # Readline wrapper, requirements gathering, repo target
+│   │   ├── hitl-loop.ts                    # Unified HITL decision loop
+│   │   └── menu.ts                         # Main menu + run-start functions
 │   │
 │   ├── conductor/                          # LangGraph orchestration
 │   │   ├── state.ts                        # ProjectState (Annotation + reducers)
-│   │   ├── nodes.ts                        # 10 phase node functions
+│   │   ├── nodes/                          # Phase node functions (13 nodes in focused modules)
 │   │   ├── graph.ts                        # StateGraph wiring + HITL interrupts
-│   │   ├── pr-workflow.ts                  # PR lifecycle orchestrator (branch → review → merge)
+│   │   ├── pr-workflow.ts                  # Backward-compatible re-export shim
+│   │   ├── pr/                             # PR workflow modules (14 focused files)
 │   │   ├── agent-respawn.ts                # Deterministic handoff summary for fresh-context respawn
 │   │   ├── provider-failure.ts             # Provider error classification + ProviderRecoveryFailedError
-│   │   └── run.ts                          # Autonomous & HITL run helpers
+│   │   └── run.ts                          # Autonomous & HITL run helpers + handleRunCrash + makeSession
 │   │
 │   ├── agents/
 │   │   ├── _shared/
@@ -767,7 +774,8 @@ AgenticDevTeam/
 │   │   ├── markdown-table.ts               # Shared mdTable() + mdSection() with pipe-escaping
 │   │   ├── shell-exec.ts                   # Shared ExecFn, safeChildEnv, defaultExec, isToolAvailable
 │   │   ├── branch-naming.ts                # Canonical slugify, systemBranch, featureBranch, isSystemBranch
-│   │   └── artifact-writer.ts              # writeOutputFile + appendOutputLine for output-dir artifacts
+│   │   ├── artifact-writer.ts              # writeOutputFile + appendOutputLine for output-dir artifacts
+│   │   └── crash-handlers.ts              # flushTokenReportOnExit + installProcessHandlers (shared)
 │   │
 │   ├── templates/
 │   │   └── codebase-analysis.template.ts   # Markdown renderer for CodebaseAnalysis

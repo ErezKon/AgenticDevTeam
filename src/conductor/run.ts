@@ -32,56 +32,37 @@ export interface RunOptions {
     repoTarget?: RepoTarget;
 }
 
+// ─── Crash handling ─────────────────────────────────────────────────────────
+
 /**
- * Start an autonomous run — the full pipeline executes start-to-finish.
- * Returns the final ProjectState snapshot.
+ * Best-effort crash snapshot — saves state and token report when a run fails.
+ *
+ * Extracted to eliminate the 7-copy crash-snapshot block that was duplicated
+ * across runAutonomous, runHumanInTheLoop (initial + 3 resume branches),
+ * and continueRun (autonomous + HITL initial).
  */
-export async function runAutonomous(opts: RunOptions): Promise<ProjectStateType> {
-    log.info(`Starting autonomous run for "${opts.systemName}"...`);
-
-    const conductor = createConductor({ mode: 'autonomous' });
-    const threadId = `run-${opts.systemName}-${Date.now()}`;
-
-    const input: Partial<ProjectStateType> = {
-        input: {
-            systemName: opts.systemName,
-            requirementsText: opts.requirementsText ?? '',
-            requirementsDocPath: opts.requirementsDocPath,
-            mode: 'autonomous',
-            runType: opts.runType ?? 'greenfield',
-            existingProjectPath: opts.existingProjectPath,
-            repoTarget: opts.repoTarget,
-        },
-    };
+export async function handleRunCrash(
+    conductor: ReturnType<typeof createConductor>,
+    config: { configurable: { thread_id: string } },
+    err: any,
+    crashLog: { error: (msg: string) => void },
+    context: string,
+): Promise<never> {
+    tokenTracker.setRunStatus('failed');
+    try { refreshTokenReport(); } catch { /* best-effort */ }
 
     try {
-        const finalState = await conductor.invoke(input, {
-            configurable: { thread_id: threadId },
-        });
+        const snapshot = await conductor.getState(config);
+        const crashState = snapshot?.values as ProjectStateType | undefined;
+        if (crashState?.outputPath) {
+            writeStateSnapshot(crashState.outputPath, crashState);
+            writeRunManifest(crashState.outputPath, crashState, 'crashed');
+        }
+    } catch { /* best-effort */ }
 
-        log.info('Autonomous run complete.');
-        return finalState as ProjectStateType;
-    } catch (err: any) {
-        // Mark the run as failed and flush the token report with whatever
-        // data was collected before the crash — ensures the report exists.
-        tokenTracker.setRunStatus('failed');
-        try { refreshTokenReport(); } catch { /* best-effort */ }
-
-        // Best-effort crash snapshot — outputPath may not exist yet if
-        // the crash happened before intakeNode completed.
-        try {
-            const snapshot = await conductor.getState({ configurable: { thread_id: threadId } });
-            const crashState = snapshot?.values as ProjectStateType | undefined;
-            if (crashState?.outputPath) {
-                writeStateSnapshot(crashState.outputPath, crashState);
-                writeRunManifest(crashState.outputPath, crashState, 'crashed');
-            }
-        } catch { /* best-effort */ }
-
-        log.error(`Autonomous run failed: ${err?.message ?? err}`);
-        if (err?.stack) log.error(err.stack);
-        throw err;
-    }
+    crashLog.error(`${context}: ${err?.message ?? err}`);
+    if (err?.stack) crashLog.error(err.stack);
+    throw err;
 }
 
 // ─── HITL decision type ─────────────────────────────────────────────────────
@@ -113,47 +94,23 @@ export interface RunSession {
     resume: (decision: HitlDecision | boolean, feedback?: string) => Promise<ProjectStateType | null>;
 }
 
-export async function runHumanInTheLoop(opts: RunOptions): Promise<RunSession> {
-    log.info(`Starting HITL run for "${opts.systemName}"...`);
+// ─── Session factory ────────────────────────────────────────────────────────
 
-    const conductor = createConductor({ mode: 'human' });
-    const threadId = `run-${opts.systemName}-${Date.now()}`;
-
-    const input: Partial<ProjectStateType> = {
-        input: {
-            systemName: opts.systemName,
-            requirementsText: opts.requirementsText ?? '',
-            requirementsDocPath: opts.requirementsDocPath,
-            mode: 'human',
-            runType: opts.runType ?? 'greenfield',
-            existingProjectPath: opts.existingProjectPath,
-            repoTarget: opts.repoTarget,
-        },
-    };
-
-    // Start — will pause at the first interrupt point
-    try {
-        await conductor.invoke(input, {
-            configurable: { thread_id: threadId },
-        });
-    } catch (err: any) {
-        tokenTracker.setRunStatus('failed');
-        try { refreshTokenReport(); } catch { /* best-effort */ }
-        try {
-            const snapshot = await conductor.getState({ configurable: { thread_id: threadId } });
-            const crashState = snapshot?.values as ProjectStateType | undefined;
-            if (crashState?.outputPath) {
-                writeStateSnapshot(crashState.outputPath, crashState);
-                writeRunManifest(crashState.outputPath, crashState, 'crashed');
-            }
-        } catch { /* best-effort */ }
-        log.error(`HITL run failed during initial invoke: ${err?.message ?? err}`);
-        if (err?.stack) log.error(err.stack);
-        throw err;
-    }
+/**
+ * Build a RunSession around a conductor + threadId.
+ *
+ * Extracted to eliminate the duplicated getState/resume closures that were
+ * copy-pasted between runHumanInTheLoop() and continueRun() HITL mode.
+ */
+function makeSession(
+    conductor: ReturnType<typeof createConductor>,
+    threadId: string,
+    sessionLog: { info: (msg: string) => void; warn: (msg: string) => void; error: (msg: string) => void },
+): RunSession {
+    const config = { configurable: { thread_id: threadId } };
 
     async function getState(): Promise<ProjectStateType> {
-        const snapshot = await conductor.getState({ configurable: { thread_id: threadId } });
+        const snapshot = await conductor.getState(config);
         return snapshot.values as ProjectStateType;
     }
 
@@ -168,14 +125,12 @@ export async function runHumanInTheLoop(opts: RunOptions): Promise<RunSession> {
 
         const state = await getState();
 
-        const config = { configurable: { thread_id: threadId } };
-
         // ── Enhance ─────────────────────────────────────────────────────
         if (decision === 'enhance') {
             if (!feedback || feedback.trim() === '') {
                 throw new Error('Enhance requires non-empty feedback — an enhance with no feedback is an infinite loop.');
             }
-            log.info(`Phase "${state.phase}" enhance requested with feedback.`);
+            sessionLog.info(`Phase "${state.phase}" enhance requested with feedback.`);
             const approval = {
                 phase: state.phase,
                 decision: 'enhance' as const,
@@ -183,9 +138,6 @@ export async function runHumanInTheLoop(opts: RunOptions): Promise<RunSession> {
                 timestamp: new Date().toISOString(),
             };
             try {
-                // Merge state updates into the checkpoint, then resume from
-                // the interrupt — invoke(null) continues from the checkpoint
-                // instead of re-starting from __start__.
                 await conductor.updateState(config, {
                     approvals: [approval],
                     pendingRerun: state.phase as PhaseName,
@@ -194,24 +146,13 @@ export async function runHumanInTheLoop(opts: RunOptions): Promise<RunSession> {
                 const result = await conductor.invoke(null, config);
                 return result as ProjectStateType;
             } catch (err: any) {
-                tokenTracker.setRunStatus('failed');
-                try { refreshTokenReport(); } catch { /* best-effort */ }
-                try {
-                    const crashState = await getState();
-                    if (crashState?.outputPath) {
-                        writeStateSnapshot(crashState.outputPath, crashState);
-                        writeRunManifest(crashState.outputPath, crashState, 'crashed');
-                    }
-                } catch { /* best-effort */ }
-                log.error(`HITL enhance failed: ${err?.message ?? err}`);
-                if (err?.stack) log.error(err.stack);
-                throw err;
+                return handleRunCrash(conductor, config, err, sessionLog, 'HITL enhance failed');
             }
         }
 
         // ── Deny ────────────────────────────────────────────────────────
         if (decision === 'deny') {
-            log.warn(`Phase "${state.phase}" denied by user. Feedback: ${feedback ?? 'none'}`);
+            sessionLog.warn(`Phase "${state.phase}" denied by user. Feedback: ${feedback ?? 'none'}`);
             tokenTracker.setRunStatus('cancelled');
             const approval = {
                 phase: state.phase,
@@ -227,23 +168,12 @@ export async function runHumanInTheLoop(opts: RunOptions): Promise<RunSession> {
                 const result = await conductor.invoke(null, config);
                 return result as ProjectStateType;
             } catch (err: any) {
-                tokenTracker.setRunStatus('failed');
-                try { refreshTokenReport(); } catch { /* best-effort */ }
-                try {
-                    const crashState = await getState();
-                    if (crashState?.outputPath) {
-                        writeStateSnapshot(crashState.outputPath, crashState);
-                        writeRunManifest(crashState.outputPath, crashState, 'crashed');
-                    }
-                } catch { /* best-effort */ }
-                log.error(`HITL deny failed: ${err?.message ?? err}`);
-                if (err?.stack) log.error(err.stack);
-                throw err;
+                return handleRunCrash(conductor, config, err, sessionLog, 'HITL deny failed');
             }
         }
 
         // ── Approve ─────────────────────────────────────────────────────
-        log.info(`Phase "${state.phase}" approved. Resuming...`);
+        sessionLog.info(`Phase "${state.phase}" approved. Resuming...`);
 
         const approval = {
             phase: state.phase,
@@ -257,22 +187,79 @@ export async function runHumanInTheLoop(opts: RunOptions): Promise<RunSession> {
             const result = await conductor.invoke(null, config);
             return result as ProjectStateType;
         } catch (err: any) {
-            tokenTracker.setRunStatus('failed');
-            try { refreshTokenReport(); } catch { /* best-effort */ }
-            try {
-                const crashState = await getState();
-                if (crashState?.outputPath) {
-                    writeStateSnapshot(crashState.outputPath, crashState);
-                    writeRunManifest(crashState.outputPath, crashState, 'crashed');
-                }
-            } catch { /* best-effort */ }
-            log.error(`HITL resume failed: ${err?.message ?? err}`);
-            if (err?.stack) log.error(err.stack);
-            throw err;
+            return handleRunCrash(conductor, config, err, sessionLog, 'HITL resume failed');
         }
     }
 
     return { threadId, conductor, getState, resume };
+}
+
+// ─── Autonomous run ─────────────────────────────────────────────────────────
+
+/**
+ * Start an autonomous run — the full pipeline executes start-to-finish.
+ * Returns the final ProjectState snapshot.
+ */
+export async function runAutonomous(opts: RunOptions): Promise<ProjectStateType> {
+    log.info(`Starting autonomous run for "${opts.systemName}"...`);
+
+    const conductor = createConductor({ mode: 'autonomous' });
+    const threadId = `run-${opts.systemName}-${Date.now()}`;
+    const config = { configurable: { thread_id: threadId } };
+
+    const input: Partial<ProjectStateType> = {
+        input: {
+            systemName: opts.systemName,
+            requirementsText: opts.requirementsText ?? '',
+            requirementsDocPath: opts.requirementsDocPath,
+            mode: 'autonomous',
+            runType: opts.runType ?? 'greenfield',
+            existingProjectPath: opts.existingProjectPath,
+            repoTarget: opts.repoTarget,
+        },
+    };
+
+    try {
+        const finalState = await conductor.invoke(input, config);
+
+        log.info('Autonomous run complete.');
+        return finalState as ProjectStateType;
+    } catch (err: any) {
+        // Mark the run as failed and flush the token report with whatever
+        // data was collected before the crash — ensures the report exists.
+        return handleRunCrash(conductor, config, err, log, 'Autonomous run failed');
+    }
+}
+
+// ─── Human-in-the-loop run ──────────────────────────────────────────────────
+
+export async function runHumanInTheLoop(opts: RunOptions): Promise<RunSession> {
+    log.info(`Starting HITL run for "${opts.systemName}"...`);
+
+    const conductor = createConductor({ mode: 'human' });
+    const threadId = `run-${opts.systemName}-${Date.now()}`;
+    const config = { configurable: { thread_id: threadId } };
+
+    const input: Partial<ProjectStateType> = {
+        input: {
+            systemName: opts.systemName,
+            requirementsText: opts.requirementsText ?? '',
+            requirementsDocPath: opts.requirementsDocPath,
+            mode: 'human',
+            runType: opts.runType ?? 'greenfield',
+            existingProjectPath: opts.existingProjectPath,
+            repoTarget: opts.repoTarget,
+        },
+    };
+
+    // Start — will pause at the first interrupt point
+    try {
+        await conductor.invoke(input, config);
+    } catch (err: any) {
+        return handleRunCrash(conductor, config, err, log, 'HITL run failed during initial invoke');
+    }
+
+    return makeSession(conductor, threadId, log);
 }
 
 // ─── Continue a stopped run (Plan 23, Sub-Plan 04) ──────────────────────────
@@ -384,19 +371,7 @@ export async function continueRun(
             continueLog.info('Continued autonomous run complete.');
             return finalState as ProjectStateType;
         } catch (err: any) {
-            tokenTracker.setRunStatus('failed');
-            try { refreshTokenReport(); } catch { /* best-effort */ }
-            try {
-                const snapshot = await conductor.getState(config);
-                const crashState = snapshot?.values as ProjectStateType | undefined;
-                if (crashState?.outputPath) {
-                    writeStateSnapshot(crashState.outputPath, crashState);
-                    writeRunManifest(crashState.outputPath, crashState, 'crashed');
-                }
-            } catch { /* best-effort */ }
-            continueLog.error(`Continued autonomous run failed: ${err?.message ?? err}`);
-            if (err?.stack) continueLog.error(err.stack);
-            throw err;
+            return handleRunCrash(conductor, config, err, continueLog, 'Continued autonomous run failed');
         }
     }
 
@@ -404,83 +379,8 @@ export async function continueRun(
     try {
         await conductor.invoke(initialState, config);
     } catch (err: any) {
-        tokenTracker.setRunStatus('failed');
-        try { refreshTokenReport(); } catch { /* best-effort */ }
-        try {
-            const snapshot = await conductor.getState(config);
-            const crashState = snapshot?.values as ProjectStateType | undefined;
-            if (crashState?.outputPath) {
-                writeStateSnapshot(crashState.outputPath, crashState);
-                writeRunManifest(crashState.outputPath, crashState, 'crashed');
-            }
-        } catch { /* best-effort */ }
-        continueLog.error(`Continued HITL run failed during initial invoke: ${err?.message ?? err}`);
-        if (err?.stack) continueLog.error(err.stack);
-        throw err;
+        return handleRunCrash(conductor, config, err, continueLog, 'Continued HITL run failed during initial invoke');
     }
 
-    async function getState(): Promise<ProjectStateType> {
-        const snapshot = await conductor.getState(config);
-        return snapshot.values as ProjectStateType;
-    }
-
-    async function resume(decisionOrBool: HitlDecision | boolean, feedback?: string): Promise<ProjectStateType | null> {
-        let decision: HitlDecision;
-        if (typeof decisionOrBool === 'boolean') {
-            decision = decisionOrBool ? 'approve' : 'deny';
-        } else {
-            decision = decisionOrBool;
-        }
-
-        const state = await getState();
-
-        if (decision === 'enhance') {
-            if (!feedback || feedback.trim() === '') {
-                throw new Error('Enhance requires non-empty feedback.');
-            }
-            const approval = {
-                phase: state.phase,
-                decision: 'enhance' as const,
-                feedback,
-                timestamp: new Date().toISOString(),
-            };
-            await conductor.updateState(config, {
-                approvals: [approval],
-                pendingRerun: state.phase as PhaseName,
-                phaseFeedback: { [state.phase]: [feedback] },
-            });
-            const result = await conductor.invoke(null, config);
-            return result as ProjectStateType;
-        }
-
-        if (decision === 'deny') {
-            tokenTracker.setRunStatus('cancelled');
-            const approval = {
-                phase: state.phase,
-                decision: 'deny' as const,
-                feedback,
-                timestamp: new Date().toISOString(),
-            };
-            await conductor.updateState(config, {
-                approvals: [approval],
-                cancelled: true,
-            });
-            const result = await conductor.invoke(null, config);
-            return result as ProjectStateType;
-        }
-
-        const approval = {
-            phase: state.phase,
-            decision: 'approve' as const,
-            feedback,
-            timestamp: new Date().toISOString(),
-        };
-        await conductor.updateState(config, { approvals: [approval] });
-        const result = await conductor.invoke(null, config);
-        return result as ProjectStateType;
-    }
-
-    return { threadId, conductor, getState, resume };
+    return makeSession(conductor, threadId, continueLog);
 }
-
-

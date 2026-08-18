@@ -40,8 +40,8 @@ import { listStoppedRuns, collectRunState, reconstructState } from './conductor/
 import { parseRequirementsFile } from './tools/requirements/parse-requirements';
 import { getLogger } from './utils/logger';
 import { tokenTracker } from './utils/token-tracker';
-import { refreshTokenReport } from './utils/token-report';
 import { redactState } from './utils/run-snapshot';
+import { installProcessHandlers } from './utils/crash-handlers';
 import { onRunEvent, getRecentEvents } from './utils/event-bus';
 import * as path from 'path';
 import * as fs from 'fs';
@@ -498,36 +498,32 @@ if (fs.existsSync(dashboardPath)) {
 }
 
 // ─── Signal handlers — flush token report on unexpected exit ─────────────────
+installProcessHandlers((msg) => log.error(msg));
 
-function flushTokenReportOnExit(reason: string) {
-    try {
-        if (tokenTracker.getOutputPath()) {
-            tokenTracker.setRunStatus('failed');
-            refreshTokenReport();
-            log.info(`Token report saved on ${reason}.`);
-        }
-    } catch { /* best-effort */ }
+// ─── Exports for testability (Sub-Plan 26-09) ───────────────────────────────
+// Importing index.ts no longer starts the server — call createApp() / createHttpServer()
+// and listen() explicitly in tests or alternative entry points.
+export { app, httpServer, wss, broadcast, sessions, states };
+
+/**
+ * Convenience factory — returns the fully-configured Express app.
+ * Useful for supertest or custom server setups.
+ */
+export function createApp() { return app; }
+
+/**
+ * Convenience factory — returns the HTTP server (Express + WebSocket).
+ */
+export function createHttpServer() { return httpServer; }
+
+// ─── Start (guarded so index.ts is importable without side effects) ──────────
+
+if (require.main === module) {
+    // Bind to loopback by default — only expose to the network if explicitly requested.
+    const BIND_HOST = process.env.BIND_HOST ?? '127.0.0.1';
+    httpServer.listen(DASHBOARD_PORT, BIND_HOST, () => {
+        log.info(`Server listening on http://${BIND_HOST}:${DASHBOARD_PORT}`);
+        log.info(`WebSocket on ws://${BIND_HOST}:${DASHBOARD_PORT}/ws`);
+        log.info(`Agents registered: ${AGENT_REGISTRY.length}`);
+    });
 }
-
-process.on('SIGINT', () => { flushTokenReportOnExit('SIGINT'); process.exit(130); });
-process.on('SIGTERM', () => { flushTokenReportOnExit('SIGTERM'); process.exit(143); });
-process.on('uncaughtException', (err) => {
-    log.error(`Uncaught exception: ${err.message}`);
-    flushTokenReportOnExit('uncaughtException');
-    process.exit(1);
-});
-process.on('unhandledRejection', (reason) => {
-    log.error(`Unhandled rejection: ${reason}`);
-    flushTokenReportOnExit('unhandledRejection');
-    process.exit(1);
-});
-
-// ─── Start ──────────────────────────────────────────────────────────────────
-
-// Bind to loopback by default — only expose to the network if explicitly requested.
-const BIND_HOST = process.env.BIND_HOST ?? '127.0.0.1';
-httpServer.listen(DASHBOARD_PORT, BIND_HOST, () => {
-    log.info(`Server listening on http://${BIND_HOST}:${DASHBOARD_PORT}`);
-    log.info(`WebSocket on ws://${BIND_HOST}:${DASHBOARD_PORT}/ws`);
-    log.info(`Agents registered: ${AGENT_REGISTRY.length}`);
-});
