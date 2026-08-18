@@ -1010,6 +1010,10 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
         throw wtCreateErr;
     }
 
+    // Plan 25, 26-04 §10: Track merge status outside the try so finally can use it
+    // for correct worktree disposal (prStatus is block-scoped inside the try).
+    let wasMerged = false;
+
     try {
         // Fetch base branch and resolve to a ref that exists in the worktree
         gitExec(worktreeWorkspace, `fetch origin ${baseBranch}`);
@@ -2743,17 +2747,21 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                 }
             }
 
+            // Plan 25, 26-04 §9: Use an explicit mergeBlocked sentinel instead of
+            // overloading prStatus to both block merges and track PR state.
+            let mergeBlocked: string | null = null;
+
             // Verify branch exists on remote before merging
             const lsRemote = gitExec(worktreeWorkspace, `ls-remote --heads origin ${branchName}`);
             if (!lsRemote || lsRemote.startsWith('Error:')) {
                 log.error(`Branch ${branchName} not found on remote — skipping merge`);
-                prStatus = 'open';
+                mergeBlocked = 'branch not on remote';
             }
 
             // Block merge when critical secrets were detected
             if (secretsBlockMerge) {
                 log.error(`Merge blocked for PR #${ghPr.number}: critical secrets detected`);
-                prStatus = 'open';
+                mergeBlocked = 'critical secrets detected';
                 allTranscript.push(msg('security-gates', `Merge blocked for PR #${ghPr.number}: critical secrets detected`));
                 try {
                     await octokit.issues.createComment({
@@ -2766,17 +2774,23 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                 }
             }
 
-            if (!secretsBlockMerge && (prStatus === 'approved' || prStatus === 'open')) {
-                // Plan 24, A1: assert PR head matches branchName before merge/deleteRef.
-                // This guard prevents merging/deleting the wrong branch when findExistingPR
-                // previously returned a PR for a different head.
-                const prHeadRef = ghPr.head?.ref;
-                if (prHeadRef && prHeadRef !== branchName) {
-                    const err = new PrIdentityMismatchError(ghPr.number, branchName, prHeadRef);
-                    log.error(err.message);
-                    allTranscript.push(msg('conductor', err.message));
-                    prStatus = 'open';
-                } else {
+            // Block merge on critical integrity findings in enforce mode
+            const criticalIntegrity = integrityFindings.filter(f => f.severity === 'critical');
+            if (criticalIntegrity.length > 0 && GATE_INTEGRITY_MODE === 'enforce') {
+                log.warn(`PR blocked due to ${criticalIntegrity.length} critical integrity finding(s)`);
+                mergeBlocked = `${criticalIntegrity.length} critical integrity finding(s)`;
+            }
+
+            // Plan 24, A1: assert PR head matches branchName before merge/deleteRef.
+            const prHeadRef = ghPr.head?.ref;
+            if (!mergeBlocked && prHeadRef && prHeadRef !== branchName) {
+                const err = new PrIdentityMismatchError(ghPr.number, branchName, prHeadRef);
+                log.error(err.message);
+                allTranscript.push(msg('conductor', err.message));
+                mergeBlocked = err.message;
+            }
+
+            if (mergeBlocked === null) {
                 try {
                     await octokit.pulls.merge({
                         owner: ghOwner,
@@ -2785,6 +2799,7 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                         merge_method: 'squash',
                     });
                     prStatus = 'merged';
+                    wasMerged = true;
                     log.info(`PR #${ghPr.number} merged to ${baseBranch}`);
                     emitRunEvent('pr:merged', { prNumber: ghPr.number, branch: branchName, baseBranch });
                     allTranscript.push(msg('conductor', `PR #${ghPr.number} merged to ${baseBranch}`));
@@ -2805,16 +2820,10 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                     allTranscript.push(msg('conductor', `Merge failed: ${err.message}`));
                     prStatus = 'open';
                 }
-                } // end Plan 24 A1 head-match else
+            } else {
+                prStatus = 'open';
+                log.info(`Merge blocked: ${mergeBlocked}`);
             }
-        }
-
-        // ── 5. Build result ─────────────────────────────────────────────
-        // If critical integrity findings exist in enforce mode, block the merge
-        const criticalIntegrity = integrityFindings.filter(f => f.severity === 'critical');
-        if (criticalIntegrity.length > 0 && GATE_INTEGRITY_MODE === 'enforce' && prStatus === 'approved') {
-            log.warn(`PR blocked due to ${criticalIntegrity.length} critical integrity finding(s)`);
-            prStatus = 'open';
         }
 
         // Sub-Plan 06 §6: Compute evidence-based completion
@@ -2882,19 +2891,19 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
         };
     } finally {
         // ── Sub-Plan 06 §3: Worktree disposal ───────────────────────────
-        // Successful merge → remove (as before).
-        // Anything else  → move to .worktrees-failed/ for salvage, do not delete remote branch.
-        if (fs.existsSync(worktreeDir)) {
-            // Determine if this was a successful merge by checking if the branch was deleted
-            // (remote branch deletion only happens on success path above)
-            const branchStillExists = (() => {
-                try {
-                    const localBranches = gitExec(gitRoot, `branch --list ${branchName}`);
-                    return localBranches.trim().length > 0;
-                } catch { return true; }
-            })();
+        // Plan 25, 26-04 §10: Use the prStatus value (set during merge) instead
+        // of the broken local-branch existence check, which always returned true
+        // because the local branch was deleted AFTER this disposal block.
+        //
+        // Successful merge → remove worktree, then delete local branch.
+        // Anything else    → move to .worktrees-failed/ for salvage.
+        // wasMerged is set in the try block scope above
 
-            if (!branchStillExists) {
+        // Delete local branch FIRST so the worktree can be cleanly removed
+        gitExec(gitRoot, `branch -D ${branchName}`);
+
+        if (fs.existsSync(worktreeDir)) {
+            if (wasMerged) {
                 // Success path — remove worktree
                 gitExec(gitRoot, `worktree remove "${worktreeDir}" --force`);
                 log.info(`Cleaned up worktree: ${worktreeSlug}`);
@@ -2926,7 +2935,5 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
         }
         // Prune any dangling worktree tracking entries (fixes A11 leak-proofing)
         gitExec(gitRoot, 'worktree prune');
-        // Only delete local branch on success (remote branch already handled above)
-        gitExec(gitRoot, `branch -D ${branchName}`);
     }
 }

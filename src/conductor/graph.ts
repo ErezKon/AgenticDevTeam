@@ -56,21 +56,29 @@ export interface ConductorOptions {
 // ─── Conditional edges ──────────────────────────────────────────────────────
 
 /**
- * Filter test reports to the current bugfix iteration. Uses the whole
- * array when no iteration tracking exists (backward-compat).
+ * Filter test reports to the current bugfix iteration so stale failures
+ * from previous iterations do not force unnecessary bugfix looping.
+ *
+ * Plan 25, 26-04 §5: filter by iterationIndex (matching afterE2eRouter).
  */
 function currentIterationFailures(state: ProjectStateType): Array<{ status: string }> {
+    const currentIteration = state.iteration?.bugfix ?? 0;
+
     // The latestGateReport (replace reducer) is always current.
-    // For test reports (append reducer), we consider all since there's no
-    // iterationIndex yet — the latestGateReport is the authoritative signal.
     if (state.latestGateReport) {
         const gr = state.latestGateReport;
         if (!gr.passed) return [{ status: 'fail' }];
-        // Also check non-gate test reports
-        const recentFails = (state.testReports ?? []).filter(r => r.status === 'fail');
+        // Also check non-gate test reports — filter to current iteration
+        const recentFails = (state.testReports ?? []).filter(r =>
+            r.status === 'fail'
+            && (r.iterationIndex === undefined || r.iterationIndex === currentIteration),
+        );
         return recentFails;
     }
-    return (state.testReports ?? []).filter(r => r.status === 'fail');
+    return (state.testReports ?? []).filter(r =>
+        r.status === 'fail'
+        && (r.iterationIndex === undefined || r.iterationIndex === currentIteration),
+    );
 }
 
 export function afterQaRouter(state: ProjectStateType): string {

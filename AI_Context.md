@@ -762,10 +762,11 @@ TestReport, and records a `verificationErrors` entry. No silent swallowing.
 ### Security Gates (`security-gates.ts`)
 
 Three checks combined:
-- **Secret scan**: Regex patterns for AWS keys, private keys, GitHub tokens, JWTs, generic secrets
+- **Secret scan**: Regex patterns for AWS keys, private keys, GitHub tokens, JWTs, generic secrets; falls back to filesystem walk when git is unavailable (Plan 25, 26-04 &sect;3)
 - **Dependency audit**: Per-stack (npm audit, pip-audit, govulncheck, etc.)
 - **Licence check**: SPDX deny-list for npm packages
 - Never logs matched values (redaction discipline)
+- **Fail-closed**: If any sub-gate crashes, `passed` is `false` and errors are propagated to `verificationErrors` (Plan 25, 26-04 &sect;4)
 
 ### Plan Coverage (`plan-coverage.ts`) -- Sub-Plan 04
 

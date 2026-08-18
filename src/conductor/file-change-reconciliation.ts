@@ -40,19 +40,25 @@ export function reconcileFileChanges(
     baseBranch?: string,
 ): ReconciliationResult {
     // Get actual changed files from git
+    // Plan 25, 26-04 §11: guard against error strings from gitExec — they
+    // look like filenames if not filtered, corrupting the reconciliation.
     const actualPaths = new Set<string>();
     try {
         const diffRef = baseBranch ? `${baseBranch}..HEAD` : 'HEAD';
         const diffOutput = gitExec(worktree, `diff --name-only ${diffRef}`);
-        for (const line of diffOutput.split('\n').filter(Boolean)) {
-            actualPaths.add(line);
+        if (diffOutput && !diffOutput.startsWith('Error:')) {
+            for (const line of diffOutput.split('\n').filter(Boolean)) {
+                actualPaths.add(line);
+            }
         }
     } catch { /* new repo with no commits — fall through to ls-files */ }
 
     try {
         const untrackedOutput = gitExec(worktree, 'ls-files --others --exclude-standard');
-        for (const line of untrackedOutput.split('\n').filter(Boolean)) {
-            actualPaths.add(line);
+        if (untrackedOutput && !untrackedOutput.startsWith('Error:')) {
+            for (const line of untrackedOutput.split('\n').filter(Boolean)) {
+                actualPaths.add(line);
+            }
         }
     } catch { /* ignore */ }
 

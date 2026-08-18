@@ -204,12 +204,20 @@ describe('evaluateAcceptance', () => {
     });
 
     it('detects tamper findings as integrity failures', () => {
+        // Plan 25, 26-04 §2: INTEGRITY criterion now reads PR-level integrityFindings
+        // instead of TAMPER-prefixed bugs.
         const state = makeMinimalState({
             latestGateReport: makeGateReport(),
             testReports: [{ type: 'unit', framework: 'jest', total: 5, passed: 5, failed: 0, skipped: 0, status: 'pass' as const, source: 'quality-gates' as const, iterationIndex: 0, runnerError: false, cases: [], failures: [], agentId: 'qa-unit' }],
-            bugs: [
-                { id: 'TAMPER-jest-config', title: 'Tampered jest config', severity: 'critical', stepsToReproduce: '', expectedBehavior: '', actualBehavior: '', suspectedArea: '', reportedBy: 'gate-integrity' },
-            ] as any,
+            pullRequests: [{
+                id: 'PR-1', prNumber: 1, prUrl: '', title: '', description: '',
+                branchName: 'feature/us1', authorAgentId: 'dev-1',
+                reviewerAgentIds: [], reviews: [], status: 'merged' as any,
+                assignmentIds: ['A-1'], taskType: 'feature' as any,
+                integrityFindings: [
+                    { kind: 'tampered-test-config', severity: 'critical' as const, file: 'jest.config.js', detail: 'Tampered jest config' },
+                ],
+            }] as any,
         });
 
         const report = evaluateAcceptance(state);

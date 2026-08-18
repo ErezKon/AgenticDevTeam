@@ -148,9 +148,10 @@ export function evaluateAcceptance(state: ProjectStateType): AcceptanceReport {
             const testResults = gateReport.results.filter(
                 r => r.step === 'test' && r.mode !== 'absent' && !r.skipped,
             );
-            // Also check for real QA test reports
+            // Only count reports with source === 'executed' (parsed from a real runner)
+            // to prevent LLM-claimed tests from inflating counts (Plan 25, 26-04 §1).
             const realTestReports = (state.testReports ?? []).filter(
-                r => r.type === 'unit' || r.type === 'integration',
+                r => (r.type === 'unit' || r.type === 'integration') && r.source === 'executed',
             );
             const totalExecuted = realTestReports.reduce((sum, r) => sum + r.total, 0);
             if (testResults.length > 0 || totalExecuted > 0) {
@@ -209,18 +210,21 @@ export function evaluateAcceptance(state: ProjectStateType): AcceptanceReport {
     }
 
     // ── INTEGRITY ────────────────────────────────────────────────────────
+    // Plan 25, 26-04 §2: Read integrityFindings from pullRequests instead
+    // of the non-existent 'TAMPER-' bug prefix. PR-level integrityFindings
+    // are populated by pr-workflow.ts via detectTampering().
     {
         let passed = true;
         let inconclusive = false;
         let detail = 'No tampering detected';
-        // TamperFindings are surfaced as bugs with id prefix 'TAMPER-'
-        const tamperBugs = (state.bugs ?? []).filter(b => b.id.startsWith('TAMPER-'));
-        const criticalTamperBugs = tamperBugs.filter(b => b.severity === 'critical');
-        if (criticalTamperBugs.length > 0) {
+        const allIntegrityFindings = (state.pullRequests ?? [])
+            .flatMap(pr => pr.integrityFindings ?? []);
+        const criticalFindings = allIntegrityFindings.filter(f => f.severity === 'critical');
+        if (criticalFindings.length > 0) {
             passed = false;
-            detail = `${criticalTamperBugs.length} critical tamper finding(s): ${criticalTamperBugs[0].title}`;
-        } else if (tamperBugs.length > 0) {
-            detail = `${tamperBugs.length} non-critical tamper finding(s)`;
+            detail = `${criticalFindings.length} critical integrity finding(s): ${criticalFindings[0].detail}`;
+        } else if (allIntegrityFindings.length > 0) {
+            detail = `${allIntegrityFindings.length} non-critical integrity finding(s)`;
         }
         criteria.push({ id: 'INTEGRITY', label: 'Gate integrity', required: true, passed, inconclusive, detail });
     }

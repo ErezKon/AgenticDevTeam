@@ -55,6 +55,8 @@ export interface SecurityFinding {
 export interface SecurityReport {
     findings: SecurityFinding[];
     passed: boolean;
+    /** Errors from sub-gates that crashed (fail-closed: any error → passed=false). */
+    errors?: string[];
 }
 
 // ─── Secret Patterns ────────────────────────────────────────────────────────
@@ -137,6 +139,26 @@ function shouldSkipPath(relativePath: string): boolean {
     return false;
 }
 
+// ─── Filesystem walk fallback (when git is unavailable) ─────────────────────
+
+const WALK_PRUNE = new Set(['node_modules', '.git', '.worktrees', '.worktrees-failed', 'dist', 'build', 'coverage', '__pycache__']);
+
+/** Recursively walk the workspace and return relative file paths. */
+function walkFilesForSecretScan(root: string, dir: string): string[] {
+    const results: string[] = [];
+    let entries: fs.Dirent[];
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return results; }
+    for (const entry of entries) {
+        if (entry.isDirectory()) {
+            if (WALK_PRUNE.has(entry.name) || entry.name.startsWith('.')) continue;
+            results.push(...walkFilesForSecretScan(root, path.join(dir, entry.name)));
+        } else if (entry.isFile()) {
+            results.push(path.relative(root, path.join(dir, entry.name)));
+        }
+    }
+    return results;
+}
+
 // ─── Secret scanning ────────────────────────────────────────────────────────
 
 /**
@@ -149,15 +171,16 @@ function shouldSkipPath(relativePath: string): boolean {
 export function scanForSecrets(workspacePath: string): SecurityFinding[] {
     const findings: SecurityFinding[] = [];
 
-    // Get git-tracked files only
+    // Get git-tracked files; fall back to filesystem walk on git failure
+    // (Plan 25, 26-04 §3: never silently skip the scan).
     const trackedOutput = gitExec(workspacePath, 'ls-files');
+    let trackedFiles: string[];
     if (!trackedOutput || trackedOutput.startsWith('Error:')) {
-        // Not a git repo or error — fall back to filesystem walk
-        log.warn('Could not list git-tracked files; skipping secret scan');
-        return [];
+        log.warn('Could not list git-tracked files; falling back to filesystem walk');
+        trackedFiles = walkFilesForSecretScan(workspacePath, workspacePath);
+    } else {
+        trackedFiles = trackedOutput.split('\n').filter(Boolean);
     }
-
-    const trackedFiles = trackedOutput.split('\n').filter(Boolean);
 
     for (const relativePath of trackedFiles) {
         if (shouldSkipPath(relativePath)) continue;
@@ -444,6 +467,7 @@ export function runSecurityGates(
     }
 
     const findings: SecurityFinding[] = [];
+    const errors: string[] = [];
 
     // 1. Secret scan
     try {
@@ -455,7 +479,9 @@ export function runSecurityGates(
             log.info('Secret scan: clean');
         }
     } catch (err: any) {
-        log.warn(`Secret scan error (non-fatal): ${err.message}`);
+        // Plan 25, 26-04 §4: record errors instead of silently swallowing
+        log.error(`Secret scan error: ${err.message}`);
+        errors.push(`Secret scan crashed: ${err.message}`);
     }
 
     // 2. Dependency audit
@@ -468,7 +494,8 @@ export function runSecurityGates(
             log.info('Dependency audit: clean');
         }
     } catch (err: any) {
-        log.warn(`Dependency audit error (non-fatal): ${err.message}`);
+        log.error(`Dependency audit error: ${err.message}`);
+        errors.push(`Dependency audit crashed: ${err.message}`);
     }
 
     // 3. Licence check
@@ -481,14 +508,17 @@ export function runSecurityGates(
             log.info('Licence check: clean');
         }
     } catch (err: any) {
-        log.warn(`Licence check error (non-fatal): ${err.message}`);
+        log.error(`Licence check error: ${err.message}`);
+        errors.push(`Licence check crashed: ${err.message}`);
     }
 
-    // passed = no critical findings
-    const passed = !findings.some(f => f.severity === 'critical');
+    // Plan 25, 26-04 §4: fail-closed — if any sub-gate crashed, the overall
+    // result is inconclusive/failed rather than silently passing.
+    const hasCritical = findings.some(f => f.severity === 'critical');
+    const passed = !hasCritical && errors.length === 0;
 
-    log.info(`Security gates ${passed ? 'PASSED' : 'FAILED'}: ${findings.length} total finding(s), ${findings.filter(f => f.severity === 'critical').length} critical`);
-    return { findings, passed };
+    log.info(`Security gates ${passed ? 'PASSED' : 'FAILED'}: ${findings.length} total finding(s), ${findings.filter(f => f.severity === 'critical').length} critical, ${errors.length} error(s)`);
+    return { findings, passed, errors };
 }
 
 // ─── SecurityReport -> Bug synthesis ────────────────────────────────────────

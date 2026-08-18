@@ -1603,6 +1603,8 @@ export async function developmentNode(state: ProjectStateType): Promise<Partial<
 
     // Plan 24, F1–F3: Assembly gate — check wiring and asset completeness
     // Only run when we have at least one merged PR (otherwise there's nothing to assemble)
+    // Plan 25, 26-04 §7: Hoist assemblyBugs so they reach the return object.
+    const assemblyBugs: Bug[] = [];
     if (result.pullRequests.some(pr => pr.status === 'merged')) {
         const assemblyResult = runAssemblyGate(state.workspacePath);
         if (!assemblyResult.passed) {
@@ -1610,8 +1612,7 @@ export async function developmentNode(state: ProjectStateType): Promise<Partial<
             result.transcript.push(msg('conductor', 'development', `Assembly gate: ${assemblyResult.summary}`));
             emitRunEvent('gate:result', { gate: 'assembly', passed: false, summary: assemblyResult.summary });
 
-            // Synthesize a bug for the assembly issue
-            const assemblyBugs = [];
+            // Synthesize bugs for the assembly issues
             if (assemblyResult.missingAssets.length > 0) {
                 assemblyBugs.push({
                     id: 'ASSEMBLY-MISSING-ASSETS',
@@ -1636,7 +1637,6 @@ export async function developmentNode(state: ProjectStateType): Promise<Partial<
                     reportedBy: 'assembly-gate',
                 });
             }
-            // Add assembly bugs to state bugs for bugfix triage to pick up
             result.transcript.push(msg('conductor', 'development', `Assembly gate synthesized ${assemblyBugs.length} bug(s)`));
         } else {
             devLog.info(`Assembly gate passed: ${assemblyResult.summary}`);
@@ -1668,6 +1668,8 @@ export async function developmentNode(state: ProjectStateType): Promise<Partial<
         completedAssignmentIds: result.completedAssignmentIds,
         completionEvidence: result.completionEvidence,
         salvageBranches: result.salvageBranches,
+        // Plan 25, 26-04 §7: surface assembly-gate bugs so bugfix triage picks them up
+        bugs: assemblyBugs,
         transcript: [
             ...result.transcript,
             msg('conductor', 'development', `Development phase complete: ${result.fileChanges.length} files changed, ${result.pullRequests.length} PRs merged. Sync: ${syncResult.details}`),
@@ -2017,6 +2019,13 @@ export async function qaNode(state: ProjectStateType): Promise<Partial<ProjectSt
             title: 'Security Report',
             content: `## Security Report\n\n${securityReportToMarkdown(securityReport)}`,
         });
+
+        // Plan 25, 26-04 §4: propagate sub-gate errors to verificationErrors
+        if (securityReport.errors && securityReport.errors.length > 0) {
+            for (const err of securityReport.errors) {
+                verificationErrors.push({ stage: 'security-gates', message: err });
+            }
+        }
 
         if (securityReport.findings.length > 0) {
             qaLog.warn(`Security gate: ${securityReport.findings.length} finding(s), ${securityReport.findings.filter(f => f.severity === 'critical').length} critical`);
@@ -2807,9 +2816,24 @@ export async function finalizeNode(state: ProjectStateType): Promise<Partial<Pro
     const usageSummary = tokenTracker.getRunSummary();
     const usageSnapshot = tokenTracker.getSnapshot();
 
-    // ── Count files actually on disk vs phantom file-change claims ─────
+    // Plan 25, 26-04 §13: Wrap report-building in try/catch so that
+    // writeStateSnapshot + writeRunManifest always execute in finally.
+    // Without this, any throw during report generation loses the state
+    // snapshot and run manifest — breaking continue-run capability.
+    let traceReport: ReturnType<typeof buildTraceabilityReport> | null = null;
     let filesDelivered = 0;
     let phantomFileChanges = 0;
+    let prCounts = countPRsByStatus(state.pullRequests ?? []);
+    const branchesSalvaged = (state.salvageBranches ?? []).length;
+    const branchesNotAttempted = 0;
+    const branchesDeferred = (state.dispatchRounds ?? []).filter((r: DispatchRound) => r.prs === 0 && r.fileChanges === 0).length;
+    let allEvents = getAllEvents();
+    let phaseTimeline = extractPhaseTimeline(allEvents);
+    const budget = getBudgetStatus();
+
+    try {
+
+    // ── Count files actually on disk vs phantom file-change claims ─────
     try {
         let gitRoot: string;
         try { gitRoot = findGitRoot(state.workspacePath); } catch { gitRoot = state.workspacePath; }
@@ -2901,7 +2925,6 @@ export async function finalizeNode(state: ProjectStateType): Promise<Partial<Pro
     }
     summary.push('');
     summary.push(`── Budget ──`);
-    const budget = getBudgetStatus();
     summary.push(
         `Tokens: ${budget.usedTokens.toLocaleString()} / ${budget.maxTokens === 0 ? 'unlimited' : budget.maxTokens.toLocaleString()}`,
     );
@@ -2916,7 +2939,6 @@ export async function finalizeNode(state: ProjectStateType): Promise<Partial<Pro
     );
 
     // ── Requirements traceability (Sub-Plan 10) ────────────────────────
-    let traceReport: ReturnType<typeof buildTraceabilityReport> | null = null;
     try {
         traceReport = buildTraceabilityReport(state);
         const t = traceReport.totals;
@@ -2944,6 +2966,30 @@ export async function finalizeNode(state: ProjectStateType): Promise<Partial<Pro
         }
     } catch (traceErr: any) {
         finalLog.warn(`Traceability report failed (non-fatal): ${traceErr.message}`);
+    }
+
+    // Plan 25, 26-04 §8: Add acceptance blockers and phase timeline BEFORE
+    // building summaryText, so they appear in the summary artifact.
+
+    // ── Acceptance blockers ──────────────────────────────────────────────
+    if (acceptance.blockers.length > 0) {
+        summary.push('');
+        summary.push(`── Acceptance Blockers ──`);
+        for (const b of acceptance.blockers) {
+            summary.push(`  - ${b}`);
+        }
+    }
+
+    // ── PR & branch counters (Sub-Plan G1/G2) ────────────────────────────
+    prCounts = countPRsByStatus(state.pullRequests ?? []);
+
+    // ── Phase timeline (Sub-Plan G4) ────────────────────────────────────
+    allEvents = getAllEvents();
+    phaseTimeline = extractPhaseTimeline(allEvents);
+    const timelineText = renderPhaseTimeline(phaseTimeline);
+    if (timelineText) {
+        summary.push('');
+        summary.push(timelineText);
     }
 
     const summaryText = summary.join('\n');
@@ -3080,36 +3126,13 @@ export async function finalizeNode(state: ProjectStateType): Promise<Partial<Pro
     finalLog.info(`Token usage JSON: ${jsonPath}`);
     finalLog.info(`Token usage HTML report: ${htmlPath}`);
 
-    // ── Acceptance blockers in the final log ────────────────────────────
-    if (acceptance.blockers.length > 0) {
-        summary.push('');
-        summary.push(`── Acceptance Blockers ──`);
-        for (const b of acceptance.blockers) {
-            summary.push(`  - ${b}`);
-        }
+    } catch (reportErr: any) {
+        // Plan 25, 26-04 §13: report generation crashed — log but continue
+        // to the finally block so state snapshot + manifest are still written.
+        finalLog.error(`Report generation failed (state will still be saved): ${reportErr.message}`);
     }
 
-    // ── PR & branch counters (Sub-Plan G1/G2) ────────────────────────────
-    const prCounts = countPRsByStatus(state.pullRequests ?? []);
-    const branchesSalvaged = (state.salvageBranches ?? []).length;
-
-    const branchesNotAttempted = 0;
-
-    // Deferred = dispatch rounds where prs === 0 (nothing merged/opened)
-    const branchesDeferred = (state.dispatchRounds ?? []).filter((r: DispatchRound) => r.prs === 0 && r.fileChanges === 0).length;
-
-    // ── Phase timeline (Sub-Plan G4) ────────────────────────────────────
-    const allEvents = getAllEvents();
-    const phaseTimeline = extractPhaseTimeline(allEvents);
-
-    // Add timeline to the summary
-    const timelineText = renderPhaseTimeline(phaseTimeline);
-    if (timelineText) {
-        summary.push('');
-        summary.push(timelineText);
-    }
-
-    // ── Write state snapshot and run manifest ─────────────────────────────
+    // ── Write state snapshot and run manifest (guaranteed via §13) ─────
     writeStateSnapshot(state.outputPath, state);
     const latestGR = state.latestGateReport;
     writeRunManifest(state.outputPath, state, finalStatus, {
@@ -3146,7 +3169,7 @@ export async function finalizeNode(state: ProjectStateType): Promise<Partial<Pro
             gateReportInconclusive: latestGR?.inconclusive,
             productVerifyPassed: latestGR?.productVerify?.passed,
             unresolvedReferences: latestGR?.productVerify?.resolveIssues.length,
-            integrityFindings: (state.bugs ?? []).filter(b => b.id.startsWith('TAMPER-')).length,
+            integrityFindings: (state.pullRequests ?? []).reduce((sum, pr) => sum + (pr.integrityFindings?.length ?? 0), 0),
         },
         phantomFileChanges,
         filesDelivered,
