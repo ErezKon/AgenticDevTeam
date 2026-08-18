@@ -9,7 +9,7 @@
 1. **Read this file first.** Before making any changes, read this file and `README.md` to understand the project's architecture, conventions, and constraints.
 2. **Maintain consistency.** All changes must follow the existing patterns, naming conventions, and architectural decisions documented here. Do not introduce new patterns without explicit user approval.
 3. **Update context files.** If your changes alter the pipeline flow, add/remove agents, modify configuration, change schemas, or affect the architecture in any meaningful way, you **must** update this `AI_Context.md` and `README.md` to reflect those changes.
-4. **Never break the pipeline.** The LangGraph state machine is the backbone. Changes to `state.ts`, `graph.ts`, or `nodes.ts` require understanding the full flow and how reducers merge state.
+4. **Never break the pipeline.** The LangGraph state machine is the backbone. Changes to `state.ts`, `graph.ts`, or `nodes/` require understanding the full flow and how reducers merge state.
 5. **Schema changes cascade.** Modifying a Zod schema in `src/agents/_shared/schemas/` affects every agent that uses it, the conductor nodes, and the tests. Trace all consumers before changing.
 6. **Environment variables are the API.** All configuration is via `.env`. When adding a new config, add it to `src/config.ts`, `.env.example` (with documentation), and the README's Environment Variables table.
 7. **Test what you change.** Run `npm run test:unit` for unit tests. Use `npm run test:greenfield` or `npm run test:maintain` for integration tests. Default test timeout is 10 seconds; integration tests set their own per-test timeouts. Use `npm run typecheck` for type checking and `npm run lint` for unused-code detection.
@@ -64,7 +64,20 @@ src/
   conductor/                       # LangGraph orchestration layer
     state.ts                       # ProjectState (Annotation + reducers, incl. _stopReason)
     graph.ts                       # StateGraph wiring + conditional edges + HITL
-    nodes.ts                       # 12 phase node functions (~3250 lines, largest file) + checkBudgetStop()
+    nodes/                         # Phase node functions (split into focused modules)
+      index.ts                     # Barrel re-export of all 13 node functions
+      _invoke.ts                   # invokeAgent<S>() (generic over Zod schema), getModelForAgent()
+      _guards.ts                   # phaseNode() decorator, shouldSkipOnContinue, checkBudgetStop, msg()
+      _git-helpers.ts              # detectDefaultBranch, commitAndPushArtifacts, ensureNodeLockfileSync
+      intake.ts                    # intakeNode (Phase 1)
+      planning.ts                  # codebaseAnalyzerNode, architectNode, pmNode, dbaNode, tlNode (Phases 1b-5)
+      development.ts               # developmentNode (Phase 6, fan-out dispatch)
+      qa.ts                        # qaNode (Phase 7, test planning + execution + gates)
+      bugfix-triage.ts             # bugfixTriageNode (Phase 8)
+      devops.ts                    # devopsNode (Phase 9)
+      e2e.ts                       # e2eNode (Phase 9b, Playwright + smoke fallback)
+      acceptance.ts                # acceptanceNode (Phase 10)
+      finalize.ts                  # finalizeNode (Phase 11, reporting + teardown)
     run.ts                         # Autonomous & HITL run helpers + continueRun
     pr-workflow.ts                 # Full PR lifecycle orchestrator (~2939 lines)
     context-builder.ts             # Compact context summarizers with char budgets
@@ -321,10 +334,10 @@ These are load-bearing. Changing any of them reintroduces a failure mode that is
 | `sanitizeStreamingContentBlocks()` runs before `compactHistory()` on every call | `history-compactor.ts`, wired in `agent-factory.ts` | Defence-in-depth against corrupt histories, including ones restored from a checkpoint written by an older provider package. Operates on a copy; `tool_calls` is untouched (the adapter re-materialises `tool_use` blocks from it). Flag: `SANITIZE_STREAM_BLOCKS`. |
 | `handleLLMEnd` reads `llmOutput.{tokenUsage,token_usage,usage,estimatedTokenUsage}`, then falls back to `generations[].message.usage_metadata` | `token-callback.ts` + `token-usage-extractor.ts` | No single field covers every transport. Reading only tier 1 recorded 5 token records for a 60+ call run, silently disabling `MAX_RUN_COST_USD`. Tier 1 wins when present, so nothing is double-counted. Both paths share `normaliseUsage` / `sumUsageMetadata`. |
 | `AgentConfig.topP` / `topK` are forwarded to `createChatModel()` | `agent-factory.ts` | They were accepted by 10 agent builders and silently dropped. |
-| `invokeAgent()` normalises `AIMessage.content` from content blocks to string before JSON parsing | `nodes.ts`, `pr-workflow.ts` | Anthropic streaming and OpenAI Responses API (`*codex*`, `gpt-5.x-pro`) return `content` as `[{ type: 'text', text: '...' }]` arrays, not plain strings. Without normalisation, the `typeof content !== 'string'` guard bypasses all JSON parsing and schema validation, producing silent empty output. Uses `extractAgentText()` from `structured-output.ts`. |
-| A response with **no** extractable text never returns raw content blocks when a schema is set | `nodes.ts` (`invokeAgent`), `pr-workflow.ts` | Reasoning-only responses and thinking-exhausted output budgets have no text block. Returning `last.content` there is what wrote `architect-mission.md` with `undefined` fields and `0 components` while reporting success. Now it logs the block census, re-asks through the repair loop (repair message carries the original request because there is no previous payload to correct), and throws if still empty. |
+| `invokeAgent()` normalises `AIMessage.content` from content blocks to string before JSON parsing | `nodes/_invoke.ts`, `pr-workflow.ts` | Anthropic streaming and OpenAI Responses API (`*codex*`, `gpt-5.x-pro`) return `content` as `[{ type: 'text', text: '...' }]` arrays, not plain strings. Without normalisation, the `typeof content !== 'string'` guard bypasses all JSON parsing and schema validation, producing silent empty output. Uses `extractAgentText()` from `structured-output.ts`. |
+| A response with **no** extractable text never returns raw content blocks when a schema is set | `nodes/_invoke.ts` (`invokeAgent`), `pr-workflow.ts` | Reasoning-only responses and thinking-exhausted output budgets have no text block. Returning `last.content` there is what wrote `architect-mission.md` with `undefined` fields and `0 components` while reporting success. Now it logs the block census, re-asks through the repair loop (repair message carries the original request because there is no previous payload to correct), and throws if still empty. |
 | `reasoning` / `thinking` blocks are excluded from extracted text | `structured-output.ts` | Concatenating them into the payload corrupts `JSON.parse`. |
-| Every agent invocation is dumped to `outputs/<run>/full-responses/` | `response-log.ts`, wired in `nodes.ts` + `pr-workflow.ts` | Response-shape failures are invisible in `run.log` — it only shows the symptom (`0 components`). The dumps + `index.jsonl` (`textSource`, `finalContentBlocks`, `truncatedByTokenLimit`) make the cause a one-line read. Flag: `FULL_RESPONSE_LOG_ENABLED`. |
+| Every agent invocation is dumped to `outputs/<run>/full-responses/` | `response-log.ts`, wired in `nodes/_invoke.ts` + `pr-workflow.ts` | Response-shape failures are invisible in `run.log` — it only shows the symptom (`0 components`). The dumps + `index.jsonl` (`textSource`, `finalContentBlocks`, `truncatedByTokenLimit`) make the cause a one-line read. Flag: `FULL_RESPONSE_LOG_ENABLED`. |
 
 OpenAI auth priority: `OPENAI_API_KEY` (direct API key, no custom fetch chain) > OAuth client-credentials flow (`oauthFetch` -> `cassetteFetch` -> `throttledFetch`).
 Anthropic and Google use their own HTTP handling with direct API keys.
@@ -673,7 +686,7 @@ accepted (and not unrecoverable).
 Key env vars: `RUN_FAIL_POLICY` (halt/finalize/legacy), `ACCEPT_MIN_TESTS`, `ACCEPT_REQUIRE_SMOKE`,
 `UNRECOVERABLE_ZERO_ROUNDS`.
 
-### Requirements Traceability & AC Coverage (`traceability.ts`, `nodes.ts`) — Sub-Plan 10
+### Requirements Traceability & AC Coverage (`traceability.ts`, `nodes/qa.ts`) — Sub-Plan 10
 
 Chains epics → stories → acceptance criteria → tasks → assignments → PRs → tests into a
 full traceability matrix so "did we build and verify what was asked?" is answerable.
@@ -729,7 +742,7 @@ full traceability matrix so "did we build and verify what was asked?" is answera
 
 ### DevOps & E2E Hardening — Sub-Plan 11
 
-**DevOps verification** (`devops-verify.ts`, `devops-fallback.ts`, `nodes.ts`):
+**DevOps verification** (`devops-verify.ts`, `devops-fallback.ts`, `nodes/devops.ts`):
 - Agent's self-reported `buildStatus`/`runStatus`/`serviceUrls` are **always** overwritten by
   `verifyDeployment` — even when Docker is unavailable (returns `skipped`, not the agent's claims).
   Prevents the retroboard3 bug where hallucinated service URLs reached E2E.
@@ -972,7 +985,7 @@ src/conductor/continue/
   git-reconciliation.ts       # reconcileGitState()
 src/conductor/run.ts          # continueRun() (clears cancelled + _stopReason), ContinueRunOptions
 src/conductor/state.ts        # _isContinuation, _resumePhase, _stopReason fields
-src/conductor/nodes.ts        # shouldSkipOnContinue(), writePeriodicSnapshot(), checkBudgetStop() + guards on all nodes
+src/conductor/nodes/_guards.ts # shouldSkipOnContinue(), phaseNode() decorator, checkBudgetStop() + guards on all nodes
 src/conductor/provider-failure.ts  # classifyProviderFailure(), ProviderRecoveryFailedError
 src/utils/run-budget.ts       # shouldStopRun(), getBudgetStatus(), getEffectiveLimits()
 src/utils/run-snapshot.ts     # writePeriodicSnapshot(), writeRunManifest() (with 'budget-exhausted' status)
@@ -1054,7 +1067,7 @@ npm run test:replay
 3. Create `<name>.agent.ts` with factory function using `buildAgent()`
 4. Create `schemas/<name>-output.schema.ts` with Zod output schema composing shared schemas
 5. Add agent to `src/agents/registry.ts` with unique ID, name, tag, color code, and category
-6. Add node function to `src/conductor/nodes.ts`
+6. Add node function to `src/conductor/nodes/` (create a new file or add to an existing phase file, then re-export from `nodes/index.ts`)
 7. Wire into the graph in `src/conductor/graph.ts`
 8. Add model config to `src/config.ts` and `.env.example`
 9. Update `README.md` Agent Roster and this file
@@ -1101,7 +1114,7 @@ All agent prompts use XML-style tags for structure:
 
 ### Node Function Pattern
 
-Every node function in `nodes.ts` follows this pattern:
+Every node function in `nodes/` follows the `phaseNode()` decorator pattern (or the manual equivalent for unique control flow):
 ```typescript
 export async function someNode(state: ProjectStateType): Promise<Partial<ProjectStateType>> {
     // 1. Continue-run idempotency: skip if this phase completed in a previous run
