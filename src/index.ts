@@ -24,7 +24,10 @@ if (!globalThis.crypto) {
   (globalThis as any).crypto = webcrypto;
 }
 
-process.env.NODE_TLS_REJECT_UNAUTHORIZED ??= '0';
+// TLS: honour NODE_EXTRA_CA_CERTS for corporate CAs instead of disabling
+// certificate validation globally. Only disable TLS verification if the
+// operator explicitly sets NODE_TLS_REJECT_UNAUTHORIZED=0 in their .env file.
+// (Plan 26-02, D1: removed default '0' assignment)
 import './env';
 import express from 'express';
 import cors from 'cors';
@@ -38,15 +41,33 @@ import { parseRequirementsFile } from './tools/requirements/parse-requirements';
 import { getLogger } from './utils/logger';
 import { tokenTracker } from './utils/token-tracker';
 import { refreshTokenReport } from './utils/token-report';
+import { redactState } from './utils/run-snapshot';
 import { onRunEvent, getRecentEvents } from './utils/event-bus';
 import * as path from 'path';
 import * as fs from 'fs';
 
 const log = getLogger('[Server]', 33);
 
+/** API token for bearer-token authentication (optional but recommended). */
+const API_TOKEN = process.env.API_TOKEN ?? '';
+
 const app = express();
-app.use(cors());
+// Restrict CORS to the dashboard origin (localhost dev server).
+app.use(cors({ origin: API_TOKEN ? ['http://localhost:4200', `http://127.0.0.1:${DASHBOARD_PORT}`] : undefined }));
 app.use(express.json({ limit: '10mb' }));
+
+// ─── Bearer-token auth middleware (when API_TOKEN is set) ────────────────────
+if (API_TOKEN) {
+    app.use('/api', (req, res, next) => {
+        const auth = req.headers.authorization;
+        if (!auth || auth !== `Bearer ${API_TOKEN}`) {
+            res.status(401).json({ error: 'Unauthorized: provide Authorization: Bearer <API_TOKEN>' });
+            return;
+        }
+        next();
+    });
+    log.info('API_TOKEN is set — API endpoints require Bearer authentication');
+}
 
 // ─── In-memory session store ────────────────────────────────────────────────
 
@@ -214,12 +235,12 @@ app.get('/api/run/:id', async (req, res) => {
     if (session) {
         const state = await session.getState();
         states.set(req.params.id, state);
-        res.json(state);
+        res.json(redactState(state));
         return;
     }
     const cached = states.get(req.params.id);
     if (cached) {
-        res.json(cached);
+        res.json(redactState(cached));
         return;
     }
     res.status(404).json({ error: 'Run not found' });
@@ -254,7 +275,7 @@ app.post('/api/run/:id/approve', async (req, res) => {
                 latestArtifact: state.artifacts?.[state.artifacts.length - 1] ?? null,
             });
         }
-        res.json({ phase: state.phase, decision: hitlDecision, state, waiting: state.phase !== 'finalize' });
+        res.json({ phase: state.phase, decision: hitlDecision, state: redactState(state), waiting: state.phase !== 'finalize' });
     } catch (err: any) {
         log.error(`POST /api/run/:id/approve failed: ${err.message}`);
         res.status(500).json({ error: err.message });
@@ -273,7 +294,14 @@ app.get('/api/run/:id/artifact/:agentId', async (req, res) => {
     );
     if (!artifact) { res.status(404).json({ error: 'Artifact not found' }); return; }
 
-    const filePath = path.join(state.workspacePath, artifact.filePath);
+    // Validate that artifact.filePath stays within the workspace (path traversal guard).
+    const filePath = path.resolve(state.workspacePath, artifact.filePath);
+    const wsRoot = path.resolve(state.workspacePath);
+    const rel = path.relative(wsRoot, filePath);
+    if (rel.startsWith('..') || path.isAbsolute(rel)) {
+        res.status(400).json({ error: 'Artifact path escapes workspace' });
+        return;
+    }
     if (!fs.existsSync(filePath)) {
         res.status(404).json({ error: 'Artifact file not found on disk' });
         return;
@@ -496,8 +524,10 @@ process.on('unhandledRejection', (reason) => {
 
 // ─── Start ──────────────────────────────────────────────────────────────────
 
-httpServer.listen(DASHBOARD_PORT, () => {
-    log.info(`Server listening on http://localhost:${DASHBOARD_PORT}`);
-    log.info(`WebSocket on ws://localhost:${DASHBOARD_PORT}/ws`);
+// Bind to loopback by default — only expose to the network if explicitly requested.
+const BIND_HOST = process.env.BIND_HOST ?? '127.0.0.1';
+httpServer.listen(DASHBOARD_PORT, BIND_HOST, () => {
+    log.info(`Server listening on http://${BIND_HOST}:${DASHBOARD_PORT}`);
+    log.info(`WebSocket on ws://${BIND_HOST}:${DASHBOARD_PORT}/ws`);
     log.info(`Agents registered: ${AGENT_REGISTRY.length}`);
 });

@@ -161,7 +161,7 @@ src/
     token-report.ts                # HTML + JSON token usage report generator
     cost.ts                        # USD cost estimation per model
     run-snapshot.ts                # state.json + run-manifest.json writer + writePeriodicSnapshot()
-    git-exec.ts                    # Centralized git command execution (signal/exit-code diagnostics, network timeouts)
+    git-exec.ts                    # Centralized git command execution (execFileSync, shellSplit, assertValidRef, redactSecrets)
     coding-conventions.ts          # Convention file resolution + deployment
     traceability.ts                # Requirements traceability matrix
     codebase-analysis-writer.ts    # Write analysis markdown

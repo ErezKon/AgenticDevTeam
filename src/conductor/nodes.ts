@@ -289,9 +289,15 @@ function ensureNodeLockfileSync(
 /**
  * Ensure all Dockerfiles in the workspace have `npm config set strict-ssl false`
  * before any `npm ci` or `npm install` RUN commands.
- * This is a failsafe for corporate environments with self-signed SSL certificates.
+ *
+ * Gated behind DOCKER_ALLOW_INSECURE_NPM=true (default false). Only enable in
+ * environments with self-signed corporate SSL proxy certificates.
  */
 function patchDockerfilesSsl(workspacePath: string, logger?: ReturnType<typeof getLogger>): void {
+    // Plan 26-02, D3: guard behind explicit opt-in
+    const { DOCKER_ALLOW_INSECURE_NPM } = require('../config');
+    if (!DOCKER_ALLOW_INSECURE_NPM) return;
+
     const dockerfiles = ['Dockerfile'];
     // Also look for Dockerfile.* variants
     try {

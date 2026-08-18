@@ -618,10 +618,10 @@ export const LICENCE_DENYLIST =
 
 // ─── Shell Tool ─────────────────────────────────────────────────────────────
 
-/** Allow agents to run shell commands on the host (default: true).
- *  Set to false to disable all host shell execution. */
+/** Allow agents to run shell commands on the host (default: false).
+ *  Set to true to enable host shell execution (commands use an env allowlist). */
 export const SHELL_ALLOW_HOST =
-    (process.env.SHELL_ALLOW_HOST ?? 'true') === 'true';
+    (process.env.SHELL_ALLOW_HOST ?? 'false') === 'true';
 
 /** Default timeout (seconds) for shell commands when none is specified. */
 export const SHELL_DEFAULT_TIMEOUT_S =
@@ -1000,3 +1000,10 @@ export const CONTINUE_GIT_RECONCILE =
 /** Close open GitHub PRs from previous run that will be re-dispatched. */
 export const CONTINUE_CLOSE_STALE_PRS =
     (process.env.CONTINUE_CLOSE_STALE_PRS ?? 'true') === 'true';
+
+// ─── Docker / NPM SSL ──────────────────────────────────────────────────────
+
+/** Allow generated Dockerfiles to include `npm config set strict-ssl false`.
+ *  Default false — only enable for environments with self-signed corporate proxies. */
+export const DOCKER_ALLOW_INSECURE_NPM =
+    (process.env.DOCKER_ALLOW_INSECURE_NPM ?? 'false') === 'true';

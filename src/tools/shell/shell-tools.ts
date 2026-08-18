@@ -85,15 +85,30 @@ interface ShellResult {
     exitCode: number;
 }
 
+/** Build a child-process env from a safe allowlist — never leaks API keys to LLM-authored scripts. */
+function safeShellEnv(): NodeJS.ProcessEnv {
+    const SAFE_KEYS = [
+        'PATH', 'HOME', 'USER', 'SHELL', 'LANG', 'LC_ALL', 'TERM',
+        'TMPDIR', 'TMP', 'TEMP', 'HOSTNAME',
+        'PROGRAMFILES', 'SYSTEMROOT', 'WINDIR', // Windows
+        'NODE_ENV', 'CI', 'FORCE_COLOR', 'NO_COLOR',
+    ];
+    const env: Record<string, string | undefined> = {};
+    for (const key of SAFE_KEYS) {
+        if (process.env[key]) env[key] = process.env[key];
+    }
+    return {
+        ...env,
+        GIT_AUTHOR_NAME: GIT_USER_NAME, GIT_AUTHOR_EMAIL: GIT_USER_EMAIL,
+        GIT_COMMITTER_NAME: GIT_USER_NAME, GIT_COMMITTER_EMAIL: GIT_USER_EMAIL,
+    };
+}
+
 function runShell(command: string, cwd: string, timeoutMs: number): Promise<ShellResult> {
     return new Promise((resolve) => {
         exec(command, {
             cwd, timeout: timeoutMs, maxBuffer: 1024 * 1024 * 5,
-            env: {
-                ...process.env,
-                GIT_AUTHOR_NAME: GIT_USER_NAME, GIT_AUTHOR_EMAIL: GIT_USER_EMAIL,
-                GIT_COMMITTER_NAME: GIT_USER_NAME, GIT_COMMITTER_EMAIL: GIT_USER_EMAIL,
-            },
+            env: safeShellEnv(),
         }, (error, stdout, stderr) => {
             resolve({
                 stdout: stdout?.toString() ?? '',

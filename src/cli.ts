@@ -10,7 +10,8 @@
 import { webcrypto } from 'node:crypto';
 if (!globalThis.crypto) (globalThis as any).crypto = webcrypto;
 
-process.env.NODE_TLS_REJECT_UNAUTHORIZED ??= '0';
+// TLS: honour NODE_EXTRA_CA_CERTS for corporate CAs instead of disabling
+// certificate validation globally. (Plan 26-02, D1)
 import './env';
 import * as fs from 'fs';
 import * as path from 'path';

@@ -24,7 +24,7 @@ import { initResponseLog } from '../../utils/response-log';
 import { startRunBudget } from '../../utils/run-budget';
 import { GITHUB_MODE } from '../../utils/github-local';
 import { setLocalBareRepoPath } from '../pr-workflow';
-import { gitExec } from '../../utils/git-exec';
+import { gitExec, redactSecrets } from '../../utils/git-exec';
 import type { CollectedRunState } from './state-collector';
 
 const log = getLogger('[SingletonRehydration]', 177);
@@ -141,7 +141,7 @@ function rehydrateLocalBareRepo(
             const remoteUrl = gitExec(collected.workspacePath, 'remote get-url origin');
             if (remoteUrl && !remoteUrl.startsWith('Error:') && remoteUrl.includes('origin.git')) {
                 setLocalBareRepoPath(remoteUrl.trim());
-                log.info(`Local bare repo (from remote): ${remoteUrl.trim()}`);
+                log.info(`Local bare repo (from remote): ${redactSecrets(remoteUrl.trim())}`);
             }
         } catch { /* best-effort */ }
     }

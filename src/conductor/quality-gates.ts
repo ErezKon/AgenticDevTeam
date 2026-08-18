@@ -29,6 +29,20 @@ import type { ProductVerifyReport } from './product-verify';
 
 const log = getLogger('[QualityGates]', 220);
 
+/** Build a child-process env from a safe allowlist — never leaks API keys. */
+function safeChildEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
+    const SAFE_KEYS = [
+        'PATH', 'HOME', 'USER', 'SHELL', 'LANG', 'LC_ALL', 'TERM',
+        'TMPDIR', 'TMP', 'TEMP', 'HOSTNAME',
+        'PROGRAMFILES', 'SYSTEMROOT', 'WINDIR', // Windows
+    ];
+    const env: Record<string, string | undefined> = {};
+    for (const key of SAFE_KEYS) {
+        if (process.env[key]) env[key] = process.env[key];
+    }
+    return { ...env, ...extra };
+}
+
 // ─── Types ──────────────────────────────────────────────────────────────────
 
 export type StackKind = 'node' | 'maven' | 'gradle' | 'go' | 'python' | 'dotnet' | 'rust';
@@ -356,7 +370,7 @@ function defaultExec(cmd: string, opts: { cwd: string; timeout: number }): strin
         encoding: 'utf-8',
         timeout: opts.timeout,
         maxBuffer: 1024 * 1024 * 5,
-        env: { ...process.env, CI: 'true', NODE_ENV: 'test' },
+        env: safeChildEnv({ CI: 'true', NODE_ENV: 'test' }),
     });
 }
 

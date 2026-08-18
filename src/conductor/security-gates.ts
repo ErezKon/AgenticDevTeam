@@ -26,6 +26,20 @@ import type { Bug } from '../agents/_shared/schemas/bug.schema';
 
 const log = getLogger('[SecurityGates]', 196);
 
+/** Build a child-process env from a safe allowlist — never leaks API keys. */
+function safeChildEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
+    const SAFE_KEYS = [
+        'PATH', 'HOME', 'USER', 'SHELL', 'LANG', 'LC_ALL', 'TERM',
+        'TMPDIR', 'TMP', 'TEMP', 'HOSTNAME',
+        'PROGRAMFILES', 'SYSTEMROOT', 'WINDIR',
+    ];
+    const env: Record<string, string | undefined> = {};
+    for (const key of SAFE_KEYS) {
+        if (process.env[key]) env[key] = process.env[key];
+    }
+    return { ...env, ...extra };
+}
+
 // ─── Types ──────────────────────────────────────────────────────────────────
 
 export interface SecurityFinding {
@@ -210,7 +224,7 @@ function defaultExec(cmd: string, opts: { cwd: string; timeout: number }): strin
         encoding: 'utf-8',
         timeout: opts.timeout,
         maxBuffer: 1024 * 1024 * 10,
-        env: { ...process.env, CI: 'true' },
+        env: safeChildEnv({ CI: 'true' }),
     });
 }
 

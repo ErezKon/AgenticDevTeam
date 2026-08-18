@@ -15,7 +15,7 @@ import { completedIdsFromPullRequests } from '../../conductor/assignment-policy'
 import type { CompletionEvidence } from '../../conductor/assignment-policy';
 import { getEffectiveLimits, getBudgetStatus } from '../../utils/run-budget';
 import { getDevAgent } from './registry';
-import { gitExec } from '../../utils/git-exec';
+import { gitExec, assertValidRef } from '../../utils/git-exec';
 import { classifyProviderFailure, isProviderLevelFailure } from '../../conductor/provider-failure';
 import { awaitProviderRecovery, createProviderProbe } from '../../utils/llm-throttle';
 import { emitRunEvent } from '../../utils/event-bus';
@@ -109,6 +109,10 @@ export function canonicalBranchName(
 
     let branch = a.branchName ?? `${projectSlug}/feature/${slugify(storyKey)}-${slugify(a.description)}`;
     if (!branch.startsWith(`${projectSlug}/`)) branch = `${projectSlug}/${branch}`;
+    // Sanitize the entire branch name to prevent command injection via LLM-controlled
+    // branchName or storyId values (Plan 26-02, A4).
+    branch = branch.replace(/[^a-zA-Z0-9/_.-]/g, '-').replace(/-{2,}/g, '-');
+    assertValidRef(branch);
     storyBranches.set(storyKey, branch);
     return branch;
 }

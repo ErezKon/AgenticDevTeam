@@ -20,7 +20,9 @@ COPY src/ ./src/
 
 RUN mkdir -p /app/outputs /app/generated-projects
 
-ENV NODE_TLS_REJECT_UNAUTHORIZED=0
+# TLS: Use NODE_EXTRA_CA_CERTS for corporate CAs instead of disabling validation.
+# Set NODE_TLS_REJECT_UNAUTHORIZED=0 in docker-compose.yml env ONLY if absolutely required.
+# ENV NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt
 
 EXPOSE 3000
 
