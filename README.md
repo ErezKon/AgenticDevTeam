@@ -1108,9 +1108,7 @@ See [`.env.example`](.env.example) for the full template.
 | `REJECT_TRIVIAL_TESTS` | `true` | Reject tests whose subject is not reachable from an entry point (Playwright/Cypress specs are exempt from the import-graph rules — Plan 22) |
 | `GATE_INTEGRITY_DELETE_TRIVIAL_TESTS` | `false` | Delete flagged trivial tests. Default off: only unambiguous findings are `critical`, and every deleted body is archived to `outputs/<run>/deleted-tests/` (Plan 22) |
 | **Architecture Contract (Plan 19 Sub-Plan 05)** | | |
-| `REPO_CONTRACT_MODE` | `enforce` | Enforce the Architect's repo contract: `off` / `warn` / `enforce` |
 | `REPO_CONTRACT_MAX_MODULES` | `60` | Cap on declared modules in the contract |
-| `CONTRACT_STUB_SCAFFOLD` | `true` | Create typed interface stubs for every declared module during scaffolding |
 | `CONTRACT_PROMPT_MAX_CHARS` | `6000` | Char budget for the contract section injected into agent prompts |
 | **PR Workflow / Work Preservation (Plan 19 Sub-Plan 06)** | | |
 | `WORKTREE_SALVAGE_MAX` | `10` | Max failed worktrees retained under `.worktrees-failed/` for salvage |

@@ -18,6 +18,7 @@ import {
     DEVOPS_VERIFY_BASE_PORT, DEVOPS_HEALTH_RETRIES,
     DEVOPS_HEALTH_DELAY_MS,
 } from '../config';
+import type { GateOutcome, GateFinding, GateStatus } from './gate-types';
 
 export type { HealthCheckResult };
 
@@ -447,4 +448,53 @@ export async function teardownDeployment(
             log.warn(`Failed to stop container ${name}: ${err.message}`);
         }
     }
+}
+
+// ─── VerifyResult → GateOutcome adapter (Sub-Plan 26-10) ────────────────────
+
+/**
+ * Convert a VerifyResult into a standard GateOutcome.
+ */
+export function devopsGateOutcome(result: VerifyResult): GateOutcome<VerifyResult> {
+    let status: GateStatus;
+    if (result.buildStatus === 'skipped' && result.runStatus === 'skipped') {
+        status = result.mode === 'none' || result.mode === 'docker-unavailable' ? 'skipped' : 'inconclusive';
+    } else if (result.buildStatus === 'failed' || result.runStatus === 'failed' || result.runStatus === 'unhealthy') {
+        status = 'fail';
+    } else {
+        status = 'pass';
+    }
+
+    const findings: GateFinding[] = [];
+    if (result.buildStatus === 'failed') {
+        findings.push({ id: 'DEPLOY-BUILD-FAILED', severity: 'critical', detail: 'Docker build failed' });
+    }
+    if (result.runStatus === 'unhealthy') {
+        findings.push({ id: 'DEPLOY-UNHEALTHY', severity: 'critical', detail: 'Container started but health checks failed' });
+    }
+    if (result.runStatus === 'failed') {
+        findings.push({ id: 'DEPLOY-RUN-FAILED', severity: 'critical', detail: 'Container failed to start' });
+    }
+    for (const hc of result.healthChecks) {
+        if (hc.status === 'unhealthy') {
+            findings.push({
+                id: `DEPLOY-HC-${hc.service || 'default'}`,
+                severity: 'major',
+                detail: `Health check failed for ${hc.service || 'service'}: ${hc.error || 'unknown'}`,
+            });
+        }
+    }
+
+    const parts: string[] = [`build: ${result.buildStatus}`, `run: ${result.runStatus}`, `mode: ${result.mode}`];
+    if (result.serviceUrls.length > 0) parts.push(`urls: ${result.serviceUrls.map(u => u.url).join(', ')}`);
+    const markdown = `DevOps verification: ${parts.join(', ')}`;
+
+    return {
+        gate: 'devops-verify',
+        status,
+        findings,
+        detail: result,
+        markdown,
+        bugs: [],  // Bugs are synthesised by the caller (devops.ts node)
+    };
 }

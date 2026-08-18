@@ -14,6 +14,8 @@ import * as path from 'path';
 import { getLogger } from '../utils/logger';
 import { walkDir as sharedWalkDir } from '../utils/fs-walk';
 import type { Assignment } from '../agents/_shared/base-schemas';
+import type { GateOutcome, GateFinding, GateStatus } from './gate-types';
+import { makeGateBug } from './bug-factory';
 
 const log = getLogger('[Assembly-Gate]', 208);
 
@@ -180,5 +182,63 @@ export function buildAssemblyAssignment(
         reviewerAgentIds: ['principal-backend'],
         taskType: 'chore' as const,
         moduleIds: [],
+    };
+}
+
+// ─── AssemblyGateResult → GateOutcome adapter (Sub-Plan 26-10) ──────────────
+
+/**
+ * Convert an AssemblyGateResult into a standard GateOutcome.
+ */
+export function assemblyGateOutcome(result: AssemblyGateResult): GateOutcome<AssemblyGateResult> {
+    const status: GateStatus = result.passed ? 'pass' : 'fail';
+
+    const findings: GateFinding[] = [];
+    if (result.missingAssets.length > 0) {
+        findings.push({
+            id: 'ASSEMBLY-MISSING-ASSETS',
+            severity: 'major',
+            detail: `${result.missingAssets.length} referenced asset(s) missing: ${result.missingAssets.slice(0, 5).join(', ')}`,
+        });
+    }
+    if (result.unwiredModules.length > 0) {
+        findings.push({
+            id: 'ASSEMBLY-UNWIRED',
+            severity: 'critical',
+            detail: `Entry point does not import product modules: ${result.unwiredModules.join(', ')}`,
+        });
+    }
+
+    const bugs = [];
+    if (result.missingAssets.length > 0) {
+        bugs.push(makeGateBug(
+            'ASSEMBLY-MISSING-ASSETS',
+            `${result.missingAssets.length} referenced asset(s) missing from disk`,
+            'major', 'assembly-gate',
+            `Check referenced assets in HTML: ${result.missingAssets.slice(0, 5).join(', ')}`,
+            'All referenced assets should exist on disk',
+            `${result.missingAssets.length} assets not found`,
+            'public/ or src/assets/ directory',
+        ));
+    }
+    if (result.unwiredModules.length > 0) {
+        bugs.push(makeGateBug(
+            'ASSEMBLY-UNWIRED',
+            'Entry point does not import product modules',
+            'critical', 'assembly-gate',
+            'Check the entry point (main.ts/index.ts) for module imports',
+            'Entry point should import all declared modules',
+            `Entry point has no imports: ${result.unwiredModules.join(', ')}`,
+            'src/main.ts or src/index.ts',
+        ));
+    }
+
+    return {
+        gate: 'assembly',
+        status,
+        findings,
+        detail: result,
+        markdown: result.summary,
+        bugs,
     };
 }

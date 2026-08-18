@@ -23,6 +23,7 @@ import {
     PRODUCT_SMOKE_TIMEOUT_MS,
 } from '../config';
 import type { StackRoot } from './quality-gates';
+import type { GateOutcome, GateFinding, GateStatus } from './gate-types';
 
 const log = getLogger('[ProductVerify]', 183);
 
@@ -933,7 +934,53 @@ export async function runProductVerification(
     const summary = `Product verification: ${passed ? 'PASSED' : 'FAILED'} — ${summaryParts.join(', ')}`;
     log.info(summary);
 
-    emitRunEvent('gate:result', { kind: 'product-verify', passed, artifacts: artifacts.length, resolveIssues: resolveIssues.length, smoke: smoke?.passed ?? null });
+    emitRunEvent('gate:result', { gate: 'product-verify', passed, artifacts: artifacts.length, resolveIssues: resolveIssues.length, smoke: smoke?.passed ?? null });
 
     return { artifacts, resolveIssues, smoke, passed, summary };
+}
+
+// ─── ProductVerifyReport → GateOutcome adapter (Sub-Plan 26-10) ─────────────
+
+/**
+ * Convert a ProductVerifyReport into a standard GateOutcome.
+ */
+export function productVerifyGateOutcome(report: ProductVerifyReport): GateOutcome<ProductVerifyReport> {
+    const status: GateStatus = report.passed ? 'pass' : 'fail';
+
+    const findings: GateFinding[] = [];
+    for (const ac of report.artifacts) {
+        if (!ac.passed) {
+            findings.push({
+                id: `PRODUCT-ARTIFACTS-${ac.root || 'root'}`,
+                severity: 'critical',
+                detail: ac.reason,
+                file: ac.root || undefined,
+            });
+        }
+    }
+    for (const ri of report.resolveIssues) {
+        findings.push({
+            id: `PRODUCT-RESOLVE-${ri.file}-${ri.line}`,
+            severity: 'critical',
+            detail: `Unresolved ${ri.kind}: '${ri.specifier}' (${ri.reason})`,
+            file: ri.file,
+            line: ri.line,
+        });
+    }
+    if (report.smoke && !report.smoke.passed) {
+        findings.push({
+            id: 'PRODUCT-SMOKE',
+            severity: 'critical',
+            detail: report.smoke.reason,
+        });
+    }
+
+    return {
+        gate: 'product-verify',
+        status,
+        findings,
+        detail: report,
+        markdown: report.summary,
+        bugs: [],  // Bugs are synthesised via synthesiseGateBugs in quality-gates
+    };
 }

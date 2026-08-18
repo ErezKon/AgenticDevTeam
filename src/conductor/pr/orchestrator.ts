@@ -526,7 +526,7 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
             approvals: allOutcomes.filter(o => o.kind === 'approved').length,
             blockingComments: allBlockingComments,
             abstentions: allOutcomes.filter(o => o.kind === 'abstained').length,
-            gateReport, integrityFindings, layoutViolations: [],
+            gateReport, integrityFindings,
             filesChanged: filesChangedCount, iterationsUsed: getEL().maxReviewIterations,
             policy: REVIEW_MERGE_POLICY, quorum: REVIEW_QUORUM, unmetCriteriaCount,
         });

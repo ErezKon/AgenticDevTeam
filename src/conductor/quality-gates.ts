@@ -29,6 +29,7 @@ import type { TestReport } from '../agents/_shared/schemas/testing.schema';
 import type { Bug } from '../agents/_shared/schemas/bug.schema';
 import { makeGateBug } from './bug-factory';
 import type { ProductVerifyReport } from './product-verify';
+import type { GateOutcome, GateFinding, GateStatus } from './gate-types';
 
 const log = getLogger('[QualityGates]', 220);
 
@@ -598,7 +599,7 @@ export function runQualityGates(
         productVerify: opts?.productVerify,
     };
     log.info(`Quality gates ${passed ? 'PASSED' : 'FAILED'}: ${executed.length} executed, ${results.filter(r => !r.passed && !r.skipped).length} failed, inconclusive=${inconclusive}`);
-    emitRunEvent('gate:result', { passed, inconclusive, stacks, roots: roots.length, executed: executed.length, failed: results.filter(r => !r.passed && !r.skipped).length });
+    emitRunEvent('gate:result', { gate: 'quality-gates', passed, inconclusive, stacks, roots: roots.length, executed: executed.length, failed: results.filter(r => !r.passed && !r.skipped).length });
     return report;
 }
 
@@ -844,4 +845,38 @@ export function gateReportToMarkdown(report: GateReport): string {
     }
 
     return lines.join('\n');
+}
+
+// ─── GateReport → GateOutcome adapter (Sub-Plan 26-10) ──────────────────────
+
+/**
+ * Convert a GateReport into a standard GateOutcome for the unified gate interface.
+ */
+export function qualityGateOutcome(report: GateReport): GateOutcome<GateReport> {
+    let status: GateStatus;
+    if (report.passed && !report.inconclusive) {
+        status = 'pass';
+    } else if (report.inconclusive && report.passed) {
+        status = 'inconclusive';
+    } else {
+        status = 'fail';
+    }
+
+    const findings: GateFinding[] = report.results
+        .filter(r => !r.passed && !r.skipped && r.mode !== 'absent')
+        .map(r => ({
+            id: `GATE-${r.relDir || 'root'}-${r.step}`,
+            severity: (r.step === 'build' || r.step === 'test' || r.step === 'typecheck') ? 'critical' as const : 'major' as const,
+            detail: `${r.step} failed: ${r.output.slice(0, 200)}`,
+            file: r.relDir || undefined,
+        }));
+
+    return {
+        gate: 'quality-gates',
+        status,
+        findings,
+        detail: report,
+        markdown: gateReportToMarkdown(report),
+        bugs: synthesiseGateBugs(report),
+    };
 }

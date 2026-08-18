@@ -871,17 +871,9 @@ export const TEAM_LEADER_CONTEXT_MAX_CHARS =
 
 // ─── Architecture Contract (Sub-Plan 05) ────────────────────────────────────
 
-/** Enforce the Architect's repo contract: 'off' | 'warn' | 'enforce'. */
-export const REPO_CONTRACT_MODE =
-    envEnum('REPO_CONTRACT_MODE', ['off', 'warn', 'enforce'] as const, 'enforce');
-
 /** Cap on declared modules (keeps the contract proportional). */
 export const REPO_CONTRACT_MAX_MODULES =
     envInt('REPO_CONTRACT_MAX_MODULES', 60);
-
-/** Create typed interface stubs for every declared module during scaffolding. */
-export const CONTRACT_STUB_SCAFFOLD =
-    envBool('CONTRACT_STUB_SCAFFOLD', true);
 
 /** Char budget for the contract section injected into agent prompts. */
 export const CONTRACT_PROMPT_MAX_CHARS =

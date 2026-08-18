@@ -19,6 +19,7 @@ import { writeOutputFile } from '../utils/artifact-writer';
 import { mdTable } from '../utils/markdown-table';
 import { REJECT_TRIVIAL_TESTS, GATE_REACHABILITY_MIN_CLOSURE } from '../config';
 import type { StackRoot } from './quality-gates';
+import type { GateOutcome, GateFinding, GateStatus } from './gate-types';
 import {
     PRUNE_DIRS, TEST_FILE_PATTERNS, SOURCE_EXTENSIONS, SOURCE_EXTENSIONS_WIDE,
     walkDir as sharedWalkDir, isTestFile,
@@ -954,4 +955,44 @@ export function tamperFindingsToMarkdown(findings: TamperFinding[]): string {
         f.detail,
     ]);
     return `## Gate Integrity\n\n${mdTable(headers, rows)}`;
+}
+
+// ─── TamperFinding[] → GateOutcome adapter (Sub-Plan 26-10) ─────────────────
+
+/**
+ * Convert tamper findings into a standard GateOutcome.
+ */
+export function integrityGateOutcome(
+    tamperFindings: TamperFinding[],
+    trivialFindings: TrivialTestFinding[],
+): GateOutcome<{ tamper: TamperFinding[]; trivial: TrivialTestFinding[] }> {
+    const hasCritical = tamperFindings.some(f => f.severity === 'critical')
+        || trivialFindings.some(f => trivialTestSeverity(f.reason) === 'critical');
+    const totalFindings = tamperFindings.length + trivialFindings.length;
+
+    const status: GateStatus = totalFindings === 0 ? 'pass' : hasCritical ? 'fail' : 'pass';
+
+    const findings: GateFinding[] = [
+        ...tamperFindings.map(f => ({
+            id: `TAMPER-${f.kind}-${f.file.replace(/[\\/]/g, '-')}`,
+            severity: f.severity as 'critical' | 'major',
+            detail: f.detail,
+            file: f.file,
+        })),
+        ...trivialFindings.map(f => ({
+            id: `TRIVIAL-${f.reason}-${f.file.replace(/[\\/]/g, '-')}`,
+            severity: trivialTestSeverity(f.reason),
+            detail: f.detail,
+            file: f.file,
+        })),
+    ];
+
+    return {
+        gate: 'gate-integrity',
+        status,
+        findings,
+        detail: { tamper: tamperFindings, trivial: trivialFindings },
+        markdown: tamperFindingsToMarkdown(tamperFindings),
+        bugs: [],  // Bugs are handled by the PR orchestrator via revert-and-rerun
+    };
 }

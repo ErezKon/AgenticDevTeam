@@ -8,6 +8,7 @@ import type { ExecutedTestReport } from './test-runner';
 import type { UserStory } from '../agents/_shared/schemas/user-story.schema';
 import type { Bug } from '../agents/_shared/schemas/bug.schema';
 import { makeGateBug } from './bug-factory';
+import type { GateOutcome, GateFinding, GateStatus } from './gate-types';
 import {
     QA_ENFORCE_SUFFICIENCY,
     QA_MIN_TOTAL_TESTS,
@@ -185,4 +186,42 @@ function getExpectedBehavior(kind: SufficiencyViolation['kind']): string {
     }
 }
 
+// ─── SufficiencyViolation[] → GateOutcome adapter (Sub-Plan 26-10) ──────────
+
+/**
+ * Convert sufficiency violations into a standard GateOutcome.
+ */
+export function sufficiencyGateOutcome(violations: SufficiencyViolation[]): GateOutcome<SufficiencyViolation[]> {
+    if (!QA_ENFORCE_SUFFICIENCY) {
+        return {
+            gate: 'test-sufficiency',
+            status: 'skipped',
+            findings: [],
+            detail: [],
+            markdown: 'Test sufficiency checks disabled (QA_ENFORCE_SUFFICIENCY=false).',
+            bugs: [],
+        };
+    }
+
+    const status: GateStatus = violations.length === 0 ? 'pass' : 'fail';
+
+    const findings: GateFinding[] = violations.map(v => ({
+        id: v.storyId ? `QA-${v.kind}-${v.storyId}` : `QA-${v.kind}`,
+        severity: v.severity,
+        detail: v.detail,
+    }));
+
+    const markdown = violations.length === 0
+        ? ':white_check_mark: Test sufficiency: all checks passed.'
+        : `:warning: Test sufficiency: ${violations.length} violation(s) — ${violations.filter(v => v.severity === 'critical').length} critical, ${violations.filter(v => v.severity === 'major').length} major.`;
+
+    return {
+        gate: 'test-sufficiency',
+        status,
+        findings,
+        detail: violations,
+        markdown,
+        bugs: sufficiencyViolationsToBugs(violations),
+    };
+}
 

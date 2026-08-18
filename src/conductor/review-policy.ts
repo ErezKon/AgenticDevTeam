@@ -96,20 +96,12 @@ export interface MergeDecision {
     blockers: string[];
 }
 
-export interface LayoutViolation {
-    kind: string;
-    severity: 'critical' | 'major' | 'minor';
-    path: string;
-    detail: string;
-}
-
 export interface DecideMergeInput {
     approvals: number;
     blockingComments: { severity?: string; body?: string; filePath?: string }[];
     abstentions: number;
     gateReport: GateReport | null;
     integrityFindings: TamperFinding[];
-    layoutViolations: LayoutViolation[];
     filesChanged: number;
     iterationsUsed: number;
     policy: 'strict' | 'permissive' | 'legacy';
@@ -148,13 +140,7 @@ export function decideMerge(input: DecideMergeInput): MergeDecision {
         blockers.push(`${criticalTamper.length} critical integrity finding(s): ${criticalTamper.map(f => f.detail).join('; ').slice(0, 200)}`);
     }
 
-    // 4. Critical layout violations
-    const criticalLayout = input.layoutViolations.filter(v => v.severity === 'critical');
-    if (criticalLayout.length > 0) {
-        blockers.push(`${criticalLayout.length} critical layout violation(s): ${criticalLayout.map(v => v.detail).join('; ').slice(0, 200)}`);
-    }
-
-    // Blockers 1-4 are hard under both strict and permissive
+    // Blockers 1-3 are hard under both strict and permissive
     if (input.policy === 'permissive' && blockers.length === 0) {
         return { merge: true, reason: 'permissive policy — hard blockers clear', blockers: [] };
     }

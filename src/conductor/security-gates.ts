@@ -24,6 +24,7 @@ import {
     LICENCE_DENYLIST,
 } from '../config';
 import type { Bug } from '../agents/_shared/schemas/bug.schema';
+import type { GateOutcome, GateFinding, GateStatus } from './gate-types';
 import { makeGateBug } from './bug-factory';
 
 const log = getLogger('[SecurityGates]', 196);
@@ -555,4 +556,37 @@ export function securityReportToMarkdown(report: SecurityReport): string {
     lines.push(mdTable(headers, rows));
 
     return lines.join('\n');
+}
+
+// ─── SecurityReport → GateOutcome adapter (Sub-Plan 26-10) ──────────────────
+
+/**
+ * Convert a SecurityReport into a standard GateOutcome for the unified gate interface.
+ */
+export function securityGateOutcome(report: SecurityReport): GateOutcome<SecurityReport> {
+    let status: GateStatus;
+    if (report.errors && report.errors.length > 0) {
+        status = report.passed ? 'inconclusive' : 'fail';
+    } else if (report.passed) {
+        status = report.findings.length === 0 ? 'pass' : 'pass';
+    } else {
+        status = 'fail';
+    }
+
+    const findings: GateFinding[] = report.findings.map(f => ({
+        id: f.id,
+        severity: f.severity,
+        detail: f.detail,
+        file: f.file,
+        line: f.line,
+    }));
+
+    return {
+        gate: 'security-gates',
+        status,
+        findings,
+        detail: report,
+        markdown: securityReportToMarkdown(report),
+        bugs: synthesiseSecurityBugs(report),
+    };
 }

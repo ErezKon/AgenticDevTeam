@@ -36,7 +36,7 @@ export type {
     DispatchRound,
 } from './gate-types';
 
-import type { AcceptanceStatus, AcceptanceCriterionResult, AcceptanceReport } from './gate-types';
+import type { AcceptanceStatus, AcceptanceCriterionResult, AcceptanceReport, GateOutcome, GateFinding, GateStatus } from './gate-types';
 
 // ─── Evaluate Acceptance ────────────────────────────────────────────────────
 
@@ -564,4 +564,35 @@ export function acceptanceReportToMarkdown(report: AcceptanceReport): string {
         }
     }
     return lines.join('\n');
+}
+
+// ─── AcceptanceReport → GateOutcome adapter (Sub-Plan 26-10) ────────────────
+
+/**
+ * Convert an AcceptanceReport into a standard GateOutcome.
+ */
+export function acceptanceGateOutcome(report: AcceptanceReport): GateOutcome<AcceptanceReport> {
+    const statusMap: Record<AcceptanceStatus, GateStatus> = {
+        accepted: 'pass',
+        partial: 'fail',
+        rejected: 'fail',
+        inconclusive: 'inconclusive',
+    };
+
+    const findings: GateFinding[] = report.criteria
+        .filter(c => !c.passed && !c.inconclusive)
+        .map(c => ({
+            id: `ACCEPT-${c.id}`,
+            severity: c.required ? 'critical' as const : 'major' as const,
+            detail: `${c.label}: ${c.detail}`,
+        }));
+
+    return {
+        gate: 'acceptance',
+        status: statusMap[report.status],
+        findings,
+        detail: report,
+        markdown: acceptanceReportToMarkdown(report),
+        bugs: acceptanceBlockersToBugs(report),
+    };
 }

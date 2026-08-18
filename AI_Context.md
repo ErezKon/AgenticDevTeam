@@ -111,7 +111,8 @@ src/
     file-checkpointer.ts           # Persistent checkpoints for crash recovery
     provider-failure.ts              # Provider error classification + ProviderRecoveryFailedError
     bug-factory.ts                 # Shared makeBug/makeGateBug Bug constructor helpers
-    gate-types.ts                  # Shared gate/report types (GateReport, GateStepResult, etc.)
+    gate-types.ts                  # Unified gate types (GateStatus, FindingSeverity, GateFinding, GateOutcome<R>, WorkspaceIndex) + legacy GateReport/GateStepResult
+    workspace-index.ts             # buildWorkspaceIndex() — pre-built file index passed to all gates
     continue/                      # Continue Run feature (Plan 23)
       index.ts                     # Barrel export
       state-collector.ts           # Read-only artifact collector (listStoppedRuns with stopReason)
@@ -434,7 +435,7 @@ The implementation is split into focused modules under `src/conductor/pr/` (Sub-
     - `'fix-only'`: skip escalation, go straight to strong fixer
     - `'escalate-only'`: no strong fixer (backward-compatible)
 11. **Evidence-based merge decision (Sub-Plan 07)** -- `decideMerge()` evaluates gate report, integrity
-    findings, layout violations, blocking review comments, file change count, and quorum before allowing
+    findings, blocking review comments, file change count, and quorum before allowing
     merge. Policy modes: `strict` (default, all evidence required), `permissive` (hard blockers only),
     `legacy` (pre-Plan-19 unconditional merge). Blocked PRs get status `'blocked'` and a `pr:blocked` event.
 12. **Merge ladder** -- `git merge origin/<base> --no-edit` (not rebase). On conflict: auto-resolve lockfiles
@@ -813,6 +814,23 @@ Three checks combined:
 - Never logs matched values (redaction discipline)
 - **Fail-closed**: If any sub-gate crashes, `passed` is `false` and errors are propagated to `verificationErrors` (Plan 25, 26-04 &sect;4)
 
+### Unified Gate Abstraction (`gate-types.ts`, `workspace-index.ts`) — Sub-Plan 26-10
+
+All gate modules now share a common result contract via types in `gate-types.ts`:
+
+- **`GateStatus`**: `'passed' | 'failed' | 'error' | 'skipped'`
+- **`FindingSeverity`**: `'critical' | 'major' | 'minor' | 'info'`
+- **`GateFinding`**: `{ rule, severity, message, file?, line? }`
+- **`GateOutcome<R>`**: `{ status, findings, detail: R }` — generic over each gate's native detail type
+- **`WorkspaceIndex`**: pre-built file index type (source files, test files, config files)
+
+Every gate module exports a `*GateOutcome()` adapter function that converts its native result to a
+standard `GateOutcome`. The workspace index is built once via `buildWorkspaceIndex()` in
+`workspace-index.ts` and passed to all gates, avoiding redundant filesystem walks.
+
+All `gate:result` event emissions now include a `gate: string` discriminator field so consumers can
+identify which gate produced the event.
+
 ### Plan Coverage (`plan-coverage.ts`) -- Sub-Plan 04
 
 Validates that no stories or tasks are silently dropped between planning phases:
@@ -825,7 +843,7 @@ Validates that no stories or tasks are silently dropped between planning phases:
   on every assignment. After the TL produces assignments, the conductor validates coverage and
   re-invokes the TL with a gap prompt if stories/tasks are missing.
 
-### Architecture Contract (`repo-contract.schema.ts`, `repo-contract-writer.ts`, `layout-lint.ts`) — Sub-Plan 05
+### Architecture Contract (`repo-contract.schema.ts`, `repo-contract-writer.ts`) — Sub-Plan 05
 
 A machine-checkable repo layout and module contract produced by the Architect:
 
@@ -838,17 +856,13 @@ A machine-checkable repo layout and module contract produced by the Architect:
   (machine-read, gitignored) + `docs/ARCHITECTURE-CONTRACT.md` (human-readable, committed).
   `readRepoContract` reads it back. `renderContractForPrompt` produces a budgeted prompt section.
   `deriveContractFromAnalysis` infers a contract from an existing codebase (maintain mode).
-- **Layout Linter** (`layout-lint.ts`): `lintLayout(workspace, contract, opts?)` checks 10
-  violation kinds: `file-outside-source-dirs`, `unknown-root`, `duplicate-module`,
-  `module-path-mismatch`, `missing-declared-export`, `entrypoint-missing`,
-  `entrypoint-does-not-compose`, `test-outside-test-dirs`, `cross-root-relative-import`,
-  `naming-violation`. Reuses `buildImportGraph` from gate-integrity.
+- **Layout Linter** — removed in Sub-Plan 26-10 (`layout-lint.ts` was dead code, never called in production).
 - **Architect**: `tools: []` (JSON mode active), prompt includes `<repo_contract>` section,
   output includes `repoContract` field. `architectNode` caps modules at `REPO_CONTRACT_MAX_MODULES`.
 - **All agents** receive the contract in their context (priority 1). Developer persona includes
   `<repo_contract>` block. Reviewers have a stub carve-out for scaffold stubs.
-- **Env vars**: `REPO_CONTRACT_MODE` (off/warn/enforce), `REPO_CONTRACT_MAX_MODULES` (60),
-  `CONTRACT_STUB_SCAFFOLD` (true), `CONTRACT_PROMPT_MAX_CHARS` (6000).
+- **Env vars**: `REPO_CONTRACT_MAX_MODULES` (60), `CONTRACT_PROMPT_MAX_CHARS` (6000).
+  `REPO_CONTRACT_MODE` and `CONTRACT_STUB_SCAFFOLD` were removed in Sub-Plan 26-10.
 
 ### Structured Output (`structured-output.ts`)
 
@@ -1208,6 +1222,7 @@ The system evolved through 16+ iteration plans. Key milestones:
 | 25 | Codebase audit remediation: config hardening, env-var centralisation |
 | 26-05 | Utility extraction: created 8 shared utilities (fs-walk, source-graph, markdown-table, shell-exec, bug-factory, branch-naming, artifact-writer, gate-types) |
 | 26-06 | Utility deduplication: migrated all consumers to shared utilities (shell-exec 3 files, markdown-table 11 files/23 tables, bug-factory 7 files/19 sites, branch-naming 6 files/13 sites, artifact-writer 8 files/13 sites). Fixed continue-run slug mismatch bug, added missing pipe-escaping to 9 of 11 table sites, added missing error handling to 3 output-write sites |
+| 26-10 | Unified Gate abstraction: `gate-types.ts` exports `GateStatus`, `FindingSeverity`, `GateFinding`, `GateOutcome<R>`, `WorkspaceIndex`; every gate module exports a `*GateOutcome()` adapter; `workspace-index.ts` builds a shared file index once; `gate:result` events carry a `gate` discriminator. Removed dead code: `layout-lint.ts`, `REPO_CONTRACT_MODE`, `CONTRACT_STUB_SCAFFOLD` |
 
 When referenced in code comments, these plans are cited as "fixes A1", "fixes A2", etc. (referring to sub-plans within Plan 16).
 
