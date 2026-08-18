@@ -56,9 +56,6 @@ export async function getAccessToken(): Promise<string> {
     }
 }
 
-/** @deprecated Use getAccessToken() instead */
-export const getDellAccessToken = getAccessToken;
-
 async function fetchNewToken(): Promise<string> {
     const clientId = OAUTH_CLIENT_ID;
     const clientSecret = OAUTH_CLIENT_SECRET;

@@ -17,7 +17,7 @@ import { resolveWorkspacePath } from '../../utils/workspace';
 import { LogColors, color256 } from '../../utils/log-colors.util';
 import { logToolAction, getLogger } from '../../utils/logger';
 import { truncateToolResult } from '../_shared/truncate';
-import { matchesProtectedGlob, PROTECTED_CONFIG_GLOBS, PROTECTED_SCRIPT_GLOBS } from '../../conductor/gate-integrity';
+import { matchesProtectedGlob, PROTECTED_CONFIG_GLOBS } from '../../conductor/gate-integrity';
 
 const TAG_COLOR = 75;
 const TAG = `${color256(TAG_COLOR)}[fs-tools]${LogColors.RESET}`;

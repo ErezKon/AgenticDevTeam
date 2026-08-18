@@ -74,7 +74,7 @@ export interface InvocationRecord {
 }
 
 /** Per-invocation efficiency summary for the report. */
-export interface InvocationEfficiencyRow {
+interface InvocationEfficiencyRow {
     agentId: string;
     invocations: number;
     avgCallsPerInvocation: number;
@@ -173,19 +173,6 @@ class TokenTracker {
         // Persist to disk after every call for crash safety
         this.saveJsonSnapshot();
         this.scheduleRefresh();
-    }
-
-    /** Get aggregated usage for a single agent. */
-    getAgentSummary(agentId: string): AgentUsageSummary {
-        const calls = this.ledger.filter(r => r.agentId === agentId);
-        return {
-            agentId,
-            model: calls[0]?.model ?? 'unknown',
-            callCount: calls.length,
-            inputTokens: calls.reduce((s, r) => s + r.inputTokens, 0),
-            outputTokens: calls.reduce((s, r) => s + r.outputTokens, 0),
-            totalTokens: calls.reduce((s, r) => s + r.totalTokens, 0),
-        };
     }
 
     /** Get the full run usage summary with breakdowns. */

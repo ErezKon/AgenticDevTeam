@@ -582,7 +582,6 @@ function identifyDroppableGroups(
         if (isAIMessage(m) && m.tool_calls?.length) {
             const group = [i];
             // Collect the following ToolMessages that match
-            const expectedIds = new Set(m.tool_calls.map(tc => tc.id));
             let j = i + 1;
             while (j < recentStart && isToolMessage(messages[j])) {
                 group.push(j);

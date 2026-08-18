@@ -32,18 +32,16 @@ import { createServer } from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
 import { DASHBOARD_PORT } from './config';
 import { AGENT_REGISTRY } from './agents/registry';
-import { runAutonomous, runHumanInTheLoop, resumeRun, continueRun, type RunSession, type HitlDecision } from './conductor/run';
+import { runAutonomous, runHumanInTheLoop, continueRun, type RunSession } from './conductor/run';
 import { listStoppedRuns, collectRunState, reconstructState } from './conductor/continue';
 import { parseRequirementsFile } from './tools/requirements/parse-requirements';
 import { getLogger } from './utils/logger';
-import { LogColors, color256 } from './utils/log-colors.util';
 import { tokenTracker } from './utils/token-tracker';
 import { refreshTokenReport } from './utils/token-report';
-import { onRunEvent, getRecentEvents, getAllEvents } from './utils/event-bus';
+import { onRunEvent, getRecentEvents } from './utils/event-bus';
 import * as path from 'path';
 import * as fs from 'fs';
 
-const TAG = `${color256(33)}[Server]${LogColors.RESET}`;
 const log = getLogger('[Server]', 33);
 
 const app = express();
@@ -243,7 +241,7 @@ app.post('/api/run/:id/approve', async (req, res) => {
             // Legacy: approved boolean (default true)
             hitlDecision = approved === false ? 'deny' : 'approve';
         }
-        const result = await session.resume(hitlDecision, feedback);
+        await session.resume(hitlDecision, feedback);
         const state = await session.getState();
         states.set(req.params.id, state);
         broadcast('run:phase-complete', { threadId: req.params.id, phase: state.phase, decision: hitlDecision });

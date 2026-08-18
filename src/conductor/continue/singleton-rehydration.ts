@@ -19,7 +19,7 @@ import * as path from 'path';
 import { getLogger, setRunLogPath } from '../../utils/logger';
 import { tokenTracker } from '../../utils/token-tracker';
 import { refreshTokenReport } from '../../utils/token-report';
-import { initLedger, appendLedger } from '../../utils/run-ledger';
+import { initLedger } from '../../utils/run-ledger';
 import { initResponseLog } from '../../utils/response-log';
 import { startRunBudget } from '../../utils/run-budget';
 import { GITHUB_MODE } from '../../utils/github-local';

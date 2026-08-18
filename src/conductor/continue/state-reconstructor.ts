@@ -8,8 +8,6 @@
  * Fallback path: state.json missing — reconstruct minimal state from
  * run-manifest.json + ledger + agent artifacts (degraded mode).
  */
-import * as fs from 'fs';
-import * as path from 'path';
 import { getLogger } from '../../utils/logger';
 import {
     GITHUB_TOKEN, GITHUB_OWNER, GITHUB_REPO, GIT_DEFAULT_BRANCH,
@@ -172,7 +170,6 @@ function reconstructFromManifest(
         bugs: [],
         fixedBugIds: [],
         pullRequests: [],
-        branchAssignments: [],
         approvals: [],
         artifacts: [],
         transcript: [],
@@ -181,7 +178,6 @@ function reconstructFromManifest(
         dispatchRounds: [],
         attemptedBugIds: [],
         bugAttempts: {},
-        outputIntegrity: [],
         planViolations: [],
         completionEvidence: [],
         salvageBranches: [],
@@ -198,7 +194,6 @@ function reconstructFromManifest(
         pendingRerun: null,
         phaseFeedback: {},
         cancelled: false,
-        configBaseline: null,
         acceptance: null,
         latestGateReport: null,
         unrecoverable: null,
@@ -260,7 +255,6 @@ function reconstructFromLedgerOnly(
         bugs: [],
         fixedBugIds: [],
         pullRequests: [],
-        branchAssignments: [],
         approvals: [],
         artifacts: [],
         transcript: [],
@@ -269,7 +263,6 @@ function reconstructFromLedgerOnly(
         dispatchRounds: [],
         attemptedBugIds: [],
         bugAttempts: {},
-        outputIntegrity: [],
         planViolations: [],
         completionEvidence: [],
         salvageBranches: [],
@@ -285,7 +278,6 @@ function reconstructFromLedgerOnly(
         pendingRerun: null,
         phaseFeedback: {},
         cancelled: false,
-        configBaseline: null,
         acceptance: null,
         latestGateReport: null,
         unrecoverable: null,
@@ -404,9 +396,9 @@ function validateStateFields(state: Record<string, any>, warnings: string[]): vo
     const arrayFields = [
         'epics', 'techStack', 'userStories', 'tasks', 'assignments',
         'completedAssignmentIds', 'fileChanges', 'testReports', 'bugs',
-        'fixedBugIds', 'pullRequests', 'branchAssignments', 'approvals',
+        'fixedBugIds', 'pullRequests', 'approvals',
         'artifacts', 'transcript', 'tokenUsage', 'verificationErrors',
-        'dispatchRounds', 'attemptedBugIds', 'outputIntegrity',
+        'dispatchRounds', 'attemptedBugIds',
         'planViolations', 'completionEvidence', 'salvageBranches',
         'phantomFileChanges', 'qaClaimDiscrepancies', 'invariantViolations',
         'runningContainers',

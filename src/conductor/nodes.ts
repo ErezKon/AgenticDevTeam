@@ -39,7 +39,6 @@ import {
     PLAN_COVERAGE_MODE, PLAN_COVERAGE_REPAIR_ATTEMPTS,
     MIN_AC_COVERAGE_PCT, MIN_AC_IMPLEMENTED_PCT, MIN_AC_COVERAGE_MAX_BUGS,
     TRACEABILITY_JSON,
-    SECURITY_GATES_ENABLED,
     RUN_FAIL_POLICY,
     MAX_BRANCHES,
 } from '../config';
@@ -50,7 +49,7 @@ import { GITHUB_MODE } from '../utils/github-local';
 import { setLocalBareRepoPath, retryFailedPRCreation } from './pr-workflow';
 import { syncWorkspaceToBranch, looksSourceless } from './workspace-sync';
 import { selectPendingAssignments, dedupeBugs, namespaceBugfixAssignments, sanitizeAssignmentStoryIds } from './assignment-policy';
-import { runAssemblyGate, buildAssemblyAssignment } from './assembly-gate';
+import { runAssemblyGate } from './assembly-gate';
 import { consolidateBranches } from './branch-consolidation';
 import { verifyDeployment, teardownDeployment } from './devops-verify';
 import { runQualityGates, gateReportToTestReport, synthesiseGateBugs, detectStackRoots } from './quality-gates';
@@ -74,7 +73,7 @@ import {
 } from '../utils/structured-output';
 import type { ParseResult } from '../utils/structured-output';
 import { initResponseLog, logAgentResponse } from '../utils/response-log';
-import { validateStoryPlan, validateAssignmentPlan, buildCoverageGapPrompt, logPlanFunnel } from './plan-coverage';
+import { validateAssignmentPlan, buildCoverageGapPrompt, logPlanFunnel } from './plan-coverage';
 import { z } from 'zod';
 import { CodebaseAnalysisSchema } from '../agents/_shared/base-schemas';
 import { ArchitectOutputSchema } from '../agents/architect/schemas/architect-output.schema';
@@ -103,7 +102,7 @@ import { initLedger, appendLedger } from '../utils/run-ledger';
 import { generateRunReport } from '../utils/ledger-report';
 import { checkInvariants } from './run-invariants';
 import { writeRepoContract } from '../utils/repo-contract-writer';
-import { REPO_CONTRACT_MAX_MODULES, QA_TEST_TIMEOUT_MS, QA_MAX_INVOCATIONS, QA_TESTS_VIA_PR } from '../config';
+import { REPO_CONTRACT_MAX_MODULES, QA_TEST_TIMEOUT_MS } from '../config';
 import { runTests, executedToTestReports, compareClaimVsReality, type ExecutedTestReport, type ClaimDiscrepancy } from './test-runner';
 import { checkTestSufficiency, sufficiencyViolationsToBugs } from './test-sufficiency';
 import { detectTrivialTests } from './gate-integrity';
@@ -243,7 +242,7 @@ function commitAndPushArtifacts(
  */
 function ensureNodeLockfileSync(
     workspacePath: string,
-    systemBranch: string,
+    _systemBranch: string,
     gitContext?: GitContext | null,
     logger?: ReturnType<typeof getLogger>,
 ): void {
@@ -2572,12 +2571,10 @@ export async function e2eNode(state: ProjectStateType): Promise<Partial<ProjectS
 
     // ── Playwright preflight (D10) ───────────────────────────────────────
     e2eLog.info(`Running E2E tests against ${state.devopsPlan!.serviceUrls.length} service(s)...`);
-    let playwrightAvailable = true;
     try {
         const { preflightPlaywright } = await import('../tools/mcp/playwright-preflight');
         const preflight = await preflightPlaywright();
         if (!preflight.available) {
-            playwrightAvailable = false;
             e2eLog.warn(`Playwright MCP not available: ${preflight.reason}`);
             // Fall back to smoke test instead of failing entirely
             e2eLog.info('Falling back to deterministic smoke test');
@@ -3090,16 +3087,7 @@ export async function finalizeNode(state: ProjectStateType): Promise<Partial<Pro
     const prCounts = countPRsByStatus(state.pullRequests ?? []);
     const branchesSalvaged = (state.salvageBranches ?? []).length;
 
-    // Branches with assignments but no PR opened
-    const branchesWithPR = new Set<string>(
-        (state.pullRequests ?? [])
-            .filter((pr: any) => pr.prNumber !== 0)
-            .map((pr: any) => pr.branchName),
-    );
-    const allAssignedBranches = new Set<string>(
-        (state.branchAssignments ?? []).map((ba: any) => ba.branchName),
-    );
-    const branchesNotAttempted = [...allAssignedBranches].filter(b => !branchesWithPR.has(b)).length;
+    const branchesNotAttempted = 0;
 
     // Deferred = dispatch rounds where prs === 0 (nothing merged/opened)
     const branchesDeferred = (state.dispatchRounds ?? []).filter((r: DispatchRound) => r.prs === 0 && r.fileChanges === 0).length;

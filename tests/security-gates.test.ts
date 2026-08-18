@@ -19,7 +19,6 @@ import {
     synthesiseSecurityBugs,
     securityReportToMarkdown,
     SECRET_PATTERNS,
-    type SecurityFinding,
     type SecurityReport,
 } from '../src/conductor/security-gates';
 
@@ -237,7 +236,7 @@ describe('auditDependencies', () => {
             });
 
             // Inject a fake exec that returns our fixture for npm audit
-            const fakeExec = (cmd: string, opts: { cwd: string; timeout: number }): string => {
+            const fakeExec = (cmd: string, _opts: { cwd: string; timeout: number }): string => {
                 if (cmd.includes('which npm')) return '/usr/bin/npm';
                 if (cmd.includes('npm audit')) {
                     const err = new Error('npm audit found issues') as any;
@@ -314,7 +313,7 @@ describe('checkLicences', () => {
                 license: 'GPL-3.0',
             }));
 
-            const findings = checkLicences(repo.dir);
+            checkLicences(repo.dir);
             // Note: this test relies on LICENCE_DENYLIST being set at config module
             // load time. If it's empty (default), no findings will be produced.
             // The env var was set before the test but config.ts was already loaded.
@@ -400,7 +399,7 @@ describe('runSecurityGates', () => {
             // Note: SECURITY_GATES_ENABLED is read at module load from config.ts,
             // so this env change won't affect the already-loaded config constant.
             // This test verifies the function behavior at the API level.
-            const report = runSecurityGates(repo.dir);
+            runSecurityGates(repo.dir);
             // The gate runs since config was loaded with SECURITY_GATES_ENABLED=true
             // This is expected — env changes after load don't propagate.
         } finally {

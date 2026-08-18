@@ -12,7 +12,7 @@
  * already pushed by commitAndPushArtifacts.
  */
 import { getLogger } from '../utils/logger';
-import { gitExec, gitExecVerbose, gitPush } from '../utils/git-exec';
+import { gitExec, gitExecVerbose } from '../utils/git-exec';
 import { WORKSPACE_SYNC_ALLOW_RESET } from '../config';
 import type { GitContext } from '../agents/_shared/base-schemas';
 
@@ -110,7 +110,7 @@ export function fetchWithRetry(
 export function syncWorkspaceToBranch(
     gitRoot: string,
     branch: string,
-    gitContext?: GitContext | null,
+    _gitContext?: GitContext | null,
     opts?: { allowReset?: boolean },
 ): SyncResult {
     const allowReset = opts?.allowReset ?? WORKSPACE_SYNC_ALLOW_RESET;

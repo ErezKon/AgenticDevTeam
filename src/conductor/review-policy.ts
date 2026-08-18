@@ -14,7 +14,6 @@
 import type { ReviewOutput } from '../agents/developers/schemas/review-output.schema';
 import type { GateReport } from './quality-gates';
 import type { TamperFinding } from './gate-integrity';
-import type { DevAgentEntry } from '../agents/developers/registry';
 import { DEV_AGENTS, getDevAgent } from '../agents/developers/registry';
 
 // ─── Review Outcomes ────────────────────────────────────────────────────────

@@ -145,10 +145,8 @@ export function buildHandoff(
             const args = tc.args ?? {};
 
             if (FILE_WRITE_TOOLS.has(toolName)) {
-                const filePath = args.filePath ?? args.path ?? args.file ?? '(unknown)';
-                const action = toolName === 'edit_file' ? 'edited'
-                    : toolName === 'create_file' ? 'created'
-                    : 'created';
+                const filePath = args.filePath ?? '(unknown)';
+                const action = toolName === 'edit_file' ? 'edited' : 'created';
                 // Deduplicate by path — keep the last action
                 const existingIdx = filesWritten.findIndex(f => f.path === filePath);
                 if (existingIdx >= 0) {

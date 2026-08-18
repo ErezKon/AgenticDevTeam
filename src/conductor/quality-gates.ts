@@ -93,7 +93,7 @@ const PRUNE_DIRS = new Set([
 /**
  * Check whether a directory contains markers for a given stack.
  */
-function dirHasStack(dir: string, entries: string[], stack: StackKind, markers: string[]): boolean {
+function dirHasStack(_dir: string, entries: string[], _stack: StackKind, markers: string[]): boolean {
     return markers.some(marker => {
         if (marker.startsWith('*')) {
             const ext = marker.slice(1);
@@ -299,10 +299,6 @@ export function resolveNodeStep(dir: string, step: GateStep): { command: string;
             for (const { glob, cmd } of bundlerConfigs) {
                 const hasConfig = fs.readdirSync(dir).some(f => f.startsWith(glob));
                 if (hasConfig) return { command: cmd, mode: 'fallback' };
-            }
-            // If there's a tsconfig but no bundler, typecheck is the build
-            if (fs.existsSync(path.join(dir, 'tsconfig.json'))) {
-                return { command: '', mode: 'absent' };
             }
             return { command: '', mode: 'absent' };
         }

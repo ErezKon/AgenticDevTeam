@@ -71,17 +71,6 @@ export function startRunBudget(): void {
 
 // ─── Pause Accounting (Plan 24, D4) ─────────────────────────────────────────
 
-/** Add paused time (ms) that should be excluded from wall utilisation. */
-export function addPausedMs(ms: number): void {
-    _pausedMs += ms;
-    log.debug(`Paused time accumulated: +${ms}ms (total ${_pausedMs}ms)`);
-}
-
-/** Get total paused time (ms) accumulated so far. */
-export function getPausedMs(): number {
-    return _pausedMs;
-}
-
 // ─── Status ─────────────────────────────────────────────────────────────────
 
 export function getBudgetStatus(): BudgetStatus {
@@ -170,13 +159,6 @@ export function getEffectiveLimits(): {
 
     switch (level) {
         case 'ok':
-            return {
-                maxReviewIterations: MAX_REVIEW_ITERATIONS,
-                maxReviewers: 2,
-                prTestRepairAttempts: PR_TEST_REPAIR_ATTEMPTS,
-                maxBugfixIterations: MAX_BUGFIX_ITERATIONS,
-                allowNewBranchWorkflows: true,
-            };
         case 'warn':
             return {
                 maxReviewIterations: MAX_REVIEW_ITERATIONS,

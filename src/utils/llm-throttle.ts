@@ -230,11 +230,6 @@ let pauseGateResolvers: Array<() => void> = [];
 /** Total ms spent in provider pause state. */
 let totalPausedMs = 0;
 
-/** Get total ms the system spent paused due to provider outages. */
-export function getProviderPausedMs(): number {
-    return totalPausedMs;
-}
-
 /**
  * Pause all LLM traffic due to a provider-level failure (billing, quota, etc.).
  * Probes with exponential backoff up to PROVIDER_PAUSE_MAX_MS.
@@ -295,11 +290,6 @@ export async function awaitProviderRecovery(
     return false;
 }
 
-/** Check if the provider pause gate is active. */
-export function isProviderPaused(): boolean {
-    return providerPaused;
-}
-
 /**
  * Plan 25: Create a lightweight probe function that tests whether the
  * provider is accessible again. Uses a minimal model list request
@@ -339,13 +329,6 @@ export function createProviderProbe(baseUrl?: string): () => Promise<boolean> {
             return false;
         }
     };
-}
-
-/** Clear the provider pause state (for recovery or testing). */
-export function clearProviderPause(): void {
-    providerPaused = false;
-    for (const resolve of pauseGateResolvers) resolve();
-    pauseGateResolvers = [];
 }
 
 // ─── Exported throttle wrapper ──────────────────────────────────────────────

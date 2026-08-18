@@ -15,7 +15,7 @@ import { retryWithBackoff } from '../utils/retry';
 import { writeArtifact } from '../agents/_shared/artifact';
 import { buildDevAgent, buildStrongFixerAgent } from '../agents/developers/dev-agent.builder';
 import { buildReviewerAgent } from '../agents/developers/reviewer-agent.builder';
-import { getDevAgent, DEV_AGENTS } from '../agents/developers/registry';
+import { getDevAgent } from '../agents/developers/registry';
 import { resolveConventionFiles } from '../utils/coding-conventions';
 import { gitExec, gitExecVerbose, gitPush, findGitRoot } from '../utils/git-exec';
 import {
@@ -46,11 +46,10 @@ import { storiesForIds, tasksForIds } from './context-builder';
 import {
     isBlockingReview, evaluateProgress, MAX_NO_PROGRESS_ITERATIONS,
     type ReviewOutcome, decideMerge, selectEscalationCandidate,
-    evaluateQuorum, enforceCriteriaVerdicts, reviewCommentsToBugs, blockedPrBug,
+    evaluateQuorum, enforceCriteriaVerdicts,
 } from './review-policy';
 import {
     REVIEW_MERGE_POLICY, REVIEW_QUORUM, REVIEW_ABSTAIN_RETRIES,
-    ESCALATION_TOOL_CALL_BONUS, REVIEW_MAJORS_TO_BUGS,
 } from '../config';
 import { runQualityGates, gateReportToMarkdown, detectStackRoots } from './quality-gates';
 import { runProductVerification } from './product-verify';
@@ -213,14 +212,6 @@ function createPRViaCurl(title: string, body: string, head: string, base: string
     return { number: data.number, html_url: data.html_url, node_id: data.node_id };
 }
 
-function slugify(text: string): string {
-    return text
-        .toLowerCase()
-        .replace(/[^a-z0-9]+/g, '-')
-        .replace(/^-|-$/g, '')
-        .slice(0, 50);
-}
-
 // ensureDepsAndRunTests removed — replaced by runQualityGates (fixes A6)
 
 // findGitRoot imported from ../utils/git-exec
@@ -278,7 +269,7 @@ export function commitWorktree(
  */
 function salvageWorktree(
     worktreeWorkspace: string,
-    gitRoot: string,
+    _gitRoot: string,
     baseRef: string,
     branchName: string,
     failureReason: string,
@@ -963,7 +954,7 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
     }
     // Delete stale local branch if it exists (ignore errors).
     // Plan 24, A2: this now succeeds because we removed the worktree above.
-    const branchDelResult = gitExec(gitRoot, `branch -D ${branchName}`);
+    gitExec(gitRoot, `branch -D ${branchName}`);
     // Fetch latest base branch from remote (may fail if not pushed yet)
     gitExec(gitRoot, `fetch origin ${baseBranch}`);
     // Plan 24, A2: if the branch still exists despite deletion attempt (e.g. it's

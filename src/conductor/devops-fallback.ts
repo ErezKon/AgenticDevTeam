@@ -128,7 +128,6 @@ export function generateFallbackDeployment(
 
     for (const root of roots) {
         const rootDir = root.relDir || '.';
-        const absRoot = path.resolve(workspacePath, rootDir);
         const dockerfilePath = rootDir === '.' ? 'Dockerfile' : path.join(rootDir, 'Dockerfile');
         const absDockerfile = path.join(workspacePath, dockerfilePath);
 

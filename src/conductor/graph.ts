@@ -123,11 +123,6 @@ export function afterAcceptanceRouter(state: ProjectStateType): string {
     return 'finalize';
 }
 
-function afterBugfixRouter(state: ProjectStateType): string {
-    // After bugfix triage reassigns work, go back to development
-    return 'development';
-}
-
 export function afterIntakeRouter(state: ProjectStateType): string {
     if (state.input.runType === 'maintain') {
         return 'codebase-analyzer';
@@ -152,20 +147,6 @@ function rerunRouter(phase: PhaseName, next: string) {
         return next;
     };
 }
-
-/**
- * Map of each HITL phase to its "normal" next destination.
- * Used by rerunRouter to decide where to go when not re-running.
- */
-const PHASE_NEXT: Partial<Record<PhaseName, string>> = {
-    'codebase-analyzer': 'architect',
-    'architect': 'product-manager',
-    'product-manager': 'dba',
-    'dba': 'team-leader',
-    'team-leader': 'development',
-    'development': 'qa',
-    // qa, devops, e2e have their own conditional routers so they are not here
-};
 
 // ─── Graph builder ──────────────────────────────────────────────────────────
 

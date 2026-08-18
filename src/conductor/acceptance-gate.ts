@@ -18,12 +18,11 @@ import {
     MIN_AC_IMPLEMENTED_PCT,
     UNRECOVERABLE_ZERO_ROUNDS,
 } from '../config';
-import { buildTraceabilityReport, type CoverageTotals } from '../utils/traceability';
+import { buildTraceabilityReport } from '../utils/traceability';
 import type { ProjectStateType } from './state';
 import type { GateReport } from './quality-gates';
-import type { TamperFinding } from './gate-integrity';
 
-const log = getLogger('[AcceptanceGate]', 214);
+
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -214,7 +213,6 @@ export function evaluateAcceptance(state: ProjectStateType): AcceptanceReport {
         let passed = true;
         let inconclusive = false;
         let detail = 'No tampering detected';
-        // Check configBaseline for tamper findings
         // TamperFindings are surfaced as bugs with id prefix 'TAMPER-'
         const tamperBugs = (state.bugs ?? []).filter(b => b.id.startsWith('TAMPER-'));
         const criticalTamperBugs = tamperBugs.filter(b => b.severity === 'critical');
@@ -235,29 +233,12 @@ export function evaluateAcceptance(state: ProjectStateType): AcceptanceReport {
         let inconclusive = false;
         let detail = 'All stories have assignments';
         const stories = state.userStories ?? [];
-        const assignments = state.assignments ?? [];
-        const mergedPrs = (state.pullRequests ?? []).filter(pr => pr.status === 'merged');
-        const mergedBranches = new Set(mergedPrs.map(pr => pr.branchName));
 
         if (stories.length === 0) {
             inconclusive = true;
             detail = 'No user stories to evaluate';
         } else {
-            // Check which stories have at least one assignment with a merged PR
             const storyIdsWithMerge = new Set<string>();
-            for (const a of assignments) {
-                // Check if any merged PR matches this assignment's branch
-                const ba = (state.branchAssignments ?? []).find(
-                    b => b.assignmentIds.includes(a.id) && mergedBranches.has(b.branchName),
-                );
-                if (ba) {
-                    if (a.storyId) storyIdsWithMerge.add(a.storyId);
-                    // Also mark additionalStoryIds as covered (Sub-Plan 04)
-                    for (const sid of a.additionalStoryIds ?? []) {
-                        storyIdsWithMerge.add(sid);
-                    }
-                }
-            }
             const orphanedStories = stories.filter(s => !storyIdsWithMerge.has(s.id));
             if (orphanedStories.length > 0) {
                 passed = false;

@@ -461,7 +461,7 @@ function buildRunnerCommand(
     baseCommand: string,
     framework: string,
     reportDir: string,
-    rootDir: string,
+    _rootDir: string,
     withCoverage: boolean,
 ): string {
     const jsonOut = path.join(reportDir, 'jest-results.json');

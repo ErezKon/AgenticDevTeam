@@ -64,8 +64,8 @@ src/
   conductor/                       # LangGraph orchestration layer
     state.ts                       # ProjectState (Annotation + reducers, incl. _stopReason)
     graph.ts                       # StateGraph wiring + conditional edges + HITL
-    nodes.ts                       # 12 phase node functions (~2100 lines, largest file) + checkBudgetStop()
-    run.ts                         # Autonomous & HITL run helpers + resume
+    nodes.ts                       # 12 phase node functions (~3250 lines, largest file) + checkBudgetStop()
+    run.ts                         # Autonomous & HITL run helpers + continueRun
     pr-workflow.ts                 # Full PR lifecycle orchestrator (~1392 lines)
     context-builder.ts             # Compact context summarizers with char budgets
     quality-gates.ts               # Multi-language build/lint/test gates
@@ -134,9 +134,8 @@ src/
   tools/
     fs/workspace-tools.ts          # Sandboxed read/write/edit/list/search (5 tools)
     git/git-tools.ts               # Git CLI tools (12 tools)
-    git/github-tools.ts            # GitHub API tools via Octokit (6 tools)
     shell/shell-tools.ts           # Guarded shell execution (1 tool)
-    diagram/diagram-tools.ts       # Mermaid diagram emission
+    diagram/diagram-tools.ts       # Mermaid label sanitization
     requirements/parse-requirements.ts  # .md/.txt/.pdf/.docx parser
     mcp/playwright-mcp.ts          # Playwright MCP client (singleton)
 
@@ -166,7 +165,6 @@ src/
     coding-conventions.ts          # Convention file resolution + deployment
     traceability.ts                # Requirements traceability matrix
     codebase-analysis-writer.ts    # Write analysis markdown
-    log-capture.util.ts            # stdout/stderr capture
     log-colors.util.ts             # ANSI 256-color codes
 
   templates/
@@ -247,7 +245,7 @@ intake -> [codebase-analyzer] -> architect -> product-manager -> dba -> team-lea
 | Category | Agents | Tools | Model Tier |
 |----------|--------|-------|------------|
 | **Analysis** | Codebase Analyzer | Read-only workspace (read_file, list_dir, search_code) | `CODEBASE_ANALYZER_MODEL` |
-| **Management** | Architect | emit_mermaid only | `ARCHITECT_MODEL` |
+| **Management** | Architect | None (planning-only) | `ARCHITECT_MODEL` |
 | | Product Manager | None (planning-only) | `PRODUCT_MANAGER_MODEL` |
 | | DBA | None (planning-only) | `DBA_MODEL` |
 | | Team Leader | None (planning-only) | `TEAM_LEADER_MODEL` |
@@ -864,7 +862,7 @@ Separate tokens: `GITHUB_PROJECT_TOKEN` / `GITHUB_PROJECT_OWNER` (fall back to `
 
 ---
 
-## Continue Run (Plan 23) & Graceful Shutdown (Plan 25)
+## Continue Run (Plan 23) & Graceful Shutdown (Plan 24)
 
 When a run stops — whether from a crash, error, SIGINT, budget exhaustion, provider failure, or manual cancellation — the **Continue Run** feature reconstructs pipeline state from persisted artifacts and resumes execution from the last completed phase. **Periodic state snapshots** written at the start of each phase ensure a recent snapshot is always available, even after mid-phase crashes.
 
@@ -1144,8 +1142,7 @@ The system evolved through 16+ iteration plans. Key milestones:
 | 21 | Claude run errors: Anthropic streaming corruption, Responses-API JSON mode, runaway detection, universal token accounting |
 | 22 | pacmanclaude forensics: tool-budget collapse under parallel tool calls, compaction placeholder corruption, blind respawn handoff, dead scaffold barrier, e2e integrity false positives, Anthropic prompt caching |
 | 23 | Continue Run: state reconstruction from persisted artifacts, singleton rehydration, git reconciliation, phase resolution, node idempotency |
-| 24 | Anthropic truncation detection, PM token ceiling, trimTruncatedArrayTails, PR creation resilience (retry + pr-creation-failed status + continue-run recovery) |
-| 25 | Graceful shutdown & state persistence: periodic snapshots, budget-exhaustion-to-cancellation bridge, provider-failure-to-cancellation bridge, budget-exhausted manifest status, continue-run stop-reason awareness |
+| 24 | Anthropic truncation detection, PM token ceiling, trimTruncatedArrayTails, PR creation resilience (retry + pr-creation-failed status + continue-run recovery), periodic snapshots, budget-exhaustion-to-cancellation bridge, provider-failure-to-cancellation bridge, budget-exhausted manifest status, continue-run stop-reason awareness |
 
 When referenced in code comments, these plans are cited as "fixes A1", "fixes A2", etc. (referring to sub-plans within Plan 16).
 

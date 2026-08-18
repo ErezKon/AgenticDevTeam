@@ -643,7 +643,6 @@ All compaction features default to **on**. To disable any feature, set its envir
 | `PERSONA_COMPACT` | `true` | Revert to the verbose ~7,000-char persona |
 | `AGENT_RESPAWN_ENABLED` | `true` | Revert to tool poisoning at the ceiling |
 | `AGENT_RESPAWN_MAX_GENERATIONS` | `2` | Max additional agent lifetimes per task |
-| `AGENT_RESPAWN_TOKEN_THRESHOLD` | `14000` | Token threshold that triggers respawn |
 | `RESPONSE_SCHEMA_STRIP_ALL_DESCRIPTIONS` | `true` | Keep all JSON schema descriptions |
 
 ### Measurement
@@ -746,9 +745,8 @@ AgenticDevTeam/
 │   │   ├── _shared/truncate.ts             # Head/tail tool-result truncation
 │   │   ├── fs/workspace-tools.ts           # Sandboxed read/write/edit/list/search (+offset/limit)
 │   │   ├── git/git-tools.ts               # Git CLI tools (branch, commit, push, diff)
-│   │   ├── git/github-tools.ts            # GitHub API tools (PR, review, merge)
 │   │   ├── shell/shell-tools.ts            # Command execution in workspace
-│   │   ├── diagram/diagram-tools.ts        # Mermaid diagram emission
+│   │   ├── diagram/diagram-tools.ts        # Mermaid label sanitization
 │   │   ├── requirements/parse-requirements.ts  # .md/.txt/.pdf/.docx parser
 │   │   └── mcp/playwright-mcp.ts           # Playwright MCP client
 │   │
@@ -758,7 +756,6 @@ AgenticDevTeam/
 │   ├── utils/
 │   │   ├── logger.ts                       # Per-agent colored console + file logger
 │   │   ├── log-colors.util.ts              # ANSI 256-color codes
-│   │   ├── log-capture.util.ts             # Stdout/stderr capture for log files
 │   │   ├── oauth-auth.util.ts              # OAuth2 client-credentials token cache
 │   │   ├── workspace.ts                    # Project workspace + output dir creation
 │   │   ├── conventions-digest.ts           # Compact in-prompt conventions digest
@@ -1060,7 +1057,6 @@ See [`.env.example`](.env.example) for the full template.
 | `PERSONA_COMPACT` | `true` | Use the short persona variant (~2,500 chars vs ~7,000) for developer agents |
 | `AGENT_RESPAWN_ENABLED` | `true` | Respawn a dev agent with summarised handoff instead of poisoning tools at the ceiling |
 | `AGENT_RESPAWN_MAX_GENERATIONS` | `2` | Max respawn generations per logical dev task |
-| `AGENT_RESPAWN_TOKEN_THRESHOLD` | `14000` | Input-token threshold that triggers a respawn |
 | `RESPONSE_SCHEMA_STRIP_ALL_DESCRIPTIONS` | `true` | Strip ALL descriptions from injected JSON Schema for maximum token savings |
 | **Tool Budgets (Plan 22)** | | |
 | `TOOL_BUDGETS_JSON` | — | Per-rank read/write/shell/**turn** budgets, merged over the built-in defaults (principal 60/30/14/28, senior 50/25/12/24, junior 40/20/12/20). A turn costs 1 regardless of how many tools the model calls in parallel |

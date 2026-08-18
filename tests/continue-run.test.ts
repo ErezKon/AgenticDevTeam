@@ -53,7 +53,6 @@ import {
 
 import {
     reconstructState,
-    type ReconstructedState,
 } from '../src/conductor/continue/state-reconstructor';
 
 import { readLedger } from '../src/utils/run-ledger';
@@ -108,7 +107,6 @@ function makeStateSnapshot(overrides: Record<string, any> = {}): Record<string, 
         devopsPlan: null,
         runningContainers: [],
         pullRequests: [],
-        branchAssignments: [],
         approvals: [],
         pendingRerun: null,
         phaseFeedback: {},
@@ -116,7 +114,6 @@ function makeStateSnapshot(overrides: Record<string, any> = {}): Record<string, 
         artifacts: [],
         transcript: [],
         tokenUsage: [],
-        configBaseline: null,
         acceptance: null,
         latestGateReport: null,
         unrecoverable: null,
@@ -124,7 +121,6 @@ function makeStateSnapshot(overrides: Record<string, any> = {}): Record<string, 
         dispatchRounds: [],
         attemptedBugIds: [],
         bugAttempts: {},
-        outputIntegrity: [],
         planViolations: [],
         repoContract: null,
         completionEvidence: [],

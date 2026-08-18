@@ -17,7 +17,7 @@ import {
     synthesiseGateBugs,
     gateReportToMarkdown,
 } from '../src/conductor/quality-gates';
-import type { StackKind, GateStep, GateReport, GateResult, StackRoot } from '../src/conductor/quality-gates';
+import type { GateReport } from '../src/conductor/quality-gates';
 import {
     findUnresolvedReferences,
     verifyBuildArtifacts,

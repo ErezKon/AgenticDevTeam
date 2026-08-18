@@ -449,14 +449,14 @@ describe('compactHistory — edge cases', () => {
 
     it('handles keepRecent larger than total tool results', () => {
         const messages = buildHistory(2, 1000);
-        const { messages: result, stats } = compactHistory(messages, { keepRecent: 10, maxChars: 100000 });
+        const { stats } = compactHistory(messages, { keepRecent: 10, maxChars: 100000 });
         // All are "recent" — nothing should be stubbed
         expect(stats.toolResultsStubbed).toBe(0);
     });
 
     it('handles keepRecent of 0', () => {
         const messages = buildHistory(5, 2000);
-        const { messages: result, stats } = compactHistory(messages, { keepRecent: 0, maxChars: 100000 });
+        const { stats } = compactHistory(messages, { keepRecent: 0, maxChars: 100000 });
         // All tool results should be stubbed
         expect(stats.toolResultsStubbed).toBe(5);
     });

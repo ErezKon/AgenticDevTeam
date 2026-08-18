@@ -22,7 +22,6 @@ import { listStoppedRuns, collectRunState, reconstructState } from './conductor/
 import { parseRequirementsFile } from './tools/requirements/parse-requirements';
 import type { ProjectStateType } from './conductor/state';
 import type { RepoTarget } from './agents/_shared/base-schemas';
-import { GITHUB_PROJECT_OWNER, GITHUB_OWNER } from './config';
 import { tokenTracker } from './utils/token-tracker';
 import { refreshTokenReport } from './utils/token-report';
 import { redactState } from './utils/run-snapshot';
@@ -244,7 +243,6 @@ async function getRepoTarget(systemName: string): Promise<RepoTarget | undefined
         }
 
         case '3': {
-            const defaultOwner = GITHUB_PROJECT_OWNER || GITHUB_OWNER;
             const repoName = await ask('Repository name: ');
             if (!repoName) {
                 console.log(`${TAG} Repository name is required.`);

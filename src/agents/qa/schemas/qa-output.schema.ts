@@ -16,6 +16,4 @@ export const QaE2eOutputSchema = z.object({
     bugs: z.array(BugSchema).optional().describe('Bugs found during e2e testing'),
 });
 
-export type QaLeadOutput = z.infer<typeof QaLeadOutputSchema>;
-export type QaUnitOutput = z.infer<typeof QaUnitOutputSchema>;
-export type QaE2eOutput = z.infer<typeof QaE2eOutputSchema>;
+

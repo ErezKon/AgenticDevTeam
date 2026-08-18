@@ -4,7 +4,6 @@
  * Sub-Plan 09: prevents "0 tests found = pass" and ensures every story has
  * at least one tagged test.
  */
-import { getLogger } from '../utils/logger';
 import type { ExecutedTestReport } from './test-runner';
 import type { UserStory } from '../agents/_shared/schemas/user-story.schema';
 import type { Bug } from '../agents/_shared/schemas/bug.schema';
@@ -15,7 +14,6 @@ import {
     QA_MIN_COVERAGE_PCT,
 } from '../config';
 
-const log = getLogger('[TestSufficiency]', 205);
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -186,32 +184,4 @@ function getExpectedBehavior(kind: SufficiencyViolation['kind']): string {
     }
 }
 
-// ─── Sufficiency report markdown ────────────────────────────────────────────
 
-/**
- * Render sufficiency violations as a markdown summary.
- */
-export function sufficiencyToMarkdown(violations: SufficiencyViolation[]): string {
-    if (violations.length === 0) {
-        return ':white_check_mark: **Test sufficiency: all checks passed.**';
-    }
-
-    const lines: string[] = [':x: **Test sufficiency violations:**\n'];
-    const critical = violations.filter(v => v.severity === 'critical');
-    const major = violations.filter(v => v.severity === 'major');
-
-    if (critical.length > 0) {
-        lines.push(`**Critical (${critical.length}):**`);
-        for (const v of critical) {
-            lines.push(`- \`${v.kind}\`: ${v.detail}`);
-        }
-    }
-    if (major.length > 0) {
-        lines.push(`\n**Major (${major.length}):**`);
-        for (const v of major) {
-            lines.push(`- \`${v.kind}\`: ${v.detail}`);
-        }
-    }
-
-    return lines.join('\n');
-}

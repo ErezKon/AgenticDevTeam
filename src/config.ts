@@ -387,10 +387,6 @@ export const LLM_REQUEST_TIMEOUT_MS =
 export const AGENT_OUTPUT_REPAIR_ATTEMPTS =
     parseInt(process.env.AGENT_OUTPUT_REPAIR_ATTEMPTS ?? '2', 10);
 
-/** Continuation attempts when an agent's JSON output is truncated mid-array. */
-export const AGENT_OUTPUT_CONTINUATION_ATTEMPTS =
-    parseInt(process.env.AGENT_OUTPUT_CONTINUATION_ATTEMPTS ?? '3', 10);
-
 // ─── Context Budget ─────────────────────────────────────────────────────────
 
 /** Hard character budget for assembled context per agent prompt. */
@@ -491,10 +487,6 @@ export const AGENT_RESPAWN_ENABLED =
  *  Was 2 — raised to 4 because with a real handoff respawn becomes productive. */
 export const AGENT_RESPAWN_MAX_GENERATIONS =
     parseInt(process.env.AGENT_RESPAWN_MAX_GENERATIONS ?? '4', 10);
-
-/** Input-token threshold that triggers a respawn on the next step. */
-export const AGENT_RESPAWN_TOKEN_THRESHOLD =
-    parseInt(process.env.AGENT_RESPAWN_TOKEN_THRESHOLD ?? '14000', 10);
 
 // ─── Quality Gates ──────────────────────────────────────────────────────────
 
@@ -760,22 +752,6 @@ export const TRACEABILITY_JSON =
 /** Cassette mode: 'off' (default), 'record', or 'replay'. */
 export const LLM_CASSETTE_MODE =
     process.env.LLM_CASSETTE_MODE ?? 'off';
-
-/** Name of the cassette file (without extension). Used in record and replay modes. */
-export const CASSETTE_NAME =
-    process.env.CASSETTE_NAME ?? '';
-
-/** Behaviour on a replay miss: 'strict' (throws) or 'passthrough' (calls real LLM). */
-export const LLM_CASSETTE_ON_MISS =
-    process.env.LLM_CASSETTE_ON_MISS ?? 'strict';
-
-/** Warn when a cassette file exceeds this size (MB). */
-export const CASSETTE_MAX_MB =
-    parseInt(process.env.CASSETTE_MAX_MB ?? '25', 10);
-
-/** GitHub mode: 'live' (default) or 'local' (offline, bare-repo backed). */
-export const GITHUB_MODE_CONFIG =
-    process.env.GITHUB_MODE ?? 'live';
 
 // ─── Dashboard ──────────────────────────────────────────────────────────────
 

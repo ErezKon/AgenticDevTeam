@@ -11,7 +11,6 @@ import {
     buildTraceabilityReport,
     renderTraceabilityMarkdown,
     type TraceabilityReport,
-    type CoverageTotals,
 } from '../src/utils/traceability';
 import type { ProjectStateType } from '../src/conductor/state';
 import type {
@@ -133,7 +132,6 @@ function makeMinimalState(overrides: Partial<ProjectStateType>): ProjectStateTyp
         devopsPlan: null,
         runningContainers: [],
         pullRequests: [],
-        branchAssignments: [],
         phase: 'finalize' as any,
         iteration: { bugfix: 0 },
         approvals: [],
@@ -143,7 +141,6 @@ function makeMinimalState(overrides: Partial<ProjectStateType>): ProjectStateTyp
         artifacts: [],
         transcript: [],
         tokenUsage: [],
-        configBaseline: null,
         acceptance: null,
         latestGateReport: null,
         unrecoverable: null,
@@ -151,7 +148,6 @@ function makeMinimalState(overrides: Partial<ProjectStateType>): ProjectStateTyp
         dispatchRounds: [],
         attemptedBugIds: [],
         bugAttempts: {},
-        outputIntegrity: [],
         planViolations: [],
         repoContract: null,
         completionEvidence: [],

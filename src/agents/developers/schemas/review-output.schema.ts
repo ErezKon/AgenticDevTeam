@@ -28,4 +28,3 @@ export const ReviewOutputSchema = z.object({
     ),
 });
 export type ReviewOutput = z.infer<typeof ReviewOutputSchema>;
-export type CriteriaVerdict = z.infer<typeof CriteriaVerdictSchema>;

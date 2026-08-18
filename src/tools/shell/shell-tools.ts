@@ -87,7 +87,7 @@ interface ShellResult {
 
 function runShell(command: string, cwd: string, timeoutMs: number): Promise<ShellResult> {
     return new Promise((resolve) => {
-        const child = exec(command, {
+        exec(command, {
             cwd, timeout: timeoutMs, maxBuffer: 1024 * 1024 * 5,
             env: {
                 ...process.env,

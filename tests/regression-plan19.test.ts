@@ -24,8 +24,6 @@ jest.mock('../src/config', () => ({
 import * as fs from 'fs';
 import * as path from 'path';
 import { evaluateAcceptance } from '../src/conductor/acceptance-gate';
-import { checkInvariants } from '../src/conductor/run-invariants';
-import type { ProjectStateType } from '../src/conductor/state';
 
 // ─── Fixture loading ────────────────────────────────────────────────────────
 
@@ -92,7 +90,6 @@ describe('Plan 19 regression — pacman8', () => {
             dispatchRounds: [],
             attemptedBugIds: [],
             bugAttempts: {},
-            outputIntegrity: [],
             planViolations: [],
             repoContract: null,
             completionEvidence: [],
@@ -148,7 +145,6 @@ describe('Plan 19 regression — pacman8', () => {
             dispatchRounds: [],
             attemptedBugIds: [],
             bugAttempts: {},
-            outputIntegrity: [],
             planViolations: [],
             repoContract: null,
             completionEvidence: [],
@@ -204,7 +200,6 @@ describe('Plan 19 regression — retroboard3', () => {
             dispatchRounds: [],
             attemptedBugIds: [],
             bugAttempts: {},
-            outputIntegrity: [],
             planViolations: [],
             repoContract: null,
             completionEvidence: [],

@@ -12,7 +12,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { getLogger } from '../utils/logger';
-import type { Assignment, FileChange } from '../agents/_shared/base-schemas';
+import type { Assignment } from '../agents/_shared/base-schemas';
 
 const log = getLogger('[Assembly-Gate]', 208);
 

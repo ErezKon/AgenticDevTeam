@@ -11,7 +11,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { getLogger } from './logger';
 import { MODEL_PRICING } from '../config';
-import type { TokenCallRecord, RunUsageSummary, RunStatus, InvocationEfficiencyRow } from './token-tracker';
+import type { TokenCallRecord, RunUsageSummary, RunStatus } from './token-tracker';
 import { tokenTracker } from './token-tracker';
 import { getCumulativeCompactionStats } from '../agents/_shared/history-compactor';
 import { getTruncationStats } from '../tools/_shared/truncate';

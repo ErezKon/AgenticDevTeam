@@ -92,7 +92,7 @@ const ARTIFACT_DIRS = ['dist', 'build', 'out', '.next', 'public/build'];
 /**
  * Check each root's build output for real artifacts.
  */
-export function verifyBuildArtifacts(workspacePath: string, roots: StackRoot[]): ArtifactCheck[] {
+export function verifyBuildArtifacts(_workspacePath: string, roots: StackRoot[]): ArtifactCheck[] {
     const results: ArtifactCheck[] = [];
 
     for (const root of roots) {
@@ -739,7 +739,7 @@ export async function runSmokeTest(
 }
 
 function findWebRoot(
-    workspacePath: string,
+    _workspacePath: string,
     roots: StackRoot[],
     artifactChecks: ArtifactCheck[],
 ): { root: StackRoot; serveDir: string } | null {

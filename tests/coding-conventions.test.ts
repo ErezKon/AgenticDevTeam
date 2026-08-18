@@ -17,7 +17,6 @@ import * as os from 'os';
 import {
     resolveConventionFiles,
     deployConventionsToWorkspace,
-    deployAllConventionsToWorkspace,
     getConventionReadInstructions,
 } from '../src/utils/coding-conventions';
 
@@ -381,58 +380,7 @@ describe('deployConventionsToWorkspace', () => {
     });
 });
 
-// ─── Test 3: deployAllConventionsToWorkspace() ───────────────────────────────
-
-describe('deployAllConventionsToWorkspace', () => {
-    let tempDir: string;
-
-    beforeEach(() => {
-        tempDir = createTempWorkspace();
-    });
-
-    afterEach(() => {
-        cleanupTempWorkspace(tempDir);
-    });
-
-    it('copies all convention .md files to .conventions/', () => {
-        deployAllConventionsToWorkspace(tempDir);
-        const conventionsDir = path.join(tempDir, '.conventions');
-        expect(fs.existsSync(conventionsDir)).toBe(true);
-
-        const deployed = fs.readdirSync(conventionsDir).filter((f) => f.endsWith('.md'));
-
-        // Should have all 16 convention files
-        expect(deployed).toContain('Universal.md');
-        expect(deployed).toContain('React.md');
-        expect(deployed).toContain('Angular.md');
-        expect(deployed).toContain('Go.md');
-        expect(deployed).toContain('Python.md');
-        expect(deployed).toContain('TypeScript.md');
-        expect(deployed).toContain('JavaScript.md');
-        expect(deployed).toContain('Java.md');
-        expect(deployed).toContain('CSharp.md');
-        expect(deployed).toContain('CSS.md');
-        expect(deployed).toContain('SCSS.md');
-        expect(deployed).toContain('HTML.md');
-        expect(deployed).toContain('C.md');
-        expect(deployed).toContain('CPlusPlus.md');
-        expect(deployed).toContain('Vue.md');
-        expect(deployed).toContain('Best Practices.md');
-        expect(deployed.length).toBe(16);
-    });
-
-    it('is idempotent — calling twice does not fail or duplicate', () => {
-        deployAllConventionsToWorkspace(tempDir);
-        expect(() => {
-            deployAllConventionsToWorkspace(tempDir);
-        }).not.toThrow();
-
-        const deployed = fs.readdirSync(path.join(tempDir, '.conventions'));
-        expect(deployed.length).toBe(16);
-    });
-});
-
-// ─── Test 4: getConventionReadInstructions() ─────────────────────────────────
+// ─── Test 3: getConventionReadInstructions() ─────────────────────────────────
 
 describe('getConventionReadInstructions', () => {
     it('returns empty string for empty file list', () => {
@@ -864,15 +812,15 @@ describe('Integration: prompt builders', () => {
             expect(hasDigestRef || hasAllPaths).toBe(true);
         });
 
-        it('convention files resolved from tech stack exist in workspace after full deployment', () => {
+        it('convention files resolved from tech stack exist in workspace after deployment', () => {
             const techStack = [
                 { layer: 'backend', choice: 'Go', alternatives: [], rationale: '' },
                 { layer: 'frontend', choice: 'Angular', alternatives: [], rationale: '' },
             ];
             const files = resolveConventionFiles([], techStack);
 
-            // Deploy all (as the conductor does)
-            deployAllConventionsToWorkspace(tempDir);
+            // Deploy the resolved files
+            deployConventionsToWorkspace(tempDir, files);
 
             // Verify every resolved file is available
             for (const fileName of files) {

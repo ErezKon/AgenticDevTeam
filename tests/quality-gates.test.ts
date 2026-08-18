@@ -11,14 +11,13 @@ import * as path from 'path';
 import * as os from 'os';
 import {
     detectStacks,
-    detectStackRoots,
     GATE_COMMANDS,
     runQualityGates,
     gateReportToTestReport,
     synthesiseGateBugs,
     gateReportToMarkdown,
 } from '../src/conductor/quality-gates';
-import type { StackKind, GateStep, GateReport, GateResult, StackRoot } from '../src/conductor/quality-gates';
+import type { StackKind, GateReport, GateResult } from '../src/conductor/quality-gates';
 
 // Mock logger
 jest.mock('../src/utils/logger', () => ({

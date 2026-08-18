@@ -15,7 +15,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import { getLogger } from '../utils/logger';
-import { GATE_INTEGRITY_MODE, REJECT_TRIVIAL_TESTS, GATE_REACHABILITY_MIN_CLOSURE } from '../config';
+import { REJECT_TRIVIAL_TESTS, GATE_REACHABILITY_MIN_CLOSURE } from '../config';
 import type { StackRoot } from './quality-gates';
 
 const log = getLogger('[GateIntegrity]', 214);
@@ -192,7 +192,6 @@ export function captureConfigBaseline(workspacePath: string, roots: StackRoot[])
     }
 
     for (const dir of dirsToScan) {
-        const relDir = path.relative(workspacePath, dir);
 
         // Hash and store protected config files
         for (const glob of PROTECTED_CONFIG_GLOBS) {
@@ -591,7 +590,7 @@ function isRuleOff(level: string | number): boolean {
 
 function detectGitignoreWidening(
     baseline: ConfigBaseline,
-    current: ConfigBaseline,
+    _current: ConfigBaseline,
     workspacePath: string,
 ): TamperFinding[] {
     const findings: TamperFinding[] = [];
@@ -1027,16 +1026,14 @@ export function countTestBlocks(content: string): { tests: number; skipped: numb
     let tests = 0;
     let skipped = 0;
 
-    let match: RegExpExecArray | null;
-
     TEST_BLOCK_RE.lastIndex = 0;
-    while ((match = TEST_BLOCK_RE.exec(content)) !== null) tests++;
+    while (TEST_BLOCK_RE.exec(content) !== null) tests++;
 
     SKIPPED_BLOCK_RE.lastIndex = 0;
-    while ((match = SKIPPED_BLOCK_RE.exec(content)) !== null) skipped++;
+    while (SKIPPED_BLOCK_RE.exec(content) !== null) skipped++;
 
     SKIPPED_ALT_RE.lastIndex = 0;
-    while ((match = SKIPPED_ALT_RE.exec(content)) !== null) skipped++;
+    while (SKIPPED_ALT_RE.exec(content) !== null) skipped++;
 
     return { tests, skipped };
 }

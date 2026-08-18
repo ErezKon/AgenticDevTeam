@@ -13,7 +13,7 @@ import {
     RepoTargetSchema,
     RunInputSchema,
 } from '../src/agents/_shared/schemas/index';
-import type { GitContext, RepoTarget } from '../src/agents/_shared/schemas/git-context.schema';
+import type { GitContext } from '../src/agents/_shared/schemas/git-context.schema';
 
 // ─── GitContextSchema ───────────────────────────────────────────────────────
 

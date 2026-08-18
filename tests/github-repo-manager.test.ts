@@ -202,7 +202,7 @@ describe('initializeRepoLocally', () => {
 
     it('creates empty commit when no staged changes', () => {
         // Override: diff --cached --quiet succeeds (no changes)
-        mockExecSync.mockImplementation((cmd: string) => {
+        mockExecSync.mockImplementation((_cmd: string) => {
             return Buffer.from('');
         });
 

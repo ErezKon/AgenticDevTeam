@@ -8,7 +8,7 @@
  * implicit scaffold dependencies are injected, and overlapping module
  * owners are serialised instead of batched.
  */
-import { MAX_CONCURRENT_DEVS, INTER_BATCH_DELAY_MS, CONFIG_OWNERSHIP_SCAFFOLD_ONLY, MAX_BRANCH_WALL_MS } from '../../config';
+import { MAX_CONCURRENT_DEVS, INTER_BATCH_DELAY_MS, MAX_BRANCH_WALL_MS } from '../../config';
 import { getLogger } from '../../utils/logger';
 import { executePRWorkflow } from '../../conductor/pr-workflow';
 import { completedIdsFromPullRequests } from '../../conductor/assignment-policy';
@@ -227,7 +227,7 @@ export function isBootstrapAssignment(a: Assignment): boolean {
  *
  * A branch is bootstrap if any of its assignments is a bootstrap assignment.
  */
-export function isBootstrapBranch(branch: string, assignments: Assignment[]): boolean {
+export function isBootstrapBranch(_branch: string, assignments: Assignment[]): boolean {
     return assignments.length > 0 && assignments.some(isBootstrapAssignment);
 }
 

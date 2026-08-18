@@ -149,7 +149,7 @@ describe('createChatModel', () => {
 
     it('creates ChatAnthropic for a Claude model', () => {
         const { createChatModel } = loadModule();
-        const model = createChatModel({ ...baseOpts, modelName: 'claude-sonnet-4-20250514' });
+        createChatModel({ ...baseOpts, modelName: 'claude-sonnet-4-20250514' });
 
         expect(MockChatAnthropic).toHaveBeenCalledTimes(1);
         expect(MockChatOpenAI).not.toHaveBeenCalled();
@@ -165,7 +165,7 @@ describe('createChatModel', () => {
 
     it('creates ChatGoogleGenerativeAI for a Gemini model', () => {
         const { createChatModel } = loadModule();
-        const model = createChatModel({ ...baseOpts, modelName: 'gemini-2.5-pro' });
+        createChatModel({ ...baseOpts, modelName: 'gemini-2.5-pro' });
 
         expect(MockChatGoogleGenerativeAI).toHaveBeenCalledTimes(1);
         expect(MockChatOpenAI).not.toHaveBeenCalled();
@@ -181,7 +181,7 @@ describe('createChatModel', () => {
 
     it('creates ChatOpenAI for an OpenAI-compatible model', () => {
         const { createChatModel } = loadModule();
-        const model = createChatModel({
+        createChatModel({
             ...baseOpts,
             modelName: 'gpt-oss-120b',
             apiKey: 'oauth-token',

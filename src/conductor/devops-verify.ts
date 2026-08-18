@@ -78,7 +78,7 @@ export function deriveServiceUrls(
             for (const pub of publishers) {
                 const publishedPort = pub.PublishedPort ?? pub.published_port;
                 if (publishedPort && publishedPort > 0) {
-                    const proto = (pub.Protocol ?? pub.protocol ?? 'tcp') === 'tcp' ? 'http' : 'http';
+                    const proto = 'http';
                     urls.push({
                         service,
                         url: `${proto}://${hostname}:${publishedPort}`,
@@ -194,13 +194,13 @@ export async function verifyDeployment(
 
 async function verifyCompose(
     workspacePath: string,
-    projectSlug: string,
+    _projectSlug: string,
     allLogs: string[],
     containerNames: string[],
 ): Promise<VerifyResult> {
     // Validate compose file
     try {
-        const validateOut = execSync('docker compose config -q', {
+        execSync('docker compose config -q', {
             cwd: workspacePath,
             timeout: DEVOPS_VERIFY_TIMEOUT_MS,
             encoding: 'utf-8',

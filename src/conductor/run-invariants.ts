@@ -10,7 +10,6 @@
  * - appended to state.invariantViolations
  * - (in 'strict' mode) thrown to fail the run immediately
  */
-import * as fs from 'fs';
 import { getLogger } from '../utils/logger';
 import { RUN_INVARIANTS_MODE } from '../config';
 import { appendLedger } from '../utils/run-ledger';
@@ -137,9 +136,6 @@ const INVARIANTS: InvariantCheck[] = [
         id: 'INV-NO-CRITICAL-INTEGRITY',
         afterPhases: ['development'],
         check: (state) => {
-            const critical = (state.outputIntegrity ?? []).filter(
-                (f: any) => f.issue === 'schema-invalid',
-            );
             // Also check for tamper findings in bugs
             const tamperBugs = (state.bugs ?? []).filter(
                 b => b.id.startsWith('TAMPER-') && (b as any).severity === 'critical',
