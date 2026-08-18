@@ -55,12 +55,28 @@ export function writeStateSnapshot(outputPath: string, state: any): string | nul
 // ─── Periodic phase snapshot (Plan 25) ──────────────────────────────────────
 
 /**
+ * Minimum interval between full state snapshots (Plan 26-11).
+ * Prevents excessive serialization when multiple phases fire in quick succession.
+ */
+const SNAPSHOT_MIN_INTERVAL_MS = 30_000; // 30 seconds
+
+/** Timestamp of the last successfully written snapshot. */
+let _lastSnapshotWrittenAt = 0;
+
+/** Pending debounced snapshot timer (Plan 26-11). */
+let _snapshotTimer: ReturnType<typeof setTimeout> | null = null;
+
+/**
  * Write a state snapshot at the start of a phase — captures the full
  * accumulated state from all previous phases. This ensures continue-run
  * has a recent snapshot even if the process crashes mid-phase.
  *
  * Also writes a lightweight `latest-phase.json` marker so the continue-run
  * state collector can quickly determine the last completed phase.
+ *
+ * Plan 26-11: debounced — skips the expensive full-state serialization if
+ * the last write was less than SNAPSHOT_MIN_INTERVAL_MS ago. The lightweight
+ * latest-phase.json marker is always written immediately.
  */
 export function writePeriodicSnapshot(
     outputPath: string | undefined,
@@ -68,15 +84,32 @@ export function writePeriodicSnapshot(
     currentPhase: string,
 ): void {
     if (!outputPath) return;
-    // Write the full state snapshot (overwrites previous)
-    writeStateSnapshot(outputPath, state);
-    // Write a lightweight marker with the phase and timestamp
+
+    // Always write the lightweight marker immediately
     const marker = {
         phase: currentPhase,
         timestamp: new Date().toISOString(),
         reason: 'periodic',
     };
     writeOutputFile(outputPath, 'latest-phase.json', JSON.stringify(marker, null, 2));
+
+    // Debounce the expensive full state snapshot (Plan 26-11)
+    const now = Date.now();
+    const elapsed = now - _lastSnapshotWrittenAt;
+    if (elapsed >= SNAPSHOT_MIN_INTERVAL_MS) {
+        // Enough time has passed — write immediately
+        writeStateSnapshot(outputPath, state);
+        _lastSnapshotWrittenAt = now;
+        if (_snapshotTimer) { clearTimeout(_snapshotTimer); _snapshotTimer = null; }
+    } else if (!_snapshotTimer) {
+        // Schedule a deferred write so data is not lost
+        const delay = SNAPSHOT_MIN_INTERVAL_MS - elapsed;
+        _snapshotTimer = setTimeout(() => {
+            _snapshotTimer = null;
+            writeStateSnapshot(outputPath, state);
+            _lastSnapshotWrittenAt = Date.now();
+        }, delay);
+    }
 }
 
 // ─── Run manifest ───────────────────────────────────────────────────────────

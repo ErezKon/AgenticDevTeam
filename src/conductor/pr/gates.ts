@@ -70,7 +70,7 @@ export interface IntegrityGateResult {
  * Run the integrity gate: tamper detection + trivial test detection.
  * Optionally reverts protected files and re-runs quality gates.
  */
-export function runIntegrityGate(
+export async function runIntegrityGate(
     worktreeWorkspace: string,
     branchBaseline: ConfigBaseline,
     branchName: string,
@@ -78,7 +78,7 @@ export function runIntegrityGate(
     gateReport: GateReport | null,
     outputPath: string | undefined,
     gitContext?: any,
-): IntegrityGateResult {
+): Promise<IntegrityGateResult> {
     const integrityFindings: TamperFinding[] = [];
 
     try {
@@ -113,7 +113,7 @@ export function runIntegrityGate(
             }
 
             if (criticals.length > 0 && GATE_INTEGRITY_MODE === 'enforce') {
-                gateReport = revertAndRerunGates(
+                gateReport = await revertAndRerunGates(
                     worktreeWorkspace, branchBaseline, branchName, projectSlug,
                     integrityFindings, gateReport, outputPath, gitContext,
                 );
@@ -129,7 +129,7 @@ export function runIntegrityGate(
 /**
  * Revert protected files to baseline and re-run quality gates.
  */
-function revertAndRerunGates(
+async function revertAndRerunGates(
     worktreeWorkspace: string,
     branchBaseline: ConfigBaseline,
     branchName: string,
@@ -138,7 +138,7 @@ function revertAndRerunGates(
     gateReport: GateReport | null,
     outputPath: string | undefined,
     gitContext?: any,
-): GateReport | null {
+): Promise<GateReport | null> {
     const criticals = integrityFindings.filter(f => f.severity === 'critical');
 
     // Plan 24 B3: remember pre-revert gate status so we can
@@ -218,7 +218,7 @@ function revertAndRerunGates(
 
     // Re-run quality gates on reverted tree
     try {
-        gateReport = runQualityGates(worktreeWorkspace, {
+        gateReport = await runQualityGates(worktreeWorkspace, {
             timeoutMs: PR_TEST_TIMEOUT_MS,
             installTimeoutMs: PR_TEST_INSTALL_TIMEOUT_MS,
         });
@@ -259,7 +259,7 @@ function revertAndRerunGates(
 
             // Restore the pre-revert gate report so the revert-induced
             // failure does not reach decideMerge as a blocker.
-            gateReport = runQualityGates(worktreeWorkspace, {
+            gateReport = await runQualityGates(worktreeWorkspace, {
                 timeoutMs: PR_TEST_TIMEOUT_MS,
                 installTimeoutMs: PR_TEST_INSTALL_TIMEOUT_MS,
             });

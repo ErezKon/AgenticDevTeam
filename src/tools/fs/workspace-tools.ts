@@ -12,6 +12,7 @@
 import { tool } from '@langchain/core/tools';
 import { z } from 'zod';
 import * as fs from 'fs';
+import * as fsp from 'fs/promises';
 import * as path from 'path';
 import { resolveWorkspacePath } from '../../utils/workspace';
 import { LogColors, color256 } from '../../utils/log-colors.util';
@@ -118,8 +119,8 @@ export function createWorkspaceTools(
             const payloadRefusal = checkWritePayload(filePath, content);
             if (payloadRefusal) return payloadRefusal;
 
-            fs.mkdirSync(path.dirname(resolved), { recursive: true });
-            fs.writeFileSync(resolved, content, 'utf-8');
+            await fsp.mkdir(path.dirname(resolved), { recursive: true });
+            await fsp.writeFile(resolved, content, 'utf-8');
             return `File written: ${filePath} (${content.length} chars)`;
         },
         {
@@ -136,10 +137,10 @@ export function createWorkspaceTools(
         async ({ filePath, offset, limit }) => {
             const resolved = resolveWorkspacePath(workspaceRoot, filePath);
             logToolAction(`${TAG} read_file: ${filePath}${offset ? ` offset=${offset}` : ''}${limit ? ` limit=${limit}` : ''}`);
-            if (!fs.existsSync(resolved)) {
+            try { await fsp.access(resolved); } catch {
                 return `Error: File not found: ${filePath}`;
             }
-            const raw = fs.readFileSync(resolved, 'utf-8');
+            const raw = await fsp.readFile(resolved, 'utf-8');
             const allLines = raw.split('\n');
             const totalLines = allLines.length;
             if (offset || limit) {
@@ -175,15 +176,15 @@ export function createWorkspaceTools(
             const payloadRefusal = checkWritePayload(filePath, newString);
             if (payloadRefusal) return payloadRefusal;
 
-            if (!fs.existsSync(resolved)) {
+            try { await fsp.access(resolved); } catch {
                 return `Error: File not found: ${filePath}`;
             }
-            let content = fs.readFileSync(resolved, 'utf-8');
+            let content = await fsp.readFile(resolved, 'utf-8');
             if (!content.includes(oldString)) {
                 return `Error: old_string not found in file. Make sure it matches exactly.`;
             }
             content = content.replace(oldString, newString);
-            fs.writeFileSync(resolved, content, 'utf-8');
+            await fsp.writeFile(resolved, content, 'utf-8');
             return `File edited: ${filePath}`;
         },
         {
@@ -201,10 +202,10 @@ export function createWorkspaceTools(
         async ({ dirPath, recursive }) => {
             const resolved = resolveWorkspacePath(workspaceRoot, dirPath || '.');
             logToolAction(`${TAG} list_dir: ${dirPath || '.'}`);
-            if (!fs.existsSync(resolved)) {
+            try { await fsp.access(resolved); } catch {
                 return `Error: Directory not found: ${dirPath}`;
             }
-            const entries = listDirectory(resolved, workspaceRoot, recursive ?? false);
+            const entries = await listDirectoryAsync(resolved, workspaceRoot, recursive ?? false);
             const raw = entries.join('\n') || '(empty directory)';
             return truncateToolResult(raw, 'list_dir');
         },
@@ -222,7 +223,7 @@ export function createWorkspaceTools(
         async ({ query, filePattern }) => {
             const resolved = resolveWorkspacePath(workspaceRoot, '.');
             logToolAction(`${TAG} search_code: "${query}" pattern=${filePattern || '*'}`);
-            const results = searchInFiles(resolved, workspaceRoot, query, filePattern);
+            const results = await searchInFilesAsync(resolved, workspaceRoot, query, filePattern);
             if (results.length === 0) return 'No matches found.';
             const raw = results.slice(0, 50).join('\n');
             return truncateToolResult(raw, 'search_code');
@@ -240,11 +241,11 @@ export function createWorkspaceTools(
     return [writeFileTool, readFileTool, editFileTool, listDirTool, searchCodeTool];
 }
 
-// ─── Helpers ────────────────────────────────────────────────────────────────
+// ─── Helpers (async — Plan 26-11) ───────────────────────────────────────────
 
-function listDirectory(dir: string, root: string, recursive: boolean, depth = 0): string[] {
+async function listDirectoryAsync(dir: string, root: string, recursive: boolean, depth = 0): Promise<string[]> {
     const results: string[] = [];
-    const entries = fs.readdirSync(dir, { withFileTypes: true });
+    const entries = await fsp.readdir(dir, { withFileTypes: true });
     for (const entry of entries) {
         if (entry.name === 'node_modules' || entry.name === '.git') continue;
         const full = path.join(dir, entry.name);
@@ -252,27 +253,27 @@ function listDirectory(dir: string, root: string, recursive: boolean, depth = 0)
         const prefix = entry.isDirectory() ? 'd ' : 'f ';
         results.push(prefix + rel);
         if (recursive && entry.isDirectory() && depth < 5) {
-            results.push(...listDirectory(full, root, true, depth + 1));
+            results.push(...await listDirectoryAsync(full, root, true, depth + 1));
         }
     }
     return results;
 }
 
-function searchInFiles(dir: string, root: string, query: string, filePattern?: string): string[] {
+async function searchInFilesAsync(dir: string, root: string, query: string, filePattern?: string): Promise<string[]> {
     const results: string[] = [];
     const regex = new RegExp(query, 'gi');
 
-    function walk(current: string) {
-        const entries = fs.readdirSync(current, { withFileTypes: true });
+    async function walk(current: string) {
+        const entries = await fsp.readdir(current, { withFileTypes: true });
         for (const entry of entries) {
             if (entry.name === 'node_modules' || entry.name === '.git') continue;
             const full = path.join(current, entry.name);
             if (entry.isDirectory()) {
-                walk(full);
+                await walk(full);
             } else {
                 if (filePattern && !matchGlob(entry.name, filePattern)) continue;
                 try {
-                    const content = fs.readFileSync(full, 'utf-8');
+                    const content = await fsp.readFile(full, 'utf-8');
                     const lines = content.split('\n');
                     for (let i = 0; i < lines.length; i++) {
                         if (regex.test(lines[i])) {
@@ -289,7 +290,7 @@ function searchInFiles(dir: string, root: string, query: string, filePattern?: s
             if (results.length >= 50) return;
         }
     }
-    walk(dir);
+    await walk(dir);
     return results;
 }
 

@@ -1,4 +1,4 @@
-import { Component } from '@angular/core';
+import { Component, ChangeDetectionStrategy } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { Router } from '@angular/router';
@@ -10,6 +10,7 @@ import { ApiService, type RepoTarget } from '../../services/api.service';
   imports: [CommonModule, FormsModule],
   templateUrl: './new-run.component.html',
   styleUrls: ['./new-run.component.scss'],
+  changeDetection: ChangeDetectionStrategy.OnPush,
 })
 export class NewRunComponent {
   systemName = '';

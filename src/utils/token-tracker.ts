@@ -99,6 +99,11 @@ class TokenTracker {
     private _refreshCallback: (() => void) | null = null;
     private _refreshTimer: ReturnType<typeof setTimeout> | null = null;
     private static readonly REFRESH_DEBOUNCE_MS = 3_000;
+    /** Timer for periodically flushing the full JSON snapshot (Plan 26-11). */
+    private _jsonFlushTimer: ReturnType<typeof setTimeout> | null = null;
+    private static readonly JSON_FLUSH_INTERVAL_MS = 10_000;
+    /** Track whether a full JSON flush is pending (Plan 26-11). */
+    private _jsonFlushPending = false;
 
     // ── Persistence API ─────────────────────────────────────────────────
 
@@ -126,7 +131,24 @@ class TokenTracker {
     getSystemName(): string { return this._systemName; }
     getRunStatus(): RunStatus { return this._runStatus; }
 
-    /** Flush the JSON snapshot to disk immediately (no-op if persistence is disabled). */
+    /**
+     * Append a single record as a JSONL line (Plan 26-11).
+     * O(1) per call instead of O(n) full-ledger rewrite.
+     */
+    private appendJsonlRecord(record: TokenCallRecord): void {
+        if (!this._outputPath) return;
+        try {
+            const jsonlPath = path.join(this._outputPath, 'token-usage.jsonl');
+            fs.appendFileSync(jsonlPath, JSON.stringify(record) + '\n', 'utf-8');
+        } catch (e) {
+            log.warn(`Failed to append JSONL record: ${(e as Error).message}`);
+        }
+    }
+
+    /**
+     * Flush the full JSON snapshot to disk (debounced, Plan 26-11).
+     * Kept for backward compatibility with consumers that read token-usage.json.
+     */
     private saveJsonSnapshot(): void {
         if (!this._outputPath) return;
         try {
@@ -135,6 +157,23 @@ class TokenTracker {
         } catch (e) {
             log.warn(`Failed to save JSON snapshot: ${(e as Error).message}`);
         }
+    }
+
+    /**
+     * Schedule a debounced full JSON flush (Plan 26-11).
+     * The JSONL file has all records immediately; the full JSON is written
+     * at most once per JSON_FLUSH_INTERVAL_MS for backward compatibility.
+     */
+    private scheduleJsonFlush(): void {
+        this._jsonFlushPending = true;
+        if (this._jsonFlushTimer) return; // already scheduled
+        this._jsonFlushTimer = setTimeout(() => {
+            this._jsonFlushTimer = null;
+            if (this._jsonFlushPending) {
+                this._jsonFlushPending = false;
+                this.saveJsonSnapshot();
+            }
+        }, TokenTracker.JSON_FLUSH_INTERVAL_MS);
     }
 
     /** Schedule a debounced HTML report refresh. */
@@ -170,8 +209,10 @@ class TokenTracker {
             `${record.agentId} [${record.model}] ${record.phase}: `
             + `in=${record.inputTokens} out=${record.outputTokens} total=${record.totalTokens}`,
         );
-        // Persist to disk after every call for crash safety
-        this.saveJsonSnapshot();
+        // Plan 26-11: append a single JSONL line (O(1)) for crash safety,
+        // and schedule a debounced full JSON flush for backward compat.
+        this.appendJsonlRecord(record);
+        this.scheduleJsonFlush();
         this.scheduleRefresh();
     }
 
@@ -352,6 +393,8 @@ class TokenTracker {
     /** Clear all tracked data and persistence config (call at run start). */
     reset(): void {
         if (this._refreshTimer) { clearTimeout(this._refreshTimer); this._refreshTimer = null; }
+        if (this._jsonFlushTimer) { clearTimeout(this._jsonFlushTimer); this._jsonFlushTimer = null; }
+        this._jsonFlushPending = false;
         this.ledger = [];
         this._invocations.clear();
         this._nextInvocationId = 0;

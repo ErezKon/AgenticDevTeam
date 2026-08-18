@@ -11,7 +11,7 @@
  */
 import * as fs from 'fs';
 import * as path from 'path';
-import { type ExecFn, defaultExec as sharedDefaultExec, isToolAvailable as isToolOnPath } from '../utils/shell-exec';
+import { type AsyncExecFn, defaultExecAsync as sharedDefaultExecAsync, isToolAvailableAsync as isToolOnPathAsync } from '../utils/shell-exec';
 import * as crypto from 'crypto';
 import { getLogger } from '../utils/logger';
 import { mdTable } from '../utils/markdown-table';
@@ -229,11 +229,11 @@ export function scanForSecrets(workspacePath: string): SecurityFinding[] {
 
 // ─── Dependency audit ───────────────────────────────────────────────────────
 
-// ExecFn, defaultExec, isToolOnPath imported from ../utils/shell-exec
+// AsyncExecFn, defaultExecAsync, isToolOnPathAsync imported from ../utils/shell-exec
 
-/** Security-gates wrapper: 10 MB buffer, CI env. */
-function defaultExec(cmd: string, opts: { cwd: string; timeout: number }): string {
-    return sharedDefaultExec(cmd, opts, 10 * 1024 * 1024, { CI: 'true' });
+/** Security-gates async wrapper: 10 MB buffer, CI env. */
+async function defaultExecAsync(cmd: string, opts: { cwd: string; timeout: number }): Promise<string> {
+    return sharedDefaultExecAsync(cmd, opts, 10 * 1024 * 1024, { CI: 'true' });
 }
 
 /** Audit commands by stack. All soft — missing tool => skip, never fail. */
@@ -289,13 +289,13 @@ function parseNpmAuditJson(jsonStr: string): SecurityFinding[] {
  * Per-stack dependency audit. Every command is optional; a missing tool
  * yields no findings.
  */
-export function auditDependencies(
+export async function auditDependencies(
     workspacePath: string,
-    opts?: { exec?: ExecFn },
-): SecurityFinding[] {
+    opts?: { exec?: AsyncExecFn },
+): Promise<SecurityFinding[]> {
     const findings: SecurityFinding[] = [];
     const stacks = detectStacks(workspacePath);
-    const exec = opts?.exec ?? defaultExec;
+    const exec = opts?.exec ?? defaultExecAsync;
 
     for (const stack of stacks) {
         const auditInfo = AUDIT_COMMANDS[stack];
@@ -305,13 +305,13 @@ export function auditDependencies(
         if (auditInfo.deepOnly && !SECURITY_DEEP_AUDIT) continue;
 
         // Check if the tool is on PATH
-        if (!isToolOnPath(auditInfo.tool, workspacePath, exec)) {
+        if (!await isToolOnPathAsync(auditInfo.tool, workspacePath, exec)) {
             log.info(`Audit tool '${auditInfo.tool}' not on PATH — skipping ${stack} audit`);
             continue;
         }
 
         try {
-            const output = exec(auditInfo.cmd, { cwd: workspacePath, timeout: 300_000 });
+            const output = await exec(auditInfo.cmd, { cwd: workspacePath, timeout: 300_000 });
 
             // Parse stack-specific output
             if (stack === 'node') {
@@ -433,10 +433,10 @@ export function checkLicences(workspacePath: string): SecurityFinding[] {
  * Returns findings and a pass/fail flag. With all flags at their defaults
  * the gate is report-only (does not block the pipeline).
  */
-export function runSecurityGates(
+export async function runSecurityGates(
     workspacePath: string,
-    opts?: { exec?: ExecFn },
-): SecurityReport {
+    opts?: { exec?: AsyncExecFn },
+): Promise<SecurityReport> {
     if (!SECURITY_GATES_ENABLED) {
         log.info('Security gates disabled (SECURITY_GATES_ENABLED=false)');
         return { findings: [], passed: true };
@@ -462,7 +462,7 @@ export function runSecurityGates(
 
     // 2. Dependency audit
     try {
-        const auditFindings = auditDependencies(workspacePath, opts);
+        const auditFindings = await auditDependencies(workspacePath, opts);
         findings.push(...auditFindings);
         if (auditFindings.length > 0) {
             log.warn(`Dependency audit: ${auditFindings.length} finding(s)`);

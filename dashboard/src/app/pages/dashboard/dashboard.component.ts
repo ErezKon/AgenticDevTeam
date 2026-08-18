@@ -1,4 +1,4 @@
-import { Component, OnInit, OnDestroy } from '@angular/core';
+import { Component, OnInit, OnDestroy, ChangeDetectionStrategy, ChangeDetectorRef } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { RouterLink } from '@angular/router';
 import { Subscription } from 'rxjs';
@@ -10,6 +10,7 @@ import { ApiService, AgentEntry, WsMessage } from '../../services/api.service';
   imports: [CommonModule, RouterLink],
   templateUrl: './dashboard.component.html',
   styleUrls: ['./dashboard.component.scss'],
+  changeDetection: ChangeDetectionStrategy.OnPush,
 })
 export class DashboardComponent implements OnInit, OnDestroy {
   agents: AgentEntry[] = [];
@@ -22,15 +23,14 @@ export class DashboardComponent implements OnInit, OnDestroy {
   totalCalls = 0;
   private sub?: Subscription;
 
-  constructor(private api: ApiService) {}
+  constructor(private api: ApiService, private cdr: ChangeDetectorRef) {}
 
   ngOnInit() {
-    this.api.getAgents().subscribe(agents => this.agents = agents);
-    this.api.getActiveRuns().subscribe(runs => this.activeRuns = runs);
+    this.api.getAgents().subscribe(agents => { this.agents = agents; this.cdr.markForCheck(); });
+    this.api.getActiveRuns().subscribe(runs => { this.activeRuns = runs; this.cdr.markForCheck(); });
 
     this.sub = this.api.connectWebSocket().subscribe(msg => {
-      this.events.unshift(msg);
-      if (this.events.length > 200) this.events.length = 200;
+      this.events = [msg, ...this.events].slice(0, 200);
 
       // Track derived state from event types
       if (msg.event === 'phase:start' && msg.data?.phase) {
@@ -46,12 +46,18 @@ export class DashboardComponent implements OnInit, OnDestroy {
       }
       // Refresh active runs on HITL events
       if (msg.event === 'hitl:waiting' || msg.event === 'run:started') {
-        this.api.getActiveRuns().subscribe(runs => this.activeRuns = runs);
+        this.api.getActiveRuns().subscribe(runs => { this.activeRuns = runs; this.cdr.markForCheck(); });
       }
+      this.cdr.markForCheck();
     });
   }
 
   ngOnDestroy() { this.sub?.unsubscribe(); }
+
+  // ── trackBy functions (Plan 26-11) ─────────────────────────────────────
+  trackByAgent(_i: number, agent: AgentEntry): string { return agent.tag; }
+  trackByRun(_i: number, run: any): string { return run.threadId; }
+  trackByEvent(_i: number, msg: WsMessage): number { return msg.timestamp ?? _i; }
 
   getColor(code: number): string {
     return `hsl(${(code * 17) % 360}, 70%, 60%)`;

@@ -314,7 +314,7 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                 log.info(`Product verification: artifacts=${productVerifyReport.artifacts.filter(a => a.passed).length}/${productVerifyReport.artifacts.length}, unresolved refs=${productVerifyReport.resolveIssues.length}`);
             } catch (pvErr: any) { log.warn(`Product verification error (non-fatal): ${pvErr.message}`); }
 
-            gateReport = runQualityGates(worktreeWorkspace, { timeoutMs: PR_TEST_TIMEOUT_MS, installTimeoutMs: PR_TEST_INSTALL_TIMEOUT_MS, productVerify: productVerifyReport });
+            gateReport = await runQualityGates(worktreeWorkspace, { timeoutMs: PR_TEST_TIMEOUT_MS, installTimeoutMs: PR_TEST_INSTALL_TIMEOUT_MS, productVerify: productVerifyReport });
 
             if (gateReport && gateReport.results.length > 0 && !gateReport.passed) {
                 const failingSteps = gateReport.results.filter(r => !r.passed && !r.skipped).map(r => `${r.step}: ${r.output.slice(0, 200)}`);
@@ -352,7 +352,7 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                         }
 
                         try {
-                            gateReport = runQualityGates(worktreeWorkspace, { timeoutMs: PR_TEST_TIMEOUT_MS, installTimeoutMs: PR_TEST_INSTALL_TIMEOUT_MS });
+                            gateReport = await runQualityGates(worktreeWorkspace, { timeoutMs: PR_TEST_TIMEOUT_MS, installTimeoutMs: PR_TEST_INSTALL_TIMEOUT_MS });
                             if (gateReport?.passed) { log.info(`Quality gates passed after repair attempt ${repair + 1}`); allTranscript.push(msg('conductor', `Quality gates passed after repair attempt ${repair + 1}`)); break; }
                         } catch (gateErr: any) { log.warn(`Quality gate re-run failed: ${gateErr.message}`); }
                     }
@@ -366,7 +366,7 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
         // ── 1b. Gate integrity: tamper detection ─────────────────────────
         let integrityFindings: TamperFinding[] = [];
         if (GATE_INTEGRITY_MODE !== 'off' && branchBaseline) {
-            const result = runIntegrityGate(worktreeWorkspace, branchBaseline, branchName, projectSlug, gateReport, outputPath, gitContext);
+            const result = await runIntegrityGate(worktreeWorkspace, branchBaseline, branchName, projectSlug, gateReport, outputPath, gitContext);
             integrityFindings = result.integrityFindings;
             gateReport = result.gateReport;
             if (integrityFindings.length > 0) {

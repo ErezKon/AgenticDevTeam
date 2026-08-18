@@ -3,10 +3,17 @@
  *
  * Consolidates the duplicated ExecFn type, safeChildEnv, defaultExec,
  * and isToolAvailable from quality-gates, security-gates, and test-runner.
+ *
+ * Plan 26-11: Added async variants (`AsyncExecFn`, `defaultExecAsync`,
+ * `isToolAvailableAsync`) that use `child_process.execFile` with promises
+ * to stop blocking the Node.js event loop during gate execution.
  */
-import { execSync } from 'child_process';
+import { execSync, execFile } from 'child_process';
+import { promisify } from 'util';
 import * as fs from 'fs';
 import * as path from 'path';
+
+const execFileAsync = promisify(execFile);
 
 // ─── Safe environment allowlist ─────────────────────────────────────────────
 
@@ -74,6 +81,50 @@ export function isToolAvailable(
     }
     try {
         exec(`which ${tool}`, { cwd, timeout: 10_000 });
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+// ─── Async variants (Plan 26-11) ────────────────────────────────────────────
+
+/** Async injectable exec seam — returns a promise instead of blocking. */
+export type AsyncExecFn = (cmd: string, opts: { cwd: string; timeout: number }) => Promise<string>;
+
+/**
+ * Async exec via `execFile` with `/bin/sh -c` — merges stderr into stdout.
+ * Does NOT block the event loop.
+ */
+export async function defaultExecAsync(
+    cmd: string,
+    opts: { cwd: string; timeout: number },
+    maxBuffer: number = 10 * 1024 * 1024,
+    envExtras: Record<string, string> = { CI: 'true' },
+): Promise<string> {
+    const { stdout } = await execFileAsync('/bin/sh', ['-c', cmd + ' 2>&1'], {
+        cwd: opts.cwd,
+        encoding: 'utf-8',
+        timeout: opts.timeout,
+        maxBuffer,
+        env: safeChildEnv(envExtras),
+    });
+    return stdout;
+}
+
+/**
+ * Async tool availability check — does NOT block the event loop.
+ */
+export async function isToolAvailableAsync(
+    tool: string,
+    cwd: string,
+    exec: AsyncExecFn = defaultExecAsync,
+): Promise<boolean> {
+    if (tool === './gradlew') {
+        return fs.existsSync(path.join(cwd, 'gradlew'));
+    }
+    try {
+        await exec(`which ${tool}`, { cwd, timeout: 10_000 });
         return true;
     } catch {
         return false;

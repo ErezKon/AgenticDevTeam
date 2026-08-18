@@ -104,7 +104,7 @@ src/
     context-builder.ts             # Compact context summarizers with char budgets
     quality-gates.ts               # Multi-language build/lint/test gates
     security-gates.ts              # Secret scan + dependency audit + licence check
-    workspace-sync.ts              # Git sync after squash merges
+    workspace-sync.ts              # Git sync after squash merges; Plan 26-11: async fetchWithRetry/syncWorkspaceToBranch with non-blocking sleep()
     assignment-policy.ts           # Prevent re-dispatch of completed assignments + sanitizeAssignmentStoryIds
     review-policy.ts               # Fail-closed review: ReviewOutcome, decideMerge, escalation, quorum (Sub-Plan 07)
     devops-verify.ts               # Real Docker build/run/health-check
@@ -169,7 +169,7 @@ src/
     devops/                        # DevOps agent
 
   tools/
-    fs/workspace-tools.ts          # Sandboxed read/write/edit/list/search (5 tools)
+    fs/workspace-tools.ts          # Sandboxed read/write/edit/list/search (5 tools); Plan 26-11: all handlers use fs/promises (non-blocking)
     git/git-tools.ts               # Git CLI tools (12 tools)
     shell/shell-tools.ts           # Guarded shell execution (1 tool)
     diagram/diagram-tools.ts       # Mermaid label sanitization
@@ -192,12 +192,12 @@ src/
     structured-output.ts           # JSON extraction + Zod validation + repair + content-block text extraction
     response-log.ts                # Full-response dumps (outputs/<run>/full-responses/*.json + index.jsonl)
     event-bus.ts                   # Typed singleton event bus (14 event types, incl. run:budget-stop, run:provider-stop)
-    token-tracker.ts               # Token consumption tracker (singleton)
+    token-tracker.ts               # Token consumption tracker (singleton); Plan 26-11: appends JSONL per call (O(1)), debounces full JSON flush every 10s
     token-callback.ts              # LangChain callback for token recording (two-tier provider lookup)
     token-usage-extractor.ts       # Shared usage normalisation (normaliseUsage/sumUsageMetadata) + per-invocation aggregation
     token-report.ts                # HTML + JSON token usage report generator
     cost.ts                        # USD cost estimation per model
-    run-snapshot.ts                # state.json + run-manifest.json writer + writePeriodicSnapshot()
+    run-snapshot.ts                # state.json + run-manifest.json writer + writePeriodicSnapshot(); Plan 26-11: debounced full snapshots (30s min interval) + immediate latest-phase.json marker
     git-exec.ts                    # Centralized git command execution (execFileSync, shellSplit, assertValidRef, redactSecrets)
     coding-conventions.ts          # Convention file resolution + deployment
     traceability.ts                # Requirements traceability matrix
@@ -206,7 +206,7 @@ src/
     fs-walk.ts                     # Shared filesystem walker (PRUNE_DIRS, SOURCE_EXTENSIONS, walkDir, collectFiles, isTestFile)
     source-graph.ts                # Import extraction + resolution + graph building + transitive reachability
     markdown-table.ts              # Shared mdTable() + mdSection() with automatic pipe-escaping
-    shell-exec.ts                  # Shared ExecFn type, safeChildEnv, defaultExec, isToolAvailable
+    shell-exec.ts                  # Shared ExecFn type, safeChildEnv, defaultExec/isToolAvailable; Plan 26-11: async AsyncExecFn, defaultExecAsync, isToolAvailableAsync (execFile + promises)
     branch-naming.ts               # Canonical slugify, systemBranch, featureBranch, projectSlugFromBranch, isSystemBranch
     artifact-writer.ts             # writeOutputFile + appendOutputLine for output-dir artifacts
     crash-handlers.ts              # flushTokenReportOnExit + installProcessHandlers (shared between cli.ts and index.ts)

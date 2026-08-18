@@ -55,7 +55,7 @@ export const qaNode = phaseNode('qa', qaLog, { haltCheck: true }, async (state, 
     } catch {
         qaGitRoot = state.workspacePath;
     }
-    const qaSyncResult = syncWorkspaceToBranch(qaGitRoot, state.systemBranch, state.gitContext);
+    const qaSyncResult = await syncWorkspaceToBranch(qaGitRoot, state.systemBranch, state.gitContext);
     qaLog.info(`Workspace synced to origin/${state.systemBranch}: ${qaSyncResult.details}`);
 
     // Deploy only the convention files QA agents need (fixes A11)
@@ -196,7 +196,7 @@ export const qaNode = phaseNode('qa', qaLog, { haltCheck: true }, async (state, 
 
     // Commit QA-generated files via the shared helper (includes sync + retry)
     const systemSlug = path.basename(state.workspacePath);
-    commitAndPushArtifacts(
+    await commitAndPushArtifacts(
         state.workspacePath,
         `[${systemSlug}]-chore: QA unit test files`,
         state.gitContext,
@@ -211,7 +211,7 @@ export const qaNode = phaseNode('qa', qaLog, { haltCheck: true }, async (state, 
     const executedReports: ExecutedTestReport[] = [];
     for (const root of roots) {
         try {
-            const result = runTests(root, {
+            const result = await runTests(root, {
                 timeoutMs: QA_TEST_TIMEOUT_MS,
                 withCoverage: true,
                 reportDir,
@@ -313,7 +313,7 @@ export const qaNode = phaseNode('qa', qaLog, { haltCheck: true }, async (state, 
             verificationErrors.push({ stage: 'product-verify', message: pvErr.message });
         }
 
-        const gateReport = runQualityGates(state.workspacePath, {
+        const gateReport = await runQualityGates(state.workspacePath, {
             productVerify: productVerifyReport,
         });
         latestGateReport = gateReport;
@@ -341,7 +341,7 @@ export const qaNode = phaseNode('qa', qaLog, { haltCheck: true }, async (state, 
 
     // ── Security gate (secret scan, dependency audit, licence check)
     try {
-        const securityReport = runSecurityGates(state.workspacePath);
+        const securityReport = await runSecurityGates(state.workspacePath);
 
         writeArtifact({
             agentId: 'security-gates', colorCode: 196, workspacePath: state.workspacePath, outputPath: state.outputPath,

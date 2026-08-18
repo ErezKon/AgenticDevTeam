@@ -2,9 +2,12 @@
  * Git helpers used by pipeline nodes — branch detection, commit+push,
  * lockfile sync, and Dockerfile SSL patching.
  */
-import { execSync } from 'child_process';
+import { execSync, execFile } from 'child_process';
+import { promisify } from 'util';
 import * as path from 'path';
 import * as fs from 'fs';
+
+const execFileAsync = promisify(execFile);
 import { getLogger } from '../../utils/logger';
 import { gitExec, gitPush, findGitRoot } from '../../utils/git-exec';
 import { syncWorkspaceToBranch } from '../workspace-sync';
@@ -47,12 +50,12 @@ export function detectDefaultBranch(workspacePath: string): string {
  * Syncs with origin before committing, and retries the push once after
  * a sync if the first push fails (non-fast-forward after squash merges).
  */
-export function commitAndPushArtifacts(
+export async function commitAndPushArtifacts(
     workspacePath: string,
     commitMessage: string,
     gitContext?: GitContext | null,
     logger?: ReturnType<typeof getLogger>,
-): void {
+): Promise<void> {
     // Resolve git root for sync operations
     let gitRoot: string;
     try {
@@ -64,7 +67,7 @@ export function commitAndPushArtifacts(
     // Sync before committing to avoid non-fast-forward pushes
     const currentBranch = gitExec(gitRoot, 'rev-parse --abbrev-ref HEAD');
     if (currentBranch && !currentBranch.startsWith('Error:')) {
-        syncWorkspaceToBranch(gitRoot, currentBranch, gitContext);
+        await syncWorkspaceToBranch(gitRoot, currentBranch, gitContext);
     }
 
     gitExec(workspacePath, 'add .');
@@ -91,7 +94,7 @@ export function commitAndPushArtifacts(
         if (pushResult.startsWith('Error:')) {
             // Retry once: sync again then push
             logger?.warn?.(`Push failed, retrying after sync: ${pushResult}`);
-            syncWorkspaceToBranch(gitRoot, currentBranch, gitContext);
+            await syncWorkspaceToBranch(gitRoot, currentBranch, gitContext);
             const retryResult = gitPush(workspacePath, currentBranch, gitContext);
             if (retryResult.startsWith('Error:')) {
                 logger?.error?.(`Failed to push artifacts after retry: ${retryResult}`);
@@ -111,27 +114,26 @@ export function commitAndPushArtifacts(
  * If package.json exists but the lockfile is missing or stale, run `npm install`
  * to regenerate it, then commit + push the result.
  */
-export function ensureNodeLockfileSync(
+export async function ensureNodeLockfile(
     workspacePath: string,
     _systemBranch: string,
     gitContext?: GitContext | null,
     logger?: ReturnType<typeof getLogger>,
-): void {
+): Promise<void> {
     const pkgPath = path.join(workspacePath, 'package.json');
     if (!fs.existsSync(pkgPath)) return; // Not a Node.js project
 
     logger?.info?.('Ensuring package-lock.json is in sync with package.json...');
 
     try {
-        // Run npm install to regenerate lockfile
+        // Run npm install to regenerate lockfile (async — Plan 26-11)
         // Use --no-audit --no-fund to reduce noise
-        execSync('npm install --no-audit --no-fund', {
+        await execFileAsync('/bin/sh', ['-c', 'npm install --no-audit --no-fund'], {
             cwd: workspacePath,
             timeout: 300_000, // 5 min
             encoding: 'utf-8',
             maxBuffer: 1024 * 1024 * 5,
             env: { ...process.env, CI: 'true' },
-            stdio: ['pipe', 'pipe', 'pipe'],
         });
 
         // Check if lockfile was created/updated

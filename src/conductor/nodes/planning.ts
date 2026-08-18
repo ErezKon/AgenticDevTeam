@@ -90,7 +90,7 @@ export const codebaseAnalyzerNode = phaseNode('codebase-analyzer', analyzerLog, 
     });
 
     const systemSlug = path.basename(state.workspacePath);
-    commitAndPushArtifacts(
+    await commitAndPushArtifacts(
         state.workspacePath,
         `[${systemSlug}]-docs: codebase analyzer mission report`,
         state.gitContext,
@@ -171,7 +171,7 @@ export const architectNode = phaseNode('architect', archLog, {}, async (state, {
     });
 
     const systemSlug = path.basename(state.workspacePath);
-    commitAndPushArtifacts(
+    await commitAndPushArtifacts(
         state.workspacePath,
         `[${systemSlug}]-docs: architect mission report`,
         state.gitContext,
@@ -240,7 +240,7 @@ export const productManagerNode = phaseNode('product-manager', pmLog, {}, async 
     });
 
     const systemSlug = path.basename(state.workspacePath);
-    commitAndPushArtifacts(
+    await commitAndPushArtifacts(
         state.workspacePath,
         `[${systemSlug}]-docs: product manager mission report`,
         state.gitContext,
@@ -308,7 +308,7 @@ export const dbaNode = phaseNode('dba', dbaLog, {}, async (state, { rerunUpdate 
     });
 
     const systemSlug = path.basename(state.workspacePath);
-    commitAndPushArtifacts(
+    await commitAndPushArtifacts(
         state.workspacePath,
         `[${systemSlug}]-docs: DBA mission report`,
         state.gitContext,
@@ -441,7 +441,7 @@ export const teamLeaderNode = phaseNode('team-leader', tlLog, {}, async (state, 
     });
 
     const systemSlug = path.basename(state.workspacePath);
-    commitAndPushArtifacts(
+    await commitAndPushArtifacts(
         state.workspacePath,
         `[${systemSlug}]-docs: team leader mission report`,
         state.gitContext,

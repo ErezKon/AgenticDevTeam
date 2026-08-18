@@ -160,7 +160,7 @@ export const developmentNode = phaseNode('development', devLog, { haltCheck: tru
     } catch {
         gitRoot = state.workspacePath;
     }
-    const syncResult = syncWorkspaceToBranch(gitRoot, state.systemBranch, state.gitContext);
+    const syncResult = await syncWorkspaceToBranch(gitRoot, state.systemBranch, state.gitContext);
     devLog.info(`Workspace synced to origin/${state.systemBranch}: ${syncResult.details}`);
 
     const lsFiles = gitExec(gitRoot, 'ls-files');

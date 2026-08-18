@@ -29,7 +29,7 @@ import { emitRunEvent } from '../../utils/event-bus';
 import type { TokenCallRecord } from '../../utils/token-tracker';
 import { phaseNode, msg } from './_guards';
 import { invokeAgent } from './_invoke';
-import { ensureNodeLockfileSync, patchDockerfilesSsl, commitAndPushArtifacts } from './_git-helpers';
+import { ensureNodeLockfile, patchDockerfilesSsl, commitAndPushArtifacts } from './_git-helpers';
 import type { ProjectStateType } from '../state';
 import type { PhaseName, TranscriptMessage, Bug } from '../../agents/_shared/base-schemas';
 
@@ -46,11 +46,11 @@ export const devopsNode = phaseNode('devops', opsLog, { haltCheck: true }, async
     } catch {
         devopsGitRoot = state.workspacePath;
     }
-    const devopsSyncResult = syncWorkspaceToBranch(devopsGitRoot, state.systemBranch, state.gitContext);
+    const devopsSyncResult = await syncWorkspaceToBranch(devopsGitRoot, state.systemBranch, state.gitContext);
     opsLog.info(`Workspace synced to origin/${state.systemBranch}: ${devopsSyncResult.details}`);
 
     // ── Ensure Node.js lockfile is in sync before DevOps
-    ensureNodeLockfileSync(state.workspacePath, state.systemBranch, state.gitContext, opsLog);
+    await ensureNodeLockfile(state.workspacePath, state.systemBranch, state.gitContext, opsLog);
 
     // Deploy only the convention files DevOps agent needs (fixes A11)
     const devopsConventionFiles = resolveConventionFiles([], state.techStack);
@@ -180,7 +180,7 @@ export const devopsNode = phaseNode('devops', opsLog, { haltCheck: true }, async
 
     // Commit DevOps-generated files via the shared helper (includes sync + retry)
     const devopsSlug = path.basename(state.workspacePath);
-    commitAndPushArtifacts(
+    await commitAndPushArtifacts(
         state.workspacePath,
         `[${devopsSlug}]-chore: DevOps configuration files`,
         state.gitContext,

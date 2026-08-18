@@ -9,9 +9,12 @@
  */
 import * as fs from 'fs';
 import * as path from 'path';
-import { execSync } from 'child_process';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
 import { getLogger } from '../utils/logger';
 import { safeChildEnv } from '../utils/shell-exec';
+
+const execFileAsync = promisify(execFile);
 import type { StackRoot } from './quality-gates';
 
 const log = getLogger('[TestRunner]', 199);
@@ -305,7 +308,7 @@ export interface RunTestsOptions {
  *
  * Returns an `ExecutedTestReport` — the authoritative test signal.
  */
-export function runTests(root: StackRoot, opts: RunTestsOptions): ExecutedTestReport {
+export async function runTests(root: StackRoot, opts: RunTestsOptions): Promise<ExecutedTestReport> {
     const { timeoutMs, withCoverage, reportDir } = opts;
     const rootDir = root.dir;
 
@@ -330,16 +333,17 @@ export function runTests(root: StackRoot, opts: RunTestsOptions): ExecutedTestRe
     let exitCode = 0;
 
     try {
-        stdout = execSync(fullCommand, {
+        const result = await execFileAsync('/bin/sh', ['-c', fullCommand], {
             cwd: rootDir,
             timeout: timeoutMs,
             maxBuffer: 10 * 1024 * 1024,
             env: safeChildEnv({ CI: 'true', FORCE_COLOR: '0', NODE_ENV: 'test' }),
             encoding: 'utf-8',
-            stdio: ['pipe', 'pipe', 'pipe'],
         });
+        stdout = result.stdout;
+        stderr = result.stderr ?? '';
     } catch (err: any) {
-        exitCode = err.status ?? 1;
+        exitCode = err.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' ? 1 : (err.status ?? err.code ?? 1);
         stdout = err.stdout ?? '';
         stderr = err.stderr ?? '';
     }

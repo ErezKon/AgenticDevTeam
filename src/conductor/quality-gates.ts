@@ -24,7 +24,7 @@ import {
     QUALITY_GATE_MAX_ROOTS,
 } from '../config';
 import { PRUNE_DIRS as SHARED_PRUNE_DIRS } from '../utils/fs-walk';
-import { type ExecFn, defaultExec as sharedDefaultExec, isToolAvailable } from '../utils/shell-exec';
+import { type AsyncExecFn, defaultExecAsync as sharedDefaultExecAsync, isToolAvailableAsync } from '../utils/shell-exec';
 import type { TestReport } from '../agents/_shared/schemas/testing.schema';
 import type { Bug } from '../agents/_shared/schemas/bug.schema';
 import { makeGateBug } from './bug-factory';
@@ -346,11 +346,11 @@ const TOOL_EXECUTABLES: Record<StackKind, string> = {
 
 const REQUIRED_STEPS = new Set<GateStep>(['build', 'test']);
 
-// ─── Internal exec seam (delegates to shared shell-exec) ───────────────────
+// ─── Internal async exec seam (delegates to shared shell-exec) ──────────────
 
-/** Quality-gates wrapper: 5 MB buffer, CI + NODE_ENV=test env. */
-function defaultExec(cmd: string, opts: { cwd: string; timeout: number }): string {
-    return sharedDefaultExec(cmd, opts, 5 * 1024 * 1024, { CI: 'true', NODE_ENV: 'test' });
+/** Quality-gates async wrapper: 5 MB buffer, CI + NODE_ENV=test env. */
+async function defaultExecAsync(cmd: string, opts: { cwd: string; timeout: number }): Promise<string> {
+    return sharedDefaultExecAsync(cmd, opts, 5 * 1024 * 1024, { CI: 'true', NODE_ENV: 'test' });
 }
 
 // ─── Python install command adjustment ──────────────────────────────────────
@@ -402,16 +402,16 @@ function shouldSkipInstall(stack: StackKind, dir: string): boolean {
  * Plan 19-01: multi-root detection, script resolver for node (no --if-present),
  * typecheck step, honest aggregation with inconclusive state.
  */
-export function runQualityGates(
+export async function runQualityGates(
     workspacePath: string,
     opts?: {
         steps?: GateStep[];
         timeoutMs?: number;
         installTimeoutMs?: number;
-        exec?: ExecFn;
+        exec?: AsyncExecFn;
         productVerify?: ProductVerifyReport;
     },
-): GateReport {
+): Promise<GateReport> {
     if (!QUALITY_GATES_ENABLED) {
         log.info('Quality gates disabled (QUALITY_GATES_ENABLED=false)');
         return { stacks: [], roots: [], results: [], passed: true, inconclusive: false };
@@ -427,7 +427,7 @@ export function runQualityGates(
     const steps = opts?.steps ?? QUALITY_GATE_STEPS;
     const timeoutMs = opts?.timeoutMs ?? QUALITY_GATE_TIMEOUT_MS;
     const installTimeoutMs = opts?.installTimeoutMs ?? timeoutMs;
-    const exec = opts?.exec ?? defaultExec;
+    const exec = opts?.exec ?? defaultExecAsync;
     const results: GateResult[] = [];
 
     log.info(`Quality gates: roots=${roots.length} stacks=${stacks.join(',')} steps=${steps.join(',')}`);
@@ -445,7 +445,7 @@ export function runQualityGates(
         const tool = TOOL_EXECUTABLES[stack];
 
         // Check if the tool is available
-        const toolAvailable = isToolAvailable(tool, dir, exec);
+        const toolAvailable = await isToolAvailableAsync(tool, dir, exec);
         if (!toolAvailable) {
             log.warn(`Toolchain for '${stack}' not found (${tool} not on PATH)`);
             for (const step of steps) {
@@ -554,7 +554,7 @@ export function runQualityGates(
             const stepTimeout = step === 'install' ? installTimeoutMs : timeoutMs;
             const start = Date.now();
             try {
-                const output = exec(command, { cwd: dir, timeout: stepTimeout });
+                const output = await exec(command, { cwd: dir, timeout: stepTimeout });
                 results.push({
                     step,
                     command,

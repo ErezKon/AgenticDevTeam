@@ -200,7 +200,7 @@ export async function runStrongFixer(input: StrongFixerInput): Promise<StrongFix
         // Run quality gates after the fixer's changes
         let fixerGateReport: GateReport | null = null;
         try {
-            fixerGateReport = runQualityGates(worktreeWorkspace, {
+            fixerGateReport = await runQualityGates(worktreeWorkspace, {
                 timeoutMs: PR_TEST_TIMEOUT_MS,
                 installTimeoutMs: PR_TEST_INSTALL_TIMEOUT_MS,
             });

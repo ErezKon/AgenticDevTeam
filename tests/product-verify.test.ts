@@ -212,58 +212,58 @@ describe('quality gate aggregation', () => {
     beforeEach(() => { tempDir = makeTempDir(); });
     afterEach(() => { cleanupDir(tempDir); });
 
-    it('all-skipped ⇒ passed: false, inconclusive: true', () => {
+    it('all-skipped ⇒ passed: false, inconclusive: true', async () => {
         fs.writeFileSync(path.join(tempDir, 'go.mod'), 'module example.com/foo');
-        const fakeExec = (cmd: string, _opts: { cwd: string; timeout: number }): string => {
+        const fakeExec = async (cmd: string, _opts: { cwd: string; timeout: number }): Promise<string> => {
             if (cmd.startsWith('which ')) throw new Error('not found');
             return 'ok';
         };
 
-        const report = runQualityGates(tempDir, { exec: fakeExec });
+        const report = await runQualityGates(tempDir, { exec: fakeExec });
         expect(report.passed).toBe(false);
         expect(report.inconclusive).toBe(true);
     });
 
-    it('one real failing step ⇒ passed: false', () => {
+    it('one real failing step ⇒ passed: false', async () => {
         fs.writeFileSync(path.join(tempDir, 'package.json'), JSON.stringify({
             scripts: { build: 'tsc', test: 'jest' },
         }));
-        const fakeExec = (cmd: string, _opts: { cwd: string; timeout: number }): string => {
+        const fakeExec = async (cmd: string, _opts: { cwd: string; timeout: number }): Promise<string> => {
             if (cmd.startsWith('which ')) return '/usr/bin/npm';
             if (cmd === 'npm run build') throw new Error('build failed');
             return 'ok';
         };
 
-        const report = runQualityGates(tempDir, { exec: fakeExec });
+        const report = await runQualityGates(tempDir, { exec: fakeExec });
         expect(report.passed).toBe(false);
         expect(report.inconclusive).toBe(false);
     });
 
-    it('node root with no test script ⇒ test step mode=absent, report inconclusive=true', () => {
+    it('node root with no test script ⇒ test step mode=absent, report inconclusive=true', async () => {
         fs.writeFileSync(path.join(tempDir, 'package.json'), JSON.stringify({
             scripts: { build: 'tsc' },
         }));
-        const fakeExec = (cmd: string, _opts: { cwd: string; timeout: number }): string => {
+        const fakeExec = async (cmd: string, _opts: { cwd: string; timeout: number }): Promise<string> => {
             if (cmd.startsWith('which ')) return '/usr/bin/npm';
             return 'ok';
         };
 
-        const report = runQualityGates(tempDir, { exec: fakeExec });
+        const report = await runQualityGates(tempDir, { exec: fakeExec });
         const testResult = report.results.find(r => r.step === 'test');
         expect(testResult).toBeDefined();
         expect(testResult!.mode).toBe('absent');
         expect(report.inconclusive).toBe(true);
     });
 
-    it('missing toolchain with strict=true ⇒ passed: false', () => {
+    it('missing toolchain with strict=true ⇒ passed: false', async () => {
         fs.writeFileSync(path.join(tempDir, 'go.mod'), 'module example.com/foo');
-        const fakeExec = (cmd: string, _opts: { cwd: string; timeout: number }): string => {
+        const fakeExec = async (cmd: string, _opts: { cwd: string; timeout: number }): Promise<string> => {
             if (cmd.startsWith('which ')) throw new Error('not found');
             return 'ok';
         };
 
         // strict is true in our mock config
-        const report = runQualityGates(tempDir, { exec: fakeExec });
+        const report = await runQualityGates(tempDir, { exec: fakeExec });
         expect(report.passed).toBe(false);
     });
 });
