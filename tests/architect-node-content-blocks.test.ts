@@ -52,6 +52,7 @@ jest.mock('../src/utils/token-tracker', () => ({
         startInvocation: jest.fn().mockReturnValue('inv-0'),
         endInvocation: jest.fn(),
         recordContextChars: jest.fn(),
+        getRunSummary: jest.fn().mockReturnValue({ totalTokens: 0, totalCalls: 0, inputTokens: 0, outputTokens: 0, totalInputTokens: 0, totalOutputTokens: 0, totalCacheReadTokens: 0, totalCacheCreationTokens: 0, byAgent: [] }),
     },
 }));
 

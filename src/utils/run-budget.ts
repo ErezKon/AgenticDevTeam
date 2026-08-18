@@ -204,6 +204,18 @@ export function getEffectiveLimits(): {
     }
 }
 
+// ─── Run-level budget check (Plan 25) ───────────────────────────────────────
+
+/**
+ * Returns `true` when the run budget has reached the 'stop' level,
+ * indicating that the run should cease starting new work and route to finalize.
+ * Returns `false` when all budgets are disabled (level='ok').
+ */
+export function shouldStopRun(): boolean {
+    const { level } = getBudgetStatus();
+    return level === 'stop';
+}
+
 // ─── Invocation Budget Error (Plan 24, D1) ──────────────────────────────────
 
 /**

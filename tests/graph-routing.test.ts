@@ -90,6 +90,7 @@ function makeMinimalState(overrides: Partial<ProjectStateType> = {}): ProjectSta
         invariantViolations: [],
         _isContinuation: false,
         _resumePhase: null,
+        _stopReason: null,
         ...overrides,
     };
 }

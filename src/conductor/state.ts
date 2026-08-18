@@ -410,6 +410,16 @@ export const ProjectState = Annotation.Root({
         reducer: replaceReducer,
         default: () => null,
     }),
+
+    // ── Graceful Stop (Plan 25) ──────────────────────────────────────────
+
+    /** Reason the run was stopped gracefully (null if running or completed normally).
+     *  Used by `finalizeNode` for the manifest status and by continue-run to surface
+     *  the stop reason. Set when budget is exhausted or a provider failure is unrecoverable. */
+    _stopReason: Annotation<string | null>({
+        reducer: replaceReducer,
+        default: () => null,
+    }),
 });
 
 /** TypeScript type for the full Project State. */

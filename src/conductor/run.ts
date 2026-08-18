@@ -468,11 +468,15 @@ export async function continueRun(
     const threadId = opts.threadId ?? `continue-${Date.now()}`;
     const config = { configurable: { thread_id: threadId } };
 
-    // Inject the continuation flags into the state
+    // Inject the continuation flags into the state.
+    // Plan 25: clear cancelled and _stopReason from the previous run — the user
+    // is explicitly continuing, so budget/provider stops should not carry over.
     const initialState: Partial<ProjectStateType> = {
         ...reconstructedState as Partial<ProjectStateType>,
         _isContinuation: true,
         _resumePhase: resumePhase,
+        cancelled: false,
+        _stopReason: null,
     };
 
     // Append a ledger entry marking the continuation

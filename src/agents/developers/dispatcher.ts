@@ -17,7 +17,7 @@ import { getEffectiveLimits, getBudgetStatus } from '../../utils/run-budget';
 import { getDevAgent } from './registry';
 import { gitExec } from '../../utils/git-exec';
 import { classifyProviderFailure, isProviderLevelFailure } from '../../conductor/provider-failure';
-import { awaitProviderRecovery } from '../../utils/llm-throttle';
+import { awaitProviderRecovery, createProviderProbe } from '../../utils/llm-throttle';
 import { emitRunEvent } from '../../utils/event-bus';
 import type { Assignment, FileChange, ArtifactRef, TranscriptMessage, PhaseName, PullRequest, GitContext, TechDecision, UserStory, Task } from '../_shared/base-schemas';
 import type { TokenCallRecord } from '../../utils/token-tracker';
@@ -37,6 +37,9 @@ export interface DispatchResult {
     salvageBranches: string[];
     /** Branches deferred because they cannot plausibly finish within remaining wall time (Plan 24, D3). */
     branchesDeferred: number;
+    /** Set when a provider-level failure (billing, auth, quota) could not be recovered.
+     *  The run should stop gracefully and write a snapshot for continue-run. */
+    providerFailureKind: string | null;
 }
 
 /**
@@ -387,6 +390,9 @@ export async function dispatchDevelopers(
     // Flag: set when any branch returns pr-creation-failed — stops further branches
     let prCreationFailed = false;
 
+    // Plan 25: set when a provider-level failure cannot be recovered
+    let providerFailureKind: string | null = null;
+
     // Plan 24 D3: wall-clock-aware admission control
     let branchesDeferred = 0;
     const completedBranchDurationsMs: number[] = [];
@@ -498,6 +504,18 @@ export async function dispatchDevelopers(
                     });
                     break;
                 }
+                // Plan 25: stop dispatching if a provider failure could not be recovered
+                if (providerFailureKind) {
+                    const skipped = branches.slice(j);
+                    log.error(`Stopping dispatch — provider failure (${providerFailureKind}) unrecoverable. ${skipped.length} branch(es) not started.`);
+                    transcript.push({
+                        timestamp: new Date().toISOString(),
+                        agentId: 'dispatcher',
+                        phase: 'development' as PhaseName,
+                        message: `Provider failure (${providerFailureKind}) — ${skipped.length} branch(es) not dispatched: ${skipped.join(', ')}`,
+                    });
+                    break;
+                }
                 if (!getEffectiveLimits().allowNewBranchWorkflows) {
                     const undispatched = branches.slice(j);
                     log.error(`Budget exhausted — stopping dispatch. ${undispatched.length} branch(es) not started: ${undispatched.join(', ')}`);
@@ -606,9 +624,21 @@ export async function dispatchDevelopers(
                                 phase: 'development' as PhaseName,
                                 message: `Provider failure (${classification.kind}): branch assignments remain pending — ${classification.message}`,
                             });
-                            // Attempt recovery if pauseable
-                            if (classification.pauseable) {
-                                await awaitProviderRecovery();
+                            // Plan 25: fatal provider errors (auth, model-not-found) stop immediately
+                            if (classification.fatal) {
+                                providerFailureKind = classification.kind;
+                                emitRunEvent('run:provider-stop', { kind: classification.kind, message: classification.message });
+                                log.error(`Fatal provider error (${classification.kind}) — stopping dispatch for graceful shutdown`);
+                            } else if (classification.pauseable) {
+                                // Attempt recovery for pauseable failures (billing, quota)
+                                // Plan 25: pass a real probe so recovery actively checks the provider
+                                const recovered = await awaitProviderRecovery(createProviderProbe());
+                                if (!recovered) {
+                                    // Plan 25: recovery failed — stop dispatching gracefully
+                                    providerFailureKind = classification.kind;
+                                    emitRunEvent('run:provider-stop', { kind: classification.kind, message: classification.message, recoveryFailed: true });
+                                    log.error(`Provider recovery failed (${classification.kind}) — stopping dispatch for graceful shutdown`);
+                                }
                             }
                         } else {
                             log.error(`PR workflow failed: ${r.reason}`);
@@ -736,5 +766,6 @@ export async function dispatchDevelopers(
         completionEvidence: allCompletionEvidence,
         salvageBranches: allSalvageBranches,
         branchesDeferred,
+        providerFailureKind,
     };
 }

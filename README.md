@@ -144,6 +144,7 @@ flowchart LR
     QA -->|Failures & iterations left| BUG[Bug-fix<br/>Triage]
     BUG --> DEV
     DEVOPS --> FIN([Finalize<br/>Reports & Artifacts])
+    ARCH & PM & DBA & TL & DEV & QA & DEVOPS -.->|budget exhausted<br/>or provider failure| FIN
 
     style START fill:#22c55e,color:#fff
     style FIN fill:#3b82f6,color:#fff
@@ -155,15 +156,15 @@ flowchart LR
 | # | Phase | Node | What Happens |
 |---|-------|------|-------------|
 | 1 | **Intake** | `intakeNode` | Parse requirements document, create workspace and output directories, set run log path |
-| 2 | **Architect** | `architectNode` | Analyze requirements → produce architecture doc, component list, tech stack, and architecture diagram |
-| 3 | **Product Manager** | `productManagerNode` | Convert architecture + epics into user stories with acceptance criteria and granular tasks |
-| 4 | **DBA** | `dbaNode` | Design database — entities, relationships, indexes, migration scripts, and ERD diagram |
-| 5 | **Team Leader** | `teamLeaderNode` | Assign tasks to developers based on rank, specialty, dependencies, and complexity |
-| 6 | **Development** | `developmentNode` | Fan-out assignments to developer agents with topological sorting and concurrency control |
-| 7 | **QA** | `qaNode` | QA Lead creates test plan → QA Unit writes tests on a PR branch; the conductor runs them via test-runner parsers and parses the output independently → QA E2E drives Playwright browser tests |
-| 8 | **Bug-fix Triage** | `bugfixTriageNode` | Team Leader re-assigns critical/major bugs to developers (loops back to Development) |
-| 9 | **DevOps** | `devopsNode` | Generate Dockerfiles, docker-compose, K8s manifests; build images; run containers; health-check |
-| 10 | **Finalize** | `finalizeNode` | Write final mission report with summary, stats, and Mermaid diagrams; close run |
+| 2 | **Architect** | `architectNode` | Periodic snapshot + budget check → analyze requirements → produce architecture doc, component list, tech stack, and architecture diagram |
+| 3 | **Product Manager** | `productManagerNode` | Periodic snapshot + budget check → convert architecture + epics into user stories with acceptance criteria and granular tasks |
+| 4 | **DBA** | `dbaNode` | Periodic snapshot + budget check → design database — entities, relationships, indexes, migration scripts, and ERD diagram |
+| 5 | **Team Leader** | `teamLeaderNode` | Periodic snapshot + budget check → assign tasks to developers based on rank, specialty, dependencies, and complexity |
+| 6 | **Development** | `developmentNode` | Periodic snapshot + budget check → fan-out assignments to developer agents with topological sorting and concurrency control. Provider failures stop dispatch and set `_stopReason` for continue-run |
+| 7 | **QA** | `qaNode` | Periodic snapshot + budget check → QA Lead creates test plan → QA Unit writes tests on a PR branch; the conductor runs them via test-runner parsers and parses the output independently → QA E2E drives Playwright browser tests |
+| 8 | **Bug-fix Triage** | `bugfixTriageNode` | Periodic snapshot + budget check → Team Leader re-assigns critical/major bugs to developers (loops back to Development) |
+| 9 | **DevOps** | `devopsNode` | Periodic snapshot + budget check → generate Dockerfiles, docker-compose, K8s manifests; build images; run containers; health-check |
+| 10 | **Finalize** | `finalizeNode` | Tear down containers, write summary, token report (HTML + JSON), traceability matrix, state snapshot, run manifest. Uses `_stopReason` for `'budget-exhausted'` manifest status |
 
 ### Maintain-Mode Pipeline
 
@@ -443,7 +444,36 @@ In the New Run form, a **Project Hosting** dropdown appears when the run type is
 
 ## Continue Run
 
-When a run stops — due to a crash, error, budget exhaustion, or manual cancellation — the **Continue Run** feature lets you resume execution from the last completed phase instead of starting over.
+When a run stops — due to a crash, error, budget exhaustion, provider failure, or manual cancellation — the **Continue Run** feature lets you resume execution from the last completed phase instead of starting over.
+
+### Graceful Shutdown
+
+Budget exhaustion and provider failures are handled gracefully rather than crashing the process. Every pipeline node writes a **periodic state snapshot** at entry, ensuring a recent recovery point is always available.
+
+```mermaid
+flowchart TD
+    BUDGET[Budget limit<br/>reached] -->|shouldStopRun| CHECK[checkBudgetStop<br/>in next node]
+    PROVIDER[Provider billing<br/>or auth error] -->|awaitProviderRecovery<br/>fails| DISPATCH[Dispatcher sets<br/>providerFailureKind]
+    CHECK --> CANCEL[cancelled = true<br/>_stopReason set]
+    DISPATCH --> DEVNODE[developmentNode<br/>reads providerFailureKind]
+    DEVNODE --> CANCEL
+    CANCEL --> FIN[finalizeNode<br/>manifest: budget-exhausted]
+    FIN --> STATE[state.json saved<br/>with _stopReason]
+    STATE --> CONTINUE[Continue Run<br/>resumes from<br/>stopped phase]
+
+    style BUDGET fill:#f59e0b,color:#fff
+    style PROVIDER fill:#ef4444,color:#fff
+    style CANCEL fill:#ef4444,color:#fff
+    style CONTINUE fill:#22c55e,color:#fff
+```
+
+| Stop Trigger | Detection Point | Behavior |
+|-------------|----------------|----------|
+| Token / cost / wall-clock limit | `checkBudgetStop()` at the start of each node | Emits `run:budget-stop`, writes snapshot, returns `{ cancelled: true, _stopReason: 'budget-exhausted:...' }` |
+| Provider billing / quota error | Dispatcher recovery probe (`/models` endpoint) | `awaitProviderRecovery()` retries with backoff; on failure, `developmentNode` sets `cancelled` + `_stopReason` |
+| Provider auth / model-not-found | Dispatcher error classification | Immediate stop, `run:provider-stop` emitted |
+| HITL deny | Graph HITL interrupt | `cancelled = true` (standard cancel, no `_stopReason`) |
+| Crash / SIGINT | `run.ts` catch block | Best-effort crash snapshot with status `'crashed'` |
 
 ### How It Works
 
@@ -459,11 +489,11 @@ flowchart LR
     style RESUME fill:#22c55e,color:#fff
 ```
 
-1. **Collect** all artifacts from the stopped run's output directory (`state.json`, `run-manifest.json`, `ledger.jsonl`, token usage, git state)
+1. **Collect** all artifacts from the stopped run's output directory (`state.json`, `run-manifest.json`, `ledger.jsonl`, token usage, git state). Stopped runs are listed with their `stopReason` so the user can see *why* the run stopped (e.g. `budget-exhausted:cost`, `provider-billing`)
 2. **Reconstruct** a valid `ProjectState` from the collected artifacts, rehydrating secrets (tokens, keys) from the current `.env`
 3. **Resolve** which phase to resume from — the first phase without evidence of completion
 4. **Reconcile** the workspace git state — remove stale worktrees, lock files, branches; sync with remote
-5. **Resume** the pipeline from the resolved phase — completed nodes skip automatically
+5. **Resume** the pipeline from the resolved phase — `cancelled` and `_stopReason` are cleared; completed nodes skip automatically
 
 ### Reconstruction Confidence
 
@@ -486,7 +516,7 @@ Commands:
 ```
 
 Select option 4 to:
-1. See a list of stopped runs with status, phase, and timestamp
+1. See a list of stopped runs with status, phase, stop reason, and timestamp
 2. View a reconstruction summary (resume phase, confidence, warnings)
 3. Choose autonomous or human-in-the-loop mode
 4. Confirm and continue
@@ -494,7 +524,7 @@ Select option 4 to:
 ### REST API
 
 ```
-GET  /api/runs/stoppable           # List runs that can be continued
+GET  /api/runs/stoppable           # List runs that can be continued (includes stopReason)
 POST /api/run/continue             # Continue a stopped run
   Body: { outputPath, mode?, threadId? }
 ```
@@ -516,6 +546,16 @@ If a run stopped because PR creation failed (GitHub 503, network timeout, etc.),
 3. The retry only creates the GitHub PR — no dev agents are re-run (the branch code is already pushed)
 4. If the retry succeeds, the PR transitions to `open` and the run continues normally
 5. If the retry fails again, the run stops gracefully — continue-run can be used again later
+
+### Budget-Exhausted Run Recovery
+
+When a run stops due to budget exhaustion or a provider failure:
+
+1. The run's `state.json` contains `_stopReason` (e.g. `'budget-exhausted:cost'` or `'provider-billing'`)
+2. The run manifest has status `'budget-exhausted'` — `listStoppedRuns()` surfaces this to the CLI and REST API
+3. On continue-run, `cancelled` and `_stopReason` are cleared, and the pipeline resumes from the phase where it stopped
+4. If the original stop was due to budget, consider increasing `MAX_RUN_COST_USD` / `MAX_RUN_TOKENS` / `MAX_RUN_WALL_MS` before continuing
+5. If the original stop was due to a provider failure, resolve the billing/auth issue before continuing
 
 ### Limitations
 
@@ -653,6 +693,10 @@ Tier 1 (`llmOutput`) wins when present, so providers that populate both are neve
 
 `developmentNode` records one `DispatchRound` per round counting **merged** PRs only (`PR-SKIPPED-*` placeholders are recorded for every no-commit branch and are not progress). `detectUnrecoverable()` is evaluated at the top of `bugfixTriageNode` as well as in the acceptance gate, so a QA → triage → development loop that produces nothing halts after `UNRECOVERABLE_ZERO_ROUNDS` (default 2) rounds under `RUN_FAIL_POLICY=halt`.
 
+### Provider failure resilience
+
+Provider errors during development dispatch are classified by severity. Fatal errors (`auth`, `model-not-found`) stop immediately. Recoverable errors (`billing`, `quota`) trigger `awaitProviderRecovery()`, which probes the provider's `/models` endpoint with exponential backoff via `createProviderProbe()`. If recovery fails, the dispatcher sets `providerFailureKind` on its result, `developmentNode` translates it to `{ cancelled: true, _stopReason }`, and the pipeline finishes gracefully via `finalizeNode`. The run can be continued once the provider issue is resolved.
+
 ---
 
 ## Project Structure
@@ -670,6 +714,7 @@ AgenticDevTeam/
 │   │   ├── graph.ts                        # StateGraph wiring + HITL interrupts
 │   │   ├── pr-workflow.ts                  # PR lifecycle orchestrator (branch → review → merge)
 │   │   ├── agent-respawn.ts                # Deterministic handoff summary for fresh-context respawn
+│   │   ├── provider-failure.ts             # Provider error classification + ProviderRecoveryFailedError
 │   │   └── run.ts                          # Autonomous & HITL run helpers
 │   │
 │   ├── agents/
@@ -1147,7 +1192,9 @@ outputs/<system-name>-<timestamp>/
 │   ├── index.jsonl         # One summary line per invocation (flow at a glance)
 │   └── 001-architect-architect.json
 ├── codebase-analysis.md    # (maintain mode) Snapshot of the analysis for this run
-├── state.json              # Final ProjectState snapshot
+├── state.json              # Final ProjectState snapshot (also written periodically at each phase start)
+├── latest-phase.json       # Marker file indicating the most recent phase snapshot
+├── run-manifest.json       # Run summary with status (completed/failed/budget-exhausted/crashed)
 └── artifacts/              # Mission reports + diagrams
 ```
 

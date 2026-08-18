@@ -92,9 +92,9 @@ import { extractTokenUsageFromMessages } from '../utils/token-usage-extractor';
 import { generateTokenReport, refreshTokenReport } from '../utils/token-report';
 import { getThrottleStats, logThrottleStats } from '../utils/llm-throttle';
 import { estimateCost } from '../utils/cost';
-import { startRunBudget, getBudgetStatus, getEffectiveLimits } from '../utils/run-budget';
+import { startRunBudget, getBudgetStatus, getEffectiveLimits, shouldStopRun } from '../utils/run-budget';
 import { emitRunEvent, getAllEvents } from '../utils/event-bus';
-import { writeStateSnapshot, writeRunManifest, countPRsByStatus, extractPhaseTimeline, renderPhaseTimeline } from '../utils/run-snapshot';
+import { writeStateSnapshot, writeRunManifest, writePeriodicSnapshot, countPRsByStatus, extractPhaseTimeline, renderPhaseTimeline } from '../utils/run-snapshot';
 import { generateRunDiagnosis } from '../utils/run-diagnosis';
 import { buildTraceabilityReport, renderTraceabilityMarkdown } from '../utils/traceability';
 import { evaluateAcceptance, haltIfUnrecoverable, detectUnrecoverable, acceptanceBlockersToBugs, acceptanceReportToMarkdown } from './acceptance-gate';
@@ -626,6 +626,47 @@ function shouldSkipOnContinue(
     return false;
 }
 
+/**
+ * Plan 25: Check if the run should stop due to budget exhaustion.
+ * Returns a partial state update that sets `cancelled=true` and `_stopReason`
+ * if the budget has reached 'stop' level, or `null` if the run should continue.
+ *
+ * Call this at the start of each node (after the continue-run skip check).
+ * The graph's conditional edges already check `cancelled` and route to finalize.
+ */
+function checkBudgetStop(
+    state: ProjectStateType,
+    phase: PhaseName,
+    logger: ReturnType<typeof getLogger>,
+): Partial<ProjectStateType> | null {
+    if (!shouldStopRun()) return null;
+
+    const budget = getBudgetStatus();
+    const reason = `budget-exhausted:${budget.binding}`;
+    logger.warn(
+        `Budget exhausted (${budget.binding} at ${(budget.utilisation * 100).toFixed(1)}%) ` +
+        `— stopping run gracefully at phase "${phase}" for continue-run pickup`,
+    );
+    emitRunEvent('run:budget-stop', {
+        phase,
+        binding: budget.binding,
+        utilisation: budget.utilisation,
+        usedTokens: budget.usedTokens,
+        estCostUsd: budget.estCostUsd,
+        elapsedMs: budget.elapsedMs,
+    });
+
+    // Write a snapshot so continue-run has the latest state
+    writePeriodicSnapshot(state.outputPath, state, phase);
+
+    return {
+        phase,
+        cancelled: true,
+        _stopReason: reason,
+        transcript: [msg('conductor', phase, `Run stopped: budget exhausted (${budget.binding} at ${(budget.utilisation * 100).toFixed(1)}%)`)],
+    };
+}
+
 // ─── 1. Intake ──────────────────────────────────────────────────────────────
 
 const intakeLog = getLogger('[Intake]', 255);
@@ -934,6 +975,9 @@ export async function codebaseAnalyzerNode(state: ProjectStateType): Promise<Par
         return { phase: 'codebase-analyzer' as PhaseName };
     }
     emitRunEvent('phase:start', { phase: 'codebase-analyzer' });
+    writePeriodicSnapshot(state.outputPath, state, 'codebase-analyzer');
+    const budgetStop = checkBudgetStop(state, 'codebase-analyzer' as PhaseName, analyzerLog);
+    if (budgetStop) return budgetStop;
     const rerunUpdate = checkRerun(state, 'codebase-analyzer', analyzerLog);
     analyzerLog.info('Starting codebase analysis...');
     const apiKey = await getAccessToken();
@@ -1007,6 +1051,9 @@ export async function architectNode(state: ProjectStateType): Promise<Partial<Pr
         return { phase: 'architect' as PhaseName };
     }
     emitRunEvent('phase:start', { phase: 'architect' });
+    writePeriodicSnapshot(state.outputPath, state, 'architect');
+    const budgetStop = checkBudgetStop(state, 'architect' as PhaseName, archLog);
+    if (budgetStop) return budgetStop;
     const rerunUpdate = checkRerun(state, 'architect', archLog);
     archLog.info('Starting architecture phase...');
     const apiKey = await getAccessToken();
@@ -1097,6 +1144,9 @@ export async function productManagerNode(state: ProjectStateType): Promise<Parti
         return { phase: 'product-manager' as PhaseName };
     }
     emitRunEvent('phase:start', { phase: 'product-manager' });
+    writePeriodicSnapshot(state.outputPath, state, 'product-manager');
+    const budgetStop = checkBudgetStop(state, 'product-manager' as PhaseName, pmLog);
+    if (budgetStop) return budgetStop;
     const rerunUpdate = checkRerun(state, 'product-manager', pmLog);
     pmLog.info('Starting product management phase...');
     const apiKey = await getAccessToken();
@@ -1168,6 +1218,9 @@ export async function dbaNode(state: ProjectStateType): Promise<Partial<ProjectS
         return { phase: 'dba' as PhaseName };
     }
     emitRunEvent('phase:start', { phase: 'dba' });
+    writePeriodicSnapshot(state.outputPath, state, 'dba');
+    const budgetStop = checkBudgetStop(state, 'dba' as PhaseName, dbaLog);
+    if (budgetStop) return budgetStop;
     const rerunUpdate = checkRerun(state, 'dba', dbaLog);
     dbaLog.info('Starting database design phase...');
     const apiKey = await getAccessToken();
@@ -1239,6 +1292,9 @@ export async function teamLeaderNode(state: ProjectStateType): Promise<Partial<P
         return { phase: 'team-leader' as PhaseName };
     }
     emitRunEvent('phase:start', { phase: 'team-leader' });
+    writePeriodicSnapshot(state.outputPath, state, 'team-leader');
+    const budgetStop = checkBudgetStop(state, 'team-leader' as PhaseName, tlLog);
+    if (budgetStop) return budgetStop;
     const rerunUpdate = checkRerun(state, 'team-leader', tlLog);
     tlLog.info('Starting assignment phase...');
     const apiKey = await getAccessToken();
@@ -1389,6 +1445,9 @@ export async function developmentNode(state: ProjectStateType): Promise<Partial<
         return { phase: 'development' as PhaseName };
     }
     emitRunEvent('phase:start', { phase: 'development' });
+    writePeriodicSnapshot(state.outputPath, state, 'development');
+    const budgetStop = checkBudgetStop(state, 'development' as PhaseName, devLog);
+    if (budgetStop) return budgetStop;
     const haltUpdate = haltIfUnrecoverable(state, devLog, RUN_FAIL_POLICY);
     if (haltUpdate) return { ...haltUpdate, phase: 'development' as PhaseName };
     const rerunUpdate = checkRerun(state, 'development', devLog);
@@ -1491,6 +1550,30 @@ export async function developmentNode(state: ProjectStateType): Promise<Partial<
     }
     if (result.salvageBranches.length > 0) {
         devLog.warn(`${result.salvageBranches.length} branch(es) salvaged (not merged): ${result.salvageBranches.join(', ')}`);
+    }
+
+    // Plan 25: provider failure — stop gracefully so continue-run can pick up
+    if (result.providerFailureKind) {
+        const reason = `provider-${result.providerFailureKind}`;
+        devLog.error(`Provider failure (${result.providerFailureKind}) — routing to finalize for graceful shutdown`);
+        writePeriodicSnapshot(state.outputPath, state, 'development');
+        return {
+            ...rerunUpdate,
+            fileChanges: result.fileChanges,
+            artifacts: result.artifacts,
+            pullRequests: result.pullRequests,
+            completedAssignmentIds: result.completedAssignmentIds,
+            completionEvidence: result.completionEvidence,
+            salvageBranches: result.salvageBranches,
+            transcript: [
+                ...result.transcript,
+                msg('conductor', 'development', `Run stopped: provider failure (${result.providerFailureKind})`),
+            ],
+            phase: 'development' as PhaseName,
+            tokenUsage: result.tokenUsage ?? [],
+            cancelled: true,
+            _stopReason: reason,
+        };
     }
 
     // ── Sync workspace to merged system branch (fixes A1) ────────────────
@@ -1599,6 +1682,9 @@ export async function qaNode(state: ProjectStateType): Promise<Partial<ProjectSt
         return { phase: 'qa' as PhaseName };
     }
     emitRunEvent('phase:start', { phase: 'qa' });
+    writePeriodicSnapshot(state.outputPath, state, 'qa');
+    const budgetStop = checkBudgetStop(state, 'qa' as PhaseName, qaLog);
+    if (budgetStop) return budgetStop;
     const haltQa = haltIfUnrecoverable(state, qaLog, RUN_FAIL_POLICY);
     if (haltQa) return { ...haltQa, phase: 'qa' as PhaseName };
     const rerunUpdate = checkRerun(state, 'qa', qaLog);
@@ -2078,6 +2164,9 @@ export async function bugfixTriageNode(state: ProjectStateType): Promise<Partial
         return { phase: 'bugfix-triage' as PhaseName };
     }
     emitRunEvent('phase:start', { phase: 'bugfix-triage' });
+    writePeriodicSnapshot(state.outputPath, state, 'bugfix-triage');
+    const budgetStop = checkBudgetStop(state, 'bugfix-triage' as PhaseName, bugLog);
+    if (budgetStop) return budgetStop;
     const iteration = state.iteration.bugfix + 1;
     bugLog.info(`Bug-fix triage iteration ${iteration}/${getEffectiveLimits().maxBugfixIterations}`);
 
@@ -2194,6 +2283,9 @@ export async function devopsNode(state: ProjectStateType): Promise<Partial<Proje
         return { phase: 'devops' as PhaseName };
     }
     emitRunEvent('phase:start', { phase: 'devops' });
+    writePeriodicSnapshot(state.outputPath, state, 'devops');
+    const budgetStop = checkBudgetStop(state, 'devops' as PhaseName, opsLog);
+    if (budgetStop) return budgetStop;
     const haltOps = haltIfUnrecoverable(state, opsLog, RUN_FAIL_POLICY);
     if (haltOps) return { ...haltOps, phase: 'devops' as PhaseName };
     const rerunUpdate = checkRerun(state, 'devops', opsLog);
@@ -2381,6 +2473,9 @@ export async function e2eNode(state: ProjectStateType): Promise<Partial<ProjectS
         return { phase: 'e2e' as PhaseName };
     }
     emitRunEvent('phase:start', { phase: 'e2e' });
+    writePeriodicSnapshot(state.outputPath, state, 'e2e');
+    const budgetStop = checkBudgetStop(state, 'e2e' as PhaseName, e2eLog);
+    if (budgetStop) return budgetStop;
     const rerunUpdate = checkRerun(state, 'e2e', e2eLog);
     e2eLog.info('Starting E2E testing phase...');
     const transcript: TranscriptMessage[] = [];
@@ -2608,6 +2703,8 @@ export async function acceptanceNode(state: ProjectStateType): Promise<Partial<P
         return { phase: 'acceptance-gate' as PhaseName };
     }
     emitRunEvent('phase:start', { phase: 'acceptance-gate' });
+    writePeriodicSnapshot(state.outputPath, state, 'acceptance-gate');
+    // No budget check here — acceptance gate is lightweight and must always run
     acceptLog.info('Evaluating acceptance gate...');
 
     const report = evaluateAcceptance(state);
@@ -2685,16 +2782,20 @@ export async function finalizeNode(state: ProjectStateType): Promise<Partial<Pro
 
     // ── Terminal status — the acceptance gate drives this (Plan 19 Sub-Plan 03) ──
     const acceptance = state.acceptance ?? evaluateAcceptance(state);
-    type ManifestStatus = 'completed' | 'failed' | 'crashed' | 'cancelled' | 'partial' | 'inconclusive';
+    type ManifestStatus = 'completed' | 'failed' | 'crashed' | 'cancelled' | 'partial' | 'inconclusive' | 'budget-exhausted';
+    // Plan 25: use 'budget-exhausted' status when the run was stopped due to budget/provider failure
+    const hasBudgetStop = state._stopReason?.startsWith('budget-exhausted') || state._stopReason?.startsWith('provider-');
     const finalStatus: ManifestStatus =
-        state.cancelled                      ? 'cancelled'
+        hasBudgetStop                         ? 'budget-exhausted'
+      : state.cancelled                      ? 'cancelled'
       : RUN_FAIL_POLICY === 'legacy'         ? 'completed'
       : acceptance.status === 'accepted'     ? 'completed'
       : acceptance.status === 'partial'      ? 'partial'
       : acceptance.status === 'inconclusive' ? 'inconclusive'
       :                                        'failed';
     tokenTracker.setRunStatus(finalStatus as any);
-    if (state.cancelled) finalLog.warn('Run was cancelled by HITL deny.');
+    if (hasBudgetStop) finalLog.warn(`Run stopped: ${state._stopReason} — state saved for continue-run.`);
+    if (state.cancelled && !hasBudgetStop) finalLog.warn('Run was cancelled by HITL deny.');
     if (finalStatus === 'failed') finalLog.error(`Run FAILED — ${acceptance.blockers.length} blocker(s)`);
     if (finalStatus === 'partial') finalLog.warn(`Run PARTIAL — all required criteria passed but optional criteria failed`);
     if (finalStatus === 'inconclusive') finalLog.warn(`Run INCONCLUSIVE — some verifications could not execute`);

@@ -43,6 +43,8 @@ export type RunEventType =
     | 'salvage:written'
     | 'run:blocked'
     | 'run:paused'
+    | 'run:budget-stop'
+    | 'run:provider-stop'
     | 'run:error'
     | 'tokens:update'
     | 'budget:level'
@@ -64,7 +66,7 @@ const PRIORITY_TYPES = new Set<string>([
     'acceptance:result',
     'integrity:finding',
     'plan:coverage',
-    'run:error', 'run:blocked',
+    'run:error', 'run:blocked', 'run:budget-stop', 'run:provider-stop',
     'agent:budget-exhausted',
     'product-verify:result',
     'test-run:result',

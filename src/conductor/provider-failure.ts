@@ -142,3 +142,20 @@ export function isProviderLevelFailure(classification: ProviderFailureClassifica
         || classification.kind === 'auth'
         || classification.kind === 'quota';
 }
+
+/**
+ * Thrown when `awaitProviderRecovery()` fails to restore provider access
+ * (billing, quota) or when a fatal provider error is detected (auth,
+ * model-not-found). The dispatcher catches this to signal the run should
+ * stop gracefully and write a snapshot for continue-run.
+ */
+export class ProviderRecoveryFailedError extends Error {
+    constructor(
+        public readonly classification: ProviderFailureClassification,
+    ) {
+        super(
+            `Provider recovery failed (${classification.kind}): ${classification.message}`,
+        );
+        this.name = 'ProviderRecoveryFailedError';
+    }
+}

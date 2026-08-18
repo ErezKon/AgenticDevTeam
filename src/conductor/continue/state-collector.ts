@@ -148,6 +148,8 @@ export function listStoppedRuns(): Array<{
     status: string;
     finalPhase: string;
     workspacePath: string;
+    /** Plan 25: reason the run stopped (null if not a graceful budget/provider stop). */
+    stopReason: string | null;
 }> {
     const outputsDir = OUTPUTS_DIR;
     if (!fs.existsSync(outputsDir)) return [];
@@ -165,6 +167,7 @@ export function listStoppedRuns(): Array<{
         status: string;
         finalPhase: string;
         workspacePath: string;
+        stopReason: string | null;
     }> = [];
 
     for (const dirName of entries) {
@@ -178,13 +181,15 @@ export function listStoppedRuns(): Array<{
             );
             if (manifest.status === 'completed') continue;
 
-            // Try to get workspacePath from state.json
+            // Try to get workspacePath and _stopReason from state.json
             let workspacePath = '';
+            let stopReason: string | null = null;
             const statePath = path.join(dirPath, 'state.json');
             if (fs.existsSync(statePath)) {
                 try {
                     const state = JSON.parse(fs.readFileSync(statePath, 'utf-8'));
                     workspacePath = state.workspacePath ?? '';
+                    stopReason = state._stopReason ?? null;
                 } catch { /* best-effort */ }
             }
 
@@ -195,6 +200,7 @@ export function listStoppedRuns(): Array<{
                 status: manifest.status,
                 finalPhase: manifest.finalPhase ?? 'unknown',
                 workspacePath,
+                stopReason,
             });
         } catch {
             // Corrupt manifest — skip

@@ -55,12 +55,44 @@ export function writeStateSnapshot(outputPath: string, state: any): string | nul
     }
 }
 
+// ─── Periodic phase snapshot (Plan 25) ──────────────────────────────────────
+
+/**
+ * Write a state snapshot at the start of a phase — captures the full
+ * accumulated state from all previous phases. This ensures continue-run
+ * has a recent snapshot even if the process crashes mid-phase.
+ *
+ * Also writes a lightweight `latest-phase.json` marker so the continue-run
+ * state collector can quickly determine the last completed phase.
+ */
+export function writePeriodicSnapshot(
+    outputPath: string | undefined,
+    state: any,
+    currentPhase: string,
+): void {
+    if (!outputPath) return;
+    try {
+        // Write the full state snapshot (overwrites previous)
+        writeStateSnapshot(outputPath, state);
+        // Write a lightweight marker with the phase and timestamp
+        const marker = {
+            phase: currentPhase,
+            timestamp: new Date().toISOString(),
+            reason: 'periodic',
+        };
+        const markerPath = path.join(outputPath, 'latest-phase.json');
+        fs.writeFileSync(markerPath, JSON.stringify(marker, null, 2), 'utf-8');
+    } catch (err: any) {
+        log.warn(`Periodic snapshot failed (non-fatal): ${err?.message ?? err}`);
+    }
+}
+
 // ─── Run manifest ───────────────────────────────────────────────────────────
 
 export interface RunManifest {
     /** ISO 8601 timestamp when the manifest was generated. */
     generatedAt: string;
-    /** Run status: 'completed' | 'failed' | 'crashed' | 'cancelled' | 'partial' | 'inconclusive'. */
+    /** Run status: 'completed' | 'failed' | 'crashed' | 'cancelled' | 'partial' | 'inconclusive' | 'budget-exhausted'. */
     status: string;
     /** System name from the run input. */
     systemName: string;
@@ -296,7 +328,7 @@ function assertCountersAgree(
 export function writeRunManifest(
     outputPath: string,
     state: any,
-    status: 'completed' | 'failed' | 'crashed' | 'cancelled' | 'partial' | 'inconclusive',
+    status: 'completed' | 'failed' | 'crashed' | 'cancelled' | 'partial' | 'inconclusive' | 'budget-exhausted',
     opts?: {
         traceability?: RunManifest['traceability'];
         acceptance?: RunManifest['acceptance'];

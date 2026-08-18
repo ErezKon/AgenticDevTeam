@@ -300,6 +300,47 @@ export function isProviderPaused(): boolean {
     return providerPaused;
 }
 
+/**
+ * Plan 25: Create a lightweight probe function that tests whether the
+ * provider is accessible again. Uses a minimal model list request
+ * (no tokens billed) via the same base URL the agents use.
+ *
+ * Falls back to a simple HTTP GET against the OpenAI-compatible `/models`
+ * endpoint. If the request succeeds with a non-4xx status, the provider
+ * is assumed to be back.
+ */
+export function createProviderProbe(baseUrl?: string): () => Promise<boolean> {
+    // Use the OpenAI base URL from env, falling back to the standard URL
+    const url = baseUrl
+        ?? process.env.OPENAI_BASE_URL
+        ?? process.env.OPENAI_API_BASE
+        ?? 'https://api.openai.com/v1';
+    const modelsUrl = `${url.replace(/\/+$/, '')}/models`;
+    const apiKey = process.env.OPENAI_API_KEY
+        ?? process.env.ANTHROPIC_API_KEY
+        ?? '';
+
+    return async (): Promise<boolean> => {
+        try {
+            const resp = await fetch(modelsUrl, {
+                method: 'GET',
+                headers: apiKey
+                    ? { 'Authorization': `Bearer ${apiKey}` }
+                    : {},
+                signal: AbortSignal.timeout(10_000),
+            });
+            // 2xx or 3xx = provider is reachable
+            // 401/403 = auth error (not billing) — provider is reachable
+            // 402 = still billing issue
+            if (resp.status === 402) return false;
+            if (resp.status >= 200 && resp.status < 500) return true;
+            return false;
+        } catch {
+            return false;
+        }
+    };
+}
+
 /** Clear the provider pause state (for recovery or testing). */
 export function clearProviderPause(): void {
     providerPaused = false;

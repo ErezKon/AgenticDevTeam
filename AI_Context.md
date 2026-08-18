@@ -62,9 +62,9 @@ src/
   env.ts                           # dotenv bootstrap (must be imported first)
 
   conductor/                       # LangGraph orchestration layer
-    state.ts                       # ProjectState (Annotation + reducers)
+    state.ts                       # ProjectState (Annotation + reducers, incl. _stopReason)
     graph.ts                       # StateGraph wiring + conditional edges + HITL
-    nodes.ts                       # 12 phase node functions (~1960 lines, largest file)
+    nodes.ts                       # 12 phase node functions (~2100 lines, largest file) + checkBudgetStop()
     run.ts                         # Autonomous & HITL run helpers + resume
     pr-workflow.ts                 # Full PR lifecycle orchestrator (~1392 lines)
     context-builder.ts             # Compact context summarizers with char budgets
@@ -75,9 +75,10 @@ src/
     review-policy.ts               # Fail-closed review: ReviewOutcome, decideMerge, escalation, quorum (Sub-Plan 07)
     devops-verify.ts               # Real Docker build/run/health-check
     file-checkpointer.ts           # Persistent checkpoints for crash recovery
+    provider-failure.ts              # Provider error classification + ProviderRecoveryFailedError
     continue/                      # Continue Run feature (Plan 23)
       index.ts                     # Barrel export
-      state-collector.ts           # Read-only artifact collector
+      state-collector.ts           # Read-only artifact collector (listStoppedRuns with stopReason)
       state-reconstructor.ts       # State reconstruction + phase resolution
       singleton-rehydration.ts     # Global singleton rehydration
       git-reconciliation.ts        # Git workspace reconciliation
@@ -147,20 +148,20 @@ src/
     oauth-auth.util.ts             # OAuth2 client-credentials token cache
     workspace.ts                   # Project workspace + output dir creation
     retry.ts                       # Exponential backoff + jitter for LLM calls
-    llm-throttle.ts                # Global rate-limit protection (semaphore + cooldown)
+    llm-throttle.ts                # Global rate-limit protection (semaphore + cooldown) + createProviderProbe()
     llm-cassette.ts                # Record/replay VCR for deterministic tests
     github-local.ts                # Local GitHub stand-in (bare git repo)
     github-repo-manager.ts         # GitHub repo create/validate/init
-    run-budget.ts                  # Graceful degradation on budget limits
+    run-budget.ts                  # Graceful degradation on budget limits + shouldStopRun()
     structured-output.ts           # JSON extraction + Zod validation + repair + content-block text extraction
     response-log.ts                # Full-response dumps (outputs/<run>/full-responses/*.json + index.jsonl)
-    event-bus.ts                   # Typed singleton event bus (12 event types)
+    event-bus.ts                   # Typed singleton event bus (14 event types, incl. run:budget-stop, run:provider-stop)
     token-tracker.ts               # Token consumption tracker (singleton)
     token-callback.ts              # LangChain callback for token recording (two-tier provider lookup)
     token-usage-extractor.ts       # Shared usage normalisation (normaliseUsage/sumUsageMetadata) + per-invocation aggregation
     token-report.ts                # HTML + JSON token usage report generator
     cost.ts                        # USD cost estimation per model
-    run-snapshot.ts                # state.json + run-manifest.json writer
+    run-snapshot.ts                # state.json + run-manifest.json writer + writePeriodicSnapshot()
     git-exec.ts                    # Centralized git command execution (signal/exit-code diagnostics, network timeouts)
     coding-conventions.ts          # Convention file resolution + deployment
     traceability.ts                # Requirements traceability matrix
@@ -235,7 +236,7 @@ intake -> [codebase-analyzer] -> architect -> product-manager -> dba -> team-lea
 - **rerunRouter**: Each HITL phase can loop back to itself when user selects "enhance"
 - **afterQaRouter**: Test failures + iterations remaining -> `bugfix-triage`, else -> `devops`
 - **afterE2eRouter**: E2E failures (type=e2e, source=executed, current iteration) + `E2E_BUGFIX_ENABLED` + iterations remaining -> `bugfix-triage`, else -> `acceptance-gate`
-- **cancel routing**: Any phase can route to `finalize` when `state.cancelled === true`
+- **cancel routing**: Any phase can route to `finalize` when `state.cancelled === true` — this is triggered by HITL deny, `checkBudgetStop()` (budget exhaustion), or `developmentNode` (provider failure)
 
 ---
 
@@ -343,7 +344,8 @@ The `ProjectState` in `src/conductor/state.ts` is a LangGraph `Annotation.Root` 
 - `iteration: { bugfix: number }` -- Bug-fix loop counter
 - `pendingRerun: PhaseName | null` -- Set when HITL "enhance" is requested
 - `phaseFeedback: Record<string, string[]>` -- Accumulated user feedback per phase
-- `cancelled: boolean` -- Set on HITL "deny"
+- `cancelled: boolean` -- Set on HITL "deny", budget exhaustion, or unrecoverable provider failure
+- `_stopReason: string | null` -- Why the run was stopped gracefully (`'budget-exhausted:<binding>'`, `'provider-billing'`, `'provider-auth'`, etc.). Null during normal runs. Used by `finalizeNode` for manifest status and by continue-run to surface the stop reason. Cleared on continue-run
 
 ---
 
@@ -540,13 +542,27 @@ Replaces raw `JSON.stringify` dumps with compact summaries:
 - Hard character budget per prompt: `CONTEXT_MAX_CHARS` (default 24000)
 - Pure functions, fully unit-testable
 
-### Run Budget (`run-budget.ts`)
+### Run Budget & Graceful Shutdown (`run-budget.ts`, `provider-failure.ts`)
 
-Graceful degradation on budget limits:
+Graceful degradation on budget limits with four levels:
 - **ok/warn**: Full config limits
 - **degrade**: 1 review iteration, 1 reviewer, 0 repair attempts, 0 bugfix iterations
-- **stop**: No new branch workflows
+- **stop**: No new branch workflows; `shouldStopRun()` returns `true`, triggering `checkBudgetStop()` in the next node to set `cancelled=true` + `_stopReason`, routing to finalize
 - Three limits: `MAX_RUN_TOKENS`, `MAX_RUN_COST_USD`, `MAX_RUN_WALL_MS`
+
+**Provider failure handling** (`provider-failure.ts`, `dispatcher.ts`):
+- Errors are classified into `billing`, `auth`, `quota`, `model-not-found`, `transient`, and `unknown`
+- **Fatal errors** (`auth`, `model-not-found`): dispatch stops immediately; `providerFailureKind` is set on `DispatchResult`
+- **Pauseable errors** (`billing`, `quota`): `awaitProviderRecovery()` probes the provider's `/models` endpoint with exponential backoff via `createProviderProbe()`. If recovery fails, `providerFailureKind` is set
+- `developmentNode` checks `result.providerFailureKind` and returns `{ cancelled: true, _stopReason: 'provider-<kind>' }`, routing to finalize
+- Planning-phase provider failures propagate as unhandled exceptions, caught by `run.ts` crash snapshot
+
+**Periodic state snapshots** (`run-snapshot.ts`):
+- Every node writes a `writePeriodicSnapshot()` at `phase:start` — captures the full accumulated state from all previous phases plus a `latest-phase.json` marker
+- Ensures continue-run has a recent snapshot even if the process crashes mid-phase
+- `checkBudgetStop()` also writes a snapshot before returning the cancellation update
+
+**Manifest status** includes `'budget-exhausted'` for runs stopped by budget or provider failures. `finalizeNode` checks `_stopReason` to select this status.
 
 ### Quality Gates (`quality-gates.ts`)
 
@@ -848,9 +864,29 @@ Separate tokens: `GITHUB_PROJECT_TOKEN` / `GITHUB_PROJECT_OWNER` (fall back to `
 
 ---
 
-## Continue Run (Plan 23)
+## Continue Run (Plan 23) & Graceful Shutdown (Plan 25)
 
-When a run stops (crash, error, SIGINT, budget exhaustion, or manual cancellation), the **Continue Run** feature reconstructs pipeline state from persisted artifacts and resumes execution from the last completed phase.
+When a run stops — whether from a crash, error, SIGINT, budget exhaustion, provider failure, or manual cancellation — the **Continue Run** feature reconstructs pipeline state from persisted artifacts and resumes execution from the last completed phase. **Periodic state snapshots** written at the start of each phase ensure a recent snapshot is always available, even after mid-phase crashes.
+
+### Graceful Shutdown Flow
+
+Budget exhaustion and provider failures trigger a graceful shutdown that preserves state for continue-run:
+
+```
+Budget reaches 'stop' level  ─┐
+                               ├─→ checkBudgetStop() ─→ { cancelled: true, _stopReason }
+Provider billing/auth fails  ─┘    writePeriodicSnapshot()    ├─→ graph routes to finalizeNode
+                                                               ├─→ manifest status: 'budget-exhausted'
+                                                               └─→ state.json has _stopReason for continue-run
+```
+
+| Trigger | Where Detected | Mechanism |
+|---------|----------------|-----------|
+| **Token/cost/wall-clock limit** | `checkBudgetStop()` in each node | `shouldStopRun()` checks budget level; emits `run:budget-stop`; returns `{ cancelled: true, _stopReason: 'budget-exhausted:<binding>' }` |
+| **Provider billing/quota** (recoverable) | `dispatcher.ts` | `awaitProviderRecovery(createProviderProbe())` probes `/models` endpoint; on failure sets `providerFailureKind`; `developmentNode` returns `{ cancelled: true, _stopReason: 'provider-billing' }` |
+| **Provider auth/model-not-found** (fatal) | `dispatcher.ts` | Immediate stop — `providerFailureKind` set, `run:provider-stop` emitted |
+| **HITL deny** | Graph HITL interrupt | `cancelled = true` (no `_stopReason`) |
+| **Crash/SIGINT** | `run.ts` catch block | Best-effort crash snapshot with status `'crashed'` |
 
 ### Architecture
 
@@ -860,11 +896,11 @@ collectRunState() → reconstructState() → rehydrateSingletons() → reconcile
 
 | Step | Module | Purpose |
 |------|--------|---------|
-| **Collect** | `src/conductor/continue/state-collector.ts` | Read-only scan of `outputs/<run>/` — reads `state.json`, `run-manifest.json`, `ledger.jsonl`, `token-usage.json`, agent artifacts, git branches |
+| **Collect** | `src/conductor/continue/state-collector.ts` | Read-only scan of `outputs/<run>/` — reads `state.json`, `run-manifest.json`, `ledger.jsonl`, `token-usage.json`, agent artifacts, git branches. `listStoppedRuns()` surfaces `stopReason` from saved state |
 | **Reconstruct** | `src/conductor/continue/state-reconstructor.ts` | Build a valid `ProjectState` from collected artifacts; rehydrate secrets from `.env`; resolve the resume phase |
 | **Rehydrate** | `src/conductor/continue/singleton-rehydration.ts` | Reinitialise global singletons: run log, ledger, response log, token tracker, run budget, local bare repo |
 | **Reconcile** | `src/conductor/continue/git-reconciliation.ts` | Clean up stale worktrees/lock files, checkout system branch, sync with remote, delete stale branches |
-| **Invoke** | `src/conductor/run.ts` (`continueRun()`) | Inject reconstructed state with `_isContinuation=true` + `_resumePhase`; graph nodes skip completed phases via `shouldSkipOnContinue()` |
+| **Invoke** | `src/conductor/run.ts` (`continueRun()`) | Inject reconstructed state with `_isContinuation=true` + `_resumePhase`; **clears `cancelled` and `_stopReason`** from the previous run; graph nodes skip completed phases via `shouldSkipOnContinue()` |
 
 ### State Reconstruction Paths
 
@@ -918,13 +954,18 @@ Every pipeline node except `finalizeNode` calls `shouldSkipOnContinue(state, cur
 ```
 src/conductor/continue/
   index.ts                    # Barrel export
-  state-collector.ts          # collectRunState(), findRunOutputs(), listStoppedRuns()
+  state-collector.ts          # collectRunState(), findRunOutputs(), listStoppedRuns() (with stopReason)
   state-reconstructor.ts      # reconstructState(), resolveResumePhase() (internal)
   singleton-rehydration.ts    # rehydrateSingletons()
   git-reconciliation.ts       # reconcileGitState()
-src/conductor/run.ts          # continueRun(), ContinueRunOptions
-src/conductor/state.ts        # _isContinuation, _resumePhase fields
-src/conductor/nodes.ts        # shouldSkipOnContinue() + guards on all nodes
+src/conductor/run.ts          # continueRun() (clears cancelled + _stopReason), ContinueRunOptions
+src/conductor/state.ts        # _isContinuation, _resumePhase, _stopReason fields
+src/conductor/nodes.ts        # shouldSkipOnContinue(), writePeriodicSnapshot(), checkBudgetStop() + guards on all nodes
+src/conductor/provider-failure.ts  # classifyProviderFailure(), ProviderRecoveryFailedError
+src/utils/run-budget.ts       # shouldStopRun(), getBudgetStatus(), getEffectiveLimits()
+src/utils/run-snapshot.ts     # writePeriodicSnapshot(), writeRunManifest() (with 'budget-exhausted' status)
+src/utils/llm-throttle.ts     # awaitProviderRecovery(), createProviderProbe()
+src/utils/event-bus.ts        # run:budget-stop, run:provider-stop event types
 tests/continue-run.test.ts    # Unit tests (state collector, reconstructor, phase resolver)
 tests/continue-integration.test.ts  # Integration tests (full flow, singletons, git)
 ```
@@ -1040,7 +1081,17 @@ All agent prompts use XML-style tags for structure:
 Every node function in `nodes.ts` follows this pattern:
 ```typescript
 export async function someNode(state: ProjectStateType): Promise<Partial<ProjectStateType>> {
+    // 1. Continue-run idempotency: skip if this phase completed in a previous run
+    if (shouldSkipOnContinue(state, 'some-phase', logger)) {
+        return { phase: 'some-phase' as PhaseName };
+    }
+    // 2. Phase lifecycle + periodic snapshot for crash recovery
     emitRunEvent('phase:start', { phase: 'some-phase' });
+    writePeriodicSnapshot(state.outputPath, state, 'some-phase');
+    // 3. Budget exhaustion check — routes to finalize via cancelled=true
+    const budgetStop = checkBudgetStop(state, 'some-phase' as PhaseName, logger);
+    if (budgetStop) return budgetStop;
+    // 4. Rerun check (HITL enhance feedback)
     const rerunUpdate = checkRerun(state, 'some-phase', logger);
     // ... get API key, create agent, build context ...
     const { output, tokenUsage } = await invokeAgent(agent, userMsg, ...);
@@ -1057,13 +1108,18 @@ export async function someNode(state: ProjectStateType): Promise<Partial<Project
 }
 ```
 
+> **Invariant:** Every node except `intakeNode` and `finalizeNode` must call `shouldSkipOnContinue()`, `writePeriodicSnapshot()`, and `checkBudgetStop()` at the top. `acceptanceNode` skips the budget check (lightweight, must always run).
+
 ### Error Handling
 
 - `retryWithBackoff()` wraps all agent invocations (rate-limit aware, configurable attempts)
 - Node functions catch agent failures and log errors but generally don't crash the pipeline
 - `invokeAgent()` includes schema validation with repair loop
-- `run.ts` catches crashes and writes best-effort state snapshots
+- `run.ts` catches crashes and writes best-effort state snapshots (`writeStateSnapshot` + `writeRunManifest` with `'crashed'` status)
 - Signal handlers flush token reports on unexpected exits
+- **Budget exhaustion**: `checkBudgetStop()` at the start of each node catches the `'stop'` level and routes to finalize gracefully (no exception, no crash)
+- **Provider failures**: Dispatcher sets `providerFailureKind` on the result; `developmentNode` translates this to `{ cancelled: true, _stopReason }`. Planning-phase provider failures propagate as exceptions and are caught by the `run.ts` crash path
+- **Periodic snapshots** (`writePeriodicSnapshot` at each `phase:start`) ensure the latest complete state is always on disk for continue-run recovery
 
 ---
 
@@ -1087,6 +1143,9 @@ The system evolved through 16+ iteration plans. Key milestones:
 | 20 | Multi-provider LLM support (Anthropic, Google alongside OpenAI) and strong model PR fixer |
 | 21 | Claude run errors: Anthropic streaming corruption, Responses-API JSON mode, runaway detection, universal token accounting |
 | 22 | pacmanclaude forensics: tool-budget collapse under parallel tool calls, compaction placeholder corruption, blind respawn handoff, dead scaffold barrier, e2e integrity false positives, Anthropic prompt caching |
+| 23 | Continue Run: state reconstruction from persisted artifacts, singleton rehydration, git reconciliation, phase resolution, node idempotency |
+| 24 | Anthropic truncation detection, PM token ceiling, trimTruncatedArrayTails, PR creation resilience (retry + pr-creation-failed status + continue-run recovery) |
+| 25 | Graceful shutdown & state persistence: periodic snapshots, budget-exhaustion-to-cancellation bridge, provider-failure-to-cancellation bridge, budget-exhausted manifest status, continue-run stop-reason awareness |
 
 When referenced in code comments, these plans are cited as "fixes A1", "fixes A2", etc. (referring to sub-plans within Plan 16).
 
