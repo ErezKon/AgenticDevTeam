@@ -939,7 +939,7 @@ export async function runProductVerification(
     return { artifacts, resolveIssues, smoke, passed, summary };
 }
 
-// ─── ProductVerifyReport → GateOutcome adapter (Sub-Plan 26-10) ─────────────
+// ─── ProductVerifyReport → GateOutcome adapter (Sub-Plan 25-10) ─────────────
 
 /**
  * Convert a ProductVerifyReport into a standard GateOutcome.

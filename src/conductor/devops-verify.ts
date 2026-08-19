@@ -450,7 +450,7 @@ export async function teardownDeployment(
     }
 }
 
-// ─── VerifyResult → GateOutcome adapter (Sub-Plan 26-10) ────────────────────
+// ─── VerifyResult → GateOutcome adapter (Sub-Plan 25-10) ────────────────────
 
 /**
  * Convert a VerifyResult into a standard GateOutcome.

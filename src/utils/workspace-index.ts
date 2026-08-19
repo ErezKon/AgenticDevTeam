@@ -1,7 +1,7 @@
 /**
  * WorkspaceIndex — pre-built file index for a workspace.
  *
- * Sub-Plan 26-10: Eliminates 8+ redundant filesystem walks by building
+ * Sub-Plan 25-10: Eliminates 8+ redundant filesystem walks by building
  * the index once per workspace+iteration and passing it to all gates.
  *
  * Uses the shared fs-walk utility for consistent prune/filter behavior.

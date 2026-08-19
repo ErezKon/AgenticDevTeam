@@ -350,7 +350,7 @@ export function compactHistory(
     const keepRecentWriteArgs = opts?.keepRecentWriteArgs ?? HISTORY_KEEP_RECENT_WRITE_ARGS;
     const maxChars = opts?.maxChars ?? HISTORY_MAX_CHARS;
 
-    // Plan 24, C1 / Sub-Plan 26-14: per-run memo when inside a RunContext
+    // Plan 24, C1 / Sub-Plan 25-14: per-run memo when inside a RunContext
     // eliminates the single-slot thread race. Module-level fallback retains
     // the original clear-on-thread-change behavior for CLI mode.
     const threadId = opts?.threadId ?? '';

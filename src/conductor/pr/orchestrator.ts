@@ -6,7 +6,7 @@
  *
  * Called by the dispatcher for each branch group of assignments.
  *
- * Split into focused modules in Sub-Plan 26-08. This file is the
+ * Split into focused modules in Sub-Plan 25-08. This file is the
  * top-level orchestrator (~300 lines) that delegates to:
  *   worktree.ts, pr-github.ts, pr-body.ts, dev-prompts.ts, diff.ts,
  *   agent-invoke.ts, commit.ts, gates.ts, review-loop.ts, escalation.ts,

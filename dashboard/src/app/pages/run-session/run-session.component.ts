@@ -60,7 +60,7 @@ export class RunSessionComponent implements OnInit, OnDestroy {
   budgetLevel = 'ok';
   budgetUtilisation = 0;
 
-  // Precomputed fields (Plan 26-11: avoid getter recalculation on every CD cycle)
+  // Precomputed fields (Plan 25-11: avoid getter recalculation on every CD cycle)
   visiblePhases: PhaseStep[] = [];
   transcriptMessages: any[] = [];
   recentEvents: WsMessage[] = [];
@@ -128,7 +128,7 @@ export class RunSessionComponent implements OnInit, OnDestroy {
           );
         }
 
-        // Recompute precomputed fields (Plan 26-11)
+        // Recompute precomputed fields (Plan 25-11)
         this.recomputeVisiblePhases();
         this.recomputeTranscript();
         this.prettyState = this.formatJson(res);
@@ -216,7 +216,7 @@ export class RunSessionComponent implements OnInit, OnDestroy {
 
   // ── Pipeline timeline helpers ──────────────────────────────────────────
 
-  /** Recompute visible phases when state or phase changes (Plan 26-11). */
+  /** Recompute visible phases when state or phase changes (Plan 25-11). */
   private recomputeVisiblePhases(): void {
     const isGreenfield = this.state?.input?.runType === 'greenfield';
     this.visiblePhases = PIPELINE_PHASES.filter(p => !(p.maintainOnly && isGreenfield));
@@ -277,12 +277,12 @@ export class RunSessionComponent implements OnInit, OnDestroy {
 
   // ── Transcript helpers ─────────────────────────────────────────────────
 
-  /** Recompute transcript messages when state changes (Plan 26-11). */
+  /** Recompute transcript messages when state changes (Plan 25-11). */
   private recomputeTranscript(): void {
     this.transcriptMessages = (this.state?.transcript ?? []).slice(-20);
   }
 
-  /** Recompute recent events slice (Plan 26-11). */
+  /** Recompute recent events slice (Plan 25-11). */
   private recomputeRecentEvents(): void {
     this.recentEvents = this.events.slice().reverse().slice(0, 50);
   }
@@ -296,7 +296,7 @@ export class RunSessionComponent implements OnInit, OnDestroy {
 
   // ── Formatting helpers ─────────────────────────────────────────────────
 
-  /** Format JSON once and cache in prettyState (Plan 26-11). */
+  /** Format JSON once and cache in prettyState (Plan 25-11). */
   private formatJson(obj: any): string {
     try { return JSON.stringify(obj, null, 2); } catch { return String(obj); }
   }
@@ -306,7 +306,7 @@ export class RunSessionComponent implements OnInit, OnDestroy {
     try { return JSON.stringify(obj, null, 2); } catch { return String(obj); }
   }
 
-  // ── trackBy functions (Plan 26-11) ─────────────────────────────────────
+  // ── trackBy functions (Plan 25-11) ─────────────────────────────────────
   trackByPhase(_i: number, step: PhaseStep): string { return step.id; }
   trackByTab(_i: number, tab: { id: string }): string { return tab.id; }
   trackByIndex(i: number): number { return i; }

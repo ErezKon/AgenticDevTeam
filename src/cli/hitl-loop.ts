@@ -2,7 +2,7 @@
  * HITL decision loop — drives a RunSession through its phases, prompting the
  * user for approve/deny/enhance at each interrupt.
  *
- * Extracted from cli.ts in Sub-Plan 26-09 to eliminate the 3-copy HITL loop
+ * Extracted from cli.ts in Sub-Plan 25-09 to eliminate the 3-copy HITL loop
  * that was duplicated across startHitlRun, startMaintainRun, and startContinueRun.
  */
 import { LogColors, color256 } from '../utils/log-colors.util';

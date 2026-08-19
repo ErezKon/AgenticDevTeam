@@ -1,7 +1,7 @@
 /**
  * PR title and description builders.
  *
- * Extracted from pr-workflow.ts (Sub-Plan 26-08).
+ * Extracted from pr-workflow.ts (Sub-Plan 25-08).
  */
 import { getDevAgent } from '../../agents/developers/registry';
 import type { Assignment, FileChange } from '../../agents/_shared/base-schemas';

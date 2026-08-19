@@ -173,7 +173,7 @@ export const developmentNode = phaseNode('development', devLog, { haltCheck: tru
     }
 
     // Plan 24, F1–F3: Assembly gate
-    // Plan 25, 26-04 §7: Hoist assemblyBugs so they reach the return object.
+    // Plan 25-04 §7: Hoist assemblyBugs so they reach the return object.
     const assemblyBugs: Bug[] = [];
     if (result.pullRequests.some(pr => pr.status === 'merged')) {
         const assemblyResult = runAssemblyGate(state.workspacePath);
@@ -233,7 +233,7 @@ export const developmentNode = phaseNode('development', devLog, { haltCheck: tru
         completedAssignmentIds: result.completedAssignmentIds,
         completionEvidence: result.completionEvidence,
         salvageBranches: result.salvageBranches,
-        // Plan 25, 26-04 §7: surface assembly-gate bugs so bugfix triage picks them up
+        // Plan 25-04 §7: surface assembly-gate bugs so bugfix triage picks them up
         bugs: assemblyBugs,
         transcript: [
             ...result.transcript,

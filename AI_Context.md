@@ -18,6 +18,64 @@
 
 ---
 
+## Code Quality Rules (MANDATORY — Plan 25 Lessons)
+
+> **Context:** Plan 25 audited the entire codebase and found 29 categories of bad practices that had accumulated over 24 plans. The rules below exist to prevent their recurrence. Every rule addresses a real failure that cost real money, broke real pipelines, or created silent correctness bugs. **These rules are non-negotiable and apply to every change in every plan.**
+
+### FILE SIZE & STRUCTURE
+
+10. **No god files.** No source file may exceed ~600 LOC. If a file grows past this, split it into focused modules with a barrel `index.ts` re-export (see `nodes/`, `pr/`, `cli/` as reference patterns). Plan 25 split three god files: `nodes.ts` (3,267 LOC → 11 modules), `pr-workflow.ts` (2,941 LOC → 14 modules), `cli.ts` (871 LOC → 4 modules). No function may exceed ~200 LOC.
+
+11. **No code duplication.** Before writing logic, search for existing implementations. If the same pattern exists in 2+ places, extract it into a shared utility under `src/utils/` or an appropriate shared location. Plan 25 found 5+ copies of slugify, 3 copies of safeChildEnv, 27 copies of logger mocks, 9 copies of state fixtures, 11 copies of markdown table renderers (9 of which had missing pipe-escaping), and 7 copies of crash-snapshot blocks. Use the canonical shared utilities: `markdown-table.ts` (tables), `bug-factory.ts` (bugs), `branch-naming.ts` (slugs/branches), `shell-exec.ts` (child processes), `artifact-writer.ts` (output files), `fs-walk.ts` (file walking), `source-graph.ts` (import graphs).
+
+12. **No dead code.** Do not leave unused imports, unreachable functions, orphaned files, or deprecated code behind feature flags. Remove dead code in the same PR that makes it dead. Plan 25 removed ~1,266 LOC of dead code across 84 files, including 4 orphaned files (621 LOC), 94 unused imports/variables, and 10 abandoned migration remnants.
+
+### SECURITY
+
+13. **No shell injection.** Never pass LLM-controlled or user-controlled strings to `execSync('cmd ' + arg)`. Always use `execFileSync(cmd, [arg1, arg2])` or the shared `gitExec()`/`defaultExec()`. Validate refs with `assertValidRef()`. Plan 25 found ~20 shell injection sinks via string concatenation in git commands.
+
+14. **No secrets in URLs, logs, or LLM context.** Never embed tokens in git remote URLs. Never return unredacted state from API endpoints. Never expose `process.env` keys to LLM-authored shell commands. Use `redactSecrets()` on all git output. Use `safeChildEnv()` (allowlisted env) for all child processes — never `{ ...process.env }`. Plan 25 found the GitHub PAT in every generated project's `.git/config`, in API responses, and in LLM tool output.
+
+15. **No process-wide TLS disable.** Never set `NODE_TLS_REJECT_UNAUTHORIZED=0` globally. Use `NODE_EXTRA_CA_CERTS` for corporate CAs. Gate any `strict-ssl false` behind an explicit opt-in flag. Plan 25 found TLS disabled in 6 locations across the codebase.
+
+16. **Fail closed, not open.** Security and quality gates must return `passed: false` when they encounter errors — never silently skip or return empty findings. Use the pattern: collect errors in an `errors[]` array, set `passed = false` if `errors.length > 0`. Plan 25 found the secret scan returning `[]` on git failure, and 3 sub-gates catching exceptions and continuing with `passed: true`.
+
+### VALIDATION & ERROR HANDLING
+
+17. **Validate all config at parse time.** Use `envInt()`, `envFloat()`, `envBool()`, `envEnum()` from `config.ts` — never raw `parseInt(process.env.X)` or `=== 'true'`. Invalid values must throw descriptive errors, not silently produce `NaN` or wrong types. All env reads must live in `config.ts` — no bypass reads from other files. Plan 25 replaced ~145 raw parsing calls.
+
+18. **Guard critical output paths.** `writeStateSnapshot()` and `writeRunManifest()` must execute even if report generation throws. Wrap report-building in try/catch; state writes go in a guaranteed-execution block. Plan 25 found that a single throw in `finalizeNode` permanently broke continue-run recovery.
+
+19. **Check return values from git operations.** `gitExec()` returns `"Error: ..."` strings on failure. Always check with `!output.startsWith('Error:')` before splitting/processing the output as data. Plan 25 found error strings being split on newlines and treated as filenames.
+
+20. **No bare `catch {}` in gates or verification.** Every catch block in a gate, verifier, or critical path must at minimum log the error and propagate a failure signal. Plan 25 found 40+ bare `catch {}` blocks silently swallowing failures in integrity checks, product verification, and quality gates.
+
+### ARCHITECTURE & DEPENDENCIES
+
+21. **No import-time side effects.** Entry points (`cli.ts`, `index.ts`) must guard execution with `if (require.main === module)`. `config.ts` must not crash on import (wrap `JSON.parse` in try/catch). Every module must be importable in tests without starting servers, opening ports, or launching interactive menus. Plan 25 found both `cli.ts` and `index.ts` were untestable due to import-time execution.
+
+22. **No global mutable singletons.** All stateful singletons must be scoped per-run via `RunContext` + `AsyncLocalStorage`. New singletons must follow the `_active()` pattern (check `getRunContext()`, fall back to module-level default). Module-level globals are only for CLI-mode backward compatibility. Plan 25 found 15 global mutable singletons that corrupted state between concurrent server runs.
+
+23. **No circular or inverted dependencies.** Schema modules must not import from conductor modules. Tool modules must not import from conductor modules. Utils must not import from agents or tools. When a shared type is needed across layers, extract it to `gate-types.ts` or a dedicated shared types file.
+
+24. **Use async on the server hot path.** Never use `execSync`, `fs.*Sync`, or busy-wait `sleepSync` in code that runs during request handling. Use `defaultExecAsync()`, `fs/promises`, and `Promise`-based sleep. Plan 25 found `execSync('npm install')` blocking the entire server for up to 5 minutes.
+
+### TESTING
+
+25. **Use shared test helpers.** Use `makeState()` (not hand-copied fixtures), `jest.mock('../src/utils/logger')` (not 9-line mock factories), `makeTempDir()`/`withTempDir()` (not local temp-dir functions), `git()`/`createTestRepo()` (not local git helpers). Plan 25 eliminated 27 duplicate logger mocks, 9 duplicate state fixtures, 34 duplicate temp-dir helpers, and 8 duplicate git helpers.
+
+26. **Only `source: 'executed'` test reports drive decisions.** Pipeline routing, acceptance criteria, coverage metrics, and minimum-test thresholds must filter on `source === 'executed'`. Agent self-reported (`claimed`) test results are advisory only. Plan 25 found the acceptance gate counting LLM-claimed tests toward the minimum test threshold.
+
+27. **No tautological tests.** Every test must exercise real logic and assert on real behavior. `expect(true).toBe(true)` or asserting that fixture properties exist without testing behavior is not testing. Plan 25 found 12 tautological tests that provided zero verification value.
+
+### DOCUMENTATION SYNC
+
+28. **Keep docs in sync with code.** When changing defaults, adding/removing env vars, adding/removing files, or changing API endpoints: update `AI_Context.md`, `README.md`, and `.env.example` in the same change. Plan 25 found 30+ contradictions between docs and code, including wrong model defaults, missing env vars, undocumented endpoints, and stale line counts.
+
+29. **Complete migrations.** When replacing a function/module/pattern, remove all old copies and update all consumers in the same plan. Do not leave deprecated implementations alongside new ones. Plan 25 found 10 abandoned migrations where old and new implementations coexisted, causing contradictions and dead code.
+
+---
+
 ## Project Overview
 
 **AgenticDevTeam** is a fully autonomous software delivery pipeline powered by 20 specialized AI agents, orchestrated via a **LangGraph state machine**. It supports two run types:
@@ -61,7 +119,7 @@ src/
   config.ts                        # All env-driven configuration (single source)
   env.ts                           # dotenv bootstrap (must be imported first)
 
-  cli/                             # CLI modules (Sub-Plan 26-09)
+  cli/                             # CLI modules (Sub-Plan 25-09)
     printers.ts                    # Display helpers (header, roster, artifacts, phase status)
     prompts.ts                     # Readline wrapper, requirements gathering, repo target
     hitl-loop.ts                   # Unified HITL decision loop (was triplicated)
@@ -86,7 +144,7 @@ src/
       finalize.ts                  # finalizeNode (Phase 11, reporting + teardown)
     run.ts                         # Autonomous & HITL run helpers + continueRun + handleRunCrash + makeSession
     pr-workflow.ts                 # Backward-compatible re-export shim (~80 lines)
-    pr/                            # PR workflow modules (Sub-Plan 26-08)
+    pr/                            # PR workflow modules (Sub-Plan 25-08)
       index.ts                     # Barrel re-export
       orchestrator.ts              # Top-level PR lifecycle orchestrator (~620 lines)
       worktree.ts                  # Worktree creation, disposal, salvage, eviction
@@ -104,7 +162,7 @@ src/
     context-builder.ts             # Compact context summarizers with char budgets
     quality-gates.ts               # Multi-language build/lint/test gates
     security-gates.ts              # Secret scan + dependency audit + licence check
-    workspace-sync.ts              # Git sync after squash merges; Plan 26-11: async fetchWithRetry/syncWorkspaceToBranch with non-blocking sleep()
+    workspace-sync.ts              # Git sync after squash merges; Plan 25-11: async fetchWithRetry/syncWorkspaceToBranch with non-blocking sleep()
     assignment-policy.ts           # Prevent re-dispatch of completed assignments + sanitizeAssignmentStoryIds
     review-policy.ts               # Fail-closed review: ReviewOutcome, decideMerge, escalation, quorum (Sub-Plan 07)
     devops-verify.ts               # Real Docker build/run/health-check
@@ -112,7 +170,6 @@ src/
     provider-failure.ts              # Provider error classification + ProviderRecoveryFailedError
     bug-factory.ts                 # Shared makeBug/makeGateBug Bug constructor helpers
     gate-types.ts                  # Unified gate types (GateStatus, FindingSeverity, GateFinding, GateOutcome<R>, WorkspaceIndex) + legacy GateReport/GateStepResult
-    workspace-index.ts             # buildWorkspaceIndex() — pre-built file index passed to all gates
     continue/                      # Continue Run feature (Plan 23)
       index.ts                     # Barrel export
       state-collector.ts           # Read-only artifact collector (listStoppedRuns with stopReason)
@@ -169,7 +226,7 @@ src/
     devops/                        # DevOps agent
 
   tools/
-    fs/workspace-tools.ts          # Sandboxed read/write/edit/list/search (5 tools); Plan 26-11: all handlers use fs/promises (non-blocking)
+    fs/workspace-tools.ts          # Sandboxed read/write/edit/list/search (5 tools); Plan 25-11: all handlers use fs/promises (non-blocking)
     git/git-tools.ts               # Git CLI tools (12 tools)
     shell/shell-tools.ts           # Guarded shell execution (1 tool)
     diagram/diagram-tools.ts       # Mermaid label sanitization
@@ -193,12 +250,12 @@ src/
     response-log.ts                # Full-response dumps (outputs/<run>/full-responses/*.json + index.jsonl)
     run-context.ts                 # Per-run AsyncLocalStorage context (RunContext class); makes all singletons safe for concurrent server runs
     event-bus.ts                   # Typed event bus (14 event types, incl. run:budget-stop, run:provider-stop); context-aware via RunContext
-    token-tracker.ts               # Token consumption tracker; context-aware via RunContext Proxy; Plan 26-11: appends JSONL per call (O(1)), debounces full JSON flush every 10s
+    token-tracker.ts               # Token consumption tracker; context-aware via RunContext Proxy; Plan 25-11: appends JSONL per call (O(1)), debounces full JSON flush every 10s
     token-callback.ts              # LangChain callback for token recording (two-tier provider lookup)
     token-usage-extractor.ts       # Shared usage normalisation (normaliseUsage/sumUsageMetadata) + per-invocation aggregation
     token-report.ts                # HTML + JSON token usage report generator
     cost.ts                        # USD cost estimation per model
-    run-snapshot.ts                # state.json + run-manifest.json writer + writePeriodicSnapshot(); Plan 26-11: debounced full snapshots (30s min interval) + immediate latest-phase.json marker
+    run-snapshot.ts                # state.json + run-manifest.json writer + writePeriodicSnapshot(); Plan 25-11: debounced full snapshots (30s min interval) + immediate latest-phase.json marker
     git-exec.ts                    # Centralized git command execution (execFileSync, shellSplit, assertValidRef, redactSecrets)
     coding-conventions.ts          # Convention file resolution + deployment
     traceability.ts                # Requirements traceability matrix
@@ -207,9 +264,15 @@ src/
     fs-walk.ts                     # Shared filesystem walker (PRUNE_DIRS, SOURCE_EXTENSIONS, walkDir, collectFiles, isTestFile)
     source-graph.ts                # Import extraction + resolution + graph building + transitive reachability
     markdown-table.ts              # Shared mdTable() + mdSection() with automatic pipe-escaping
-    shell-exec.ts                  # Shared ExecFn type, safeChildEnv, defaultExec/isToolAvailable; Plan 26-11: async AsyncExecFn, defaultExecAsync, isToolAvailableAsync (execFile + promises)
+    shell-exec.ts                  # Shared ExecFn type, safeChildEnv, defaultExec/isToolAvailable; Plan 25-11: async AsyncExecFn, defaultExecAsync, isToolAvailableAsync (execFile + promises)
     branch-naming.ts               # Canonical slugify, systemBranch, featureBranch, projectSlugFromBranch, isSystemBranch
     artifact-writer.ts             # writeOutputFile + appendOutputLine for output-dir artifacts
+    workspace-index.ts             # buildWorkspaceIndex() — pre-built file index passed to all gates
+    conventions-digest.ts          # Compact in-prompt summary of coding conventions (avoids runtime read_file)
+    run-ledger.ts                  # Append-only JSONL evidence ledger for post-mortem diagnostics
+    ledger-report.ts               # Produces outputs/<run>/run-report.md from ledger data
+    run-diagnosis.ts               # Automated failure-cause summary (run-diagnosis.md)
+    repo-contract-writer.ts        # Write, read, and render .agent/repo-contract.json + Markdown
     crash-handlers.ts              # flushTokenReportOnExit + installProcessHandlers (shared between cli.ts and index.ts)
 
   templates/
@@ -240,8 +303,8 @@ tests/                             # Jest test suite (ts-jest)
     state-factory.ts               # makeState(overrides?) — canonical ProjectStateType fixture
     tmp.ts                         # makeTempDir(), withTempDir() — temp dir lifecycle
     git.ts                         # git(), createTestRepo() — isolated git helpers
-  *.test.ts                        # 85+ test files (Sub-Plan 26-13)
-  # Notable new test files (Sub-Plan 26-13):
+  *.test.ts                        # 85+ test files (Sub-Plan 25-13)
+  # Notable new test files (Sub-Plan 25-13):
   # provider-failure.test.ts        — classifyProviderFailure, isProviderLevelFailure, ProviderRecoveryFailedError
   # cost.test.ts                    — estimateCost, estimateRunCost (cache-aware pricing)
   # config.test.ts                  — envInt, envFloat, envBool, envEnum helpers
@@ -415,7 +478,7 @@ The `ProjectState` in `src/conductor/state.ts` is a LangGraph `Annotation.Root` 
 ## PR Workflow (pr/ modules, re-exported via pr-workflow.ts)
 
 The development phase uses a sophisticated PR workflow for each branch.
-The implementation is split into focused modules under `src/conductor/pr/` (Sub-Plan 26-08).
+The implementation is split into focused modules under `src/conductor/pr/` (Sub-Plan 25-08).
 `pr-workflow.ts` is a backward-compatible re-export shim; the real orchestrator is `pr/orchestrator.ts`.
 
 1. **Worktree creation** -- `git worktree add .worktrees/<branch>` for parallel isolation
@@ -824,13 +887,13 @@ TestReport, and records a `verificationErrors` entry. No silent swallowing.
 ### Security Gates (`security-gates.ts`)
 
 Three checks combined:
-- **Secret scan**: Regex patterns for AWS keys, private keys, GitHub tokens, JWTs, generic secrets; falls back to filesystem walk when git is unavailable (Plan 25, 26-04 &sect;3)
+- **Secret scan**: Regex patterns for AWS keys, private keys, GitHub tokens, JWTs, generic secrets; falls back to filesystem walk when git is unavailable (Plan 25-04 &sect;3)
 - **Dependency audit**: Per-stack (npm audit, pip-audit, govulncheck, etc.)
 - **Licence check**: SPDX deny-list for npm packages
 - Never logs matched values (redaction discipline)
-- **Fail-closed**: If any sub-gate crashes, `passed` is `false` and errors are propagated to `verificationErrors` (Plan 25, 26-04 &sect;4)
+- **Fail-closed**: If any sub-gate crashes, `passed` is `false` and errors are propagated to `verificationErrors` (Plan 25-04 &sect;4)
 
-### Unified Gate Abstraction (`gate-types.ts`, `workspace-index.ts`) — Sub-Plan 26-10
+### Unified Gate Abstraction (`gate-types.ts`, `workspace-index.ts`) — Sub-Plan 25-10
 
 All gate modules now share a common result contract via types in `gate-types.ts`:
 
@@ -872,13 +935,13 @@ A machine-checkable repo layout and module contract produced by the Architect:
   (machine-read, gitignored) + `docs/ARCHITECTURE-CONTRACT.md` (human-readable, committed).
   `readRepoContract` reads it back. `renderContractForPrompt` produces a budgeted prompt section.
   `deriveContractFromAnalysis` infers a contract from an existing codebase (maintain mode).
-- **Layout Linter** — removed in Sub-Plan 26-10 (`layout-lint.ts` was dead code, never called in production).
+- **Layout Linter** — removed in Sub-Plan 25-10 (`layout-lint.ts` was dead code, never called in production).
 - **Architect**: `tools: []` (JSON mode active), prompt includes `<repo_contract>` section,
   output includes `repoContract` field. `architectNode` caps modules at `REPO_CONTRACT_MAX_MODULES`.
 - **All agents** receive the contract in their context (priority 1). Developer persona includes
   `<repo_contract>` block. Reviewers have a stub carve-out for scaffold stubs.
 - **Env vars**: `REPO_CONTRACT_MAX_MODULES` (60), `CONTRACT_PROMPT_MAX_CHARS` (6000).
-  `REPO_CONTRACT_MODE` and `CONTRACT_STUB_SCAFFOLD` were removed in Sub-Plan 26-10.
+  `REPO_CONTRACT_MODE` and `CONTRACT_STUB_SCAFFOLD` were removed in Sub-Plan 25-10.
 
 ### Structured Output (`structured-output.ts`)
 
@@ -1236,10 +1299,10 @@ The system evolved through 16+ iteration plans. Key milestones:
 | 23 | Continue Run: state reconstruction from persisted artifacts, singleton rehydration, git reconciliation, phase resolution, node idempotency |
 | 24 | Anthropic truncation detection, PM token ceiling, trimTruncatedArrayTails, PR creation resilience (retry + pr-creation-failed status + continue-run recovery), periodic snapshots, budget-exhaustion-to-cancellation bridge, provider-failure-to-cancellation bridge, budget-exhausted manifest status, continue-run stop-reason awareness |
 | 25 | Codebase audit remediation: config hardening, env-var centralisation |
-| 26-05 | Utility extraction: created 8 shared utilities (fs-walk, source-graph, markdown-table, shell-exec, bug-factory, branch-naming, artifact-writer, gate-types) |
-| 26-06 | Utility deduplication: migrated all consumers to shared utilities (shell-exec 3 files, markdown-table 11 files/23 tables, bug-factory 7 files/19 sites, branch-naming 6 files/13 sites, artifact-writer 8 files/13 sites). Fixed continue-run slug mismatch bug, added missing pipe-escaping to 9 of 11 table sites, added missing error handling to 3 output-write sites |
-| 26-10 | Unified Gate abstraction: `gate-types.ts` exports `GateStatus`, `FindingSeverity`, `GateFinding`, `GateOutcome<R>`, `WorkspaceIndex`; every gate module exports a `*GateOutcome()` adapter; `workspace-index.ts` builds a shared file index once; `gate:result` events carry a `gate` discriminator. Removed dead code: `layout-lint.ts`, `REPO_CONTRACT_MODE`, `CONTRACT_STUB_SCAFFOLD` |
-| 26-14 | RunContext & Singleton Elimination: `AsyncLocalStorage`-based per-run context, `RunContext` class, all singletons context-aware, index.ts key-space collision fix + LRU eviction, history-compactor per-run memo, prompt-cache per-run breakpoint set |
+| 25-05 | Utility extraction: created 8 shared utilities (fs-walk, source-graph, markdown-table, shell-exec, bug-factory, branch-naming, artifact-writer, gate-types) |
+| 25-06 | Utility deduplication: migrated all consumers to shared utilities (shell-exec 3 files, markdown-table 11 files/23 tables, bug-factory 7 files/19 sites, branch-naming 6 files/13 sites, artifact-writer 8 files/13 sites). Fixed continue-run slug mismatch bug, added missing pipe-escaping to 9 of 11 table sites, added missing error handling to 3 output-write sites |
+| 25-10 | Unified Gate abstraction: `gate-types.ts` exports `GateStatus`, `FindingSeverity`, `GateFinding`, `GateOutcome<R>`, `WorkspaceIndex`; every gate module exports a `*GateOutcome()` adapter; `workspace-index.ts` builds a shared file index once; `gate:result` events carry a `gate` discriminator. Removed dead code: `layout-lint.ts`, `REPO_CONTRACT_MODE`, `CONTRACT_STUB_SCAFFOLD` |
+| 25-14 | RunContext & Singleton Elimination: `AsyncLocalStorage`-based per-run context, `RunContext` class, all singletons context-aware, index.ts key-space collision fix + LRU eviction, history-compactor per-run memo, prompt-cache per-run breakpoint set |
 
 When referenced in code comments, these plans are cited as "fixes A1", "fixes A2", etc. (referring to sub-plans within Plan 16).
 
@@ -1258,14 +1321,14 @@ When referenced in code comments, these plans are cited as "fixes A1", "fixes A2
 5. **`git_diff` was removed from reviewer tools** -- It showed empty results for committed code and caused llama-3-3-70b-instruct to loop. Use `git_merge_base_diff` instead.
 6. **`emitMermaidTool` removed from dev agents** -- Caused infinite loops. Only the Architect has it.
 7. **Worktree cleanup is critical** -- Stale worktrees break subsequent runs. Intake prunes them.
-8. **SSL workaround** -- `NODE_TLS_REJECT_UNAUTHORIZED=0` is set globally for corporate environments with self-signed certs.
-9. **Dockerfiles are patched for SSL** -- `patchDockerfilesSsl()` injects `npm config set strict-ssl false` before npm commands.
+8. **SSL: use `NODE_EXTRA_CA_CERTS`** -- Plan 25 removed `NODE_TLS_REJECT_UNAUTHORIZED=0` from all locations. For corporate environments with self-signed certs, set `NODE_EXTRA_CA_CERTS=/path/to/ca-bundle.pem`. Never re-introduce TLS disabling.
+9. **Dockerfile SSL opt-in** -- `strict-ssl false` in generated Dockerfiles is gated behind `DOCKER_ALLOW_INSECURE_NPM` (default `false`). Only set to `true` when a corporate proxy requires it.
 10. **`GITHUB_MODE=local`** creates a bare repo under the run output directory and patches `origin` to point there.
 11. **Protected config files are refused for repair agents** (`CONFIG_OWNERSHIP_SCAFFOLD_ONLY`) — feature branches cannot modify shared root config files; only the scaffold branch may.
 12. **Only `source: 'executed'` test reports count toward coverage and routing** — agent self-reported (`claimed`) test results are advisory only and do not drive pipeline decisions.
 13. **`completed` now means accepted by the acceptance gate** — never a false positive. The `finalStatus` is one of `completed`, `failed`, `partial`, or `inconclusive`, determined by the deterministic acceptance gate.
 14. **`.agent/` is gitignored in generated projects** — the `repo-contract.json` and other machine-generated files live there and must not be committed.
-15. **Singletons are per-run in server mode** — `token-tracker`, `event-bus`, `run-budget`, `run-ledger`, `response-log`, `logger`, `run-snapshot`, `history-compactor` memo/stats, and `prompt-cache` breakpoint set are scoped per-run via `RunContext` + `AsyncLocalStorage` (Plan 26-14). Module-level globals remain as CLI-mode defaults. New singletons must follow the `_active()` pattern or use `RunContext` to avoid cross-run contamination.
+15. **Singletons are per-run in server mode** — `token-tracker`, `event-bus`, `run-budget`, `run-ledger`, `response-log`, `logger`, `run-snapshot`, `history-compactor` memo/stats, and `prompt-cache` breakpoint set are scoped per-run via `RunContext` + `AsyncLocalStorage` (Plan 25-14). Module-level globals remain as CLI-mode defaults. New singletons must follow the `_active()` pattern or use `RunContext` to avoid cross-run contamination.
 
 ---
 

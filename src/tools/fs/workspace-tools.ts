@@ -241,7 +241,7 @@ export function createWorkspaceTools(
     return [writeFileTool, readFileTool, editFileTool, listDirTool, searchCodeTool];
 }
 
-// ─── Helpers (async — Plan 26-11) ───────────────────────────────────────────
+// ─── Helpers (async — Plan 25-11) ───────────────────────────────────────────
 
 async function listDirectoryAsync(dir: string, root: string, recursive: boolean, depth = 0): Promise<string[]> {
     const results: string[] = [];

@@ -359,7 +359,7 @@ export function buildContext(
     }
 
     // Final safety: if still over budget after all clips, warn and pass through.
-    // Plan 25, 26-04 §12: demoted from error to warn — the overshoot is non-fatal
+    // Plan 25-04 §12: demoted from error to warn — the overshoot is non-fatal
     // (models handle slightly-over-budget contexts gracefully) and the error log
     // was misleading because no actual force-truncation was implemented.
     const finalTotal = clippedTexts.reduce((sum, t) => sum + t.length, 0);

@@ -4,7 +4,7 @@
  * Eliminates ~150 LOC of duplicated HARD CONSTRAINTS, workspace context,
  * and fix/repair/escalation message construction.
  *
- * Extracted from pr-workflow.ts (Sub-Plan 26-08).
+ * Extracted from pr-workflow.ts (Sub-Plan 25-08).
  */
 
 // ─── Shared prompt fragments ────────────────────────────────────────────────

@@ -1,7 +1,7 @@
 /**
  * Gate running with repair — quality gates + integrity checks in PR context.
  *
- * Extracted from pr-workflow.ts (Sub-Plan 26-08).
+ * Extracted from pr-workflow.ts (Sub-Plan 25-08).
  */
 import * as path from 'path';
 import * as fs from 'fs';

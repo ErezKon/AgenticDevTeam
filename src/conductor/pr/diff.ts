@@ -4,7 +4,7 @@
  * Unifies the 4 copies of DIFF_EXCLUDE_SPECS and the diff-too-large
  * stat fallback logic.
  *
- * Extracted from pr-workflow.ts (Sub-Plan 26-08).
+ * Extracted from pr-workflow.ts (Sub-Plan 25-08).
  */
 import { gitExec } from '../../utils/git-exec';
 

@@ -69,7 +69,7 @@ export const GIT_FETCH_ATTEMPTS = 3;
 /** Base backoff between fetch retries; doubles each attempt. */
 const FETCH_RETRY_BASE_MS = 1_000;
 
-/** Non-blocking sleep — Plan 26-11: replaced busy-wait `sleepSync` that blocked the event loop. */
+/** Non-blocking sleep — Plan 25-11: replaced busy-wait `sleepSync` that blocked the event loop. */
 function sleep(ms: number): Promise<void> {
     return new Promise(resolve => setTimeout(resolve, ms));
 }

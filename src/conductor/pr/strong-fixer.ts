@@ -1,7 +1,7 @@
 /**
  * Strong model fixer — comprehensive fix pass with a powerful model.
  *
- * Extracted from pr-workflow.ts (Sub-Plan 26-08).
+ * Extracted from pr-workflow.ts (Sub-Plan 25-08).
  */
 import { getLogger } from '../../utils/logger';
 import { gitExec } from '../../utils/git-exec';

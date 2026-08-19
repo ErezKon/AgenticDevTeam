@@ -126,7 +126,7 @@ export async function ensureNodeLockfile(
     logger?.info?.('Ensuring package-lock.json is in sync with package.json...');
 
     try {
-        // Run npm install to regenerate lockfile (async — Plan 26-11)
+        // Run npm install to regenerate lockfile (async — Plan 25-11)
         // Use --no-audit --no-fund to reduce noise
         await execFileAsync('/bin/sh', ['-c', 'npm install --no-audit --no-fund'], {
             cwd: workspacePath,
@@ -169,7 +169,7 @@ export async function ensureNodeLockfile(
  * environments with self-signed corporate SSL proxy certificates.
  */
 export function patchDockerfilesSsl(workspacePath: string, logger?: ReturnType<typeof getLogger>): void {
-    // Plan 26-02, D3: guard behind explicit opt-in
+    // Plan 25-02, D3: guard behind explicit opt-in
     const { DOCKER_ALLOW_INSECURE_NPM } = require('../../config');
     if (!DOCKER_ALLOW_INSECURE_NPM) return;
 

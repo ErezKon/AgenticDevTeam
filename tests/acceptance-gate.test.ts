@@ -204,7 +204,7 @@ describe('evaluateAcceptance', () => {
     });
 
     it('detects tamper findings as integrity failures', () => {
-        // Plan 25, 26-04 §2: INTEGRITY criterion now reads PR-level integrityFindings
+        // Plan 25-04 §2: INTEGRITY criterion now reads PR-level integrityFindings
         // instead of TAMPER-prefixed bugs.
         const state = makeMinimalState({
             latestGateReport: makeGateReport(),

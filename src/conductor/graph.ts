@@ -59,7 +59,7 @@ export interface ConductorOptions {
  * Filter test reports to the current bugfix iteration so stale failures
  * from previous iterations do not force unnecessary bugfix looping.
  *
- * Plan 25, 26-04 §5: filter by iterationIndex (matching afterE2eRouter).
+ * Plan 25-04 §5: filter by iterationIndex (matching afterE2eRouter).
  */
 function currentIterationFailures(state: ProjectStateType): Array<{ status: string }> {
     const currentIteration = state.iteration?.bugfix ?? 0;

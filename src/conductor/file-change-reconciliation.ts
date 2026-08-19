@@ -40,7 +40,7 @@ export function reconcileFileChanges(
     baseBranch?: string,
 ): ReconciliationResult {
     // Get actual changed files from git
-    // Plan 25, 26-04 §11: guard against error strings from gitExec — they
+    // Plan 25-04 §11: guard against error strings from gitExec — they
     // look like filenames if not filtered, corrupting the reconciliation.
     const actualPaths = new Set<string>();
     try {

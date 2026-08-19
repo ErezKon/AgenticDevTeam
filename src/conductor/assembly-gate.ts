@@ -185,7 +185,7 @@ export function buildAssemblyAssignment(
     };
 }
 
-// ─── AssemblyGateResult → GateOutcome adapter (Sub-Plan 26-10) ──────────────
+// ─── AssemblyGateResult → GateOutcome adapter (Sub-Plan 25-10) ──────────────
 
 /**
  * Convert an AssemblyGateResult into a standard GateOutcome.

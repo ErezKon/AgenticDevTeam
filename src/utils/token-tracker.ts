@@ -99,10 +99,10 @@ export class TokenTracker {
     private _refreshCallback: (() => void) | null = null;
     private _refreshTimer: ReturnType<typeof setTimeout> | null = null;
     private static readonly REFRESH_DEBOUNCE_MS = 3_000;
-    /** Timer for periodically flushing the full JSON snapshot (Plan 26-11). */
+    /** Timer for periodically flushing the full JSON snapshot (Plan 25-11). */
     private _jsonFlushTimer: ReturnType<typeof setTimeout> | null = null;
     private static readonly JSON_FLUSH_INTERVAL_MS = 10_000;
-    /** Track whether a full JSON flush is pending (Plan 26-11). */
+    /** Track whether a full JSON flush is pending (Plan 25-11). */
     private _jsonFlushPending = false;
 
     // ── Persistence API ─────────────────────────────────────────────────
@@ -132,7 +132,7 @@ export class TokenTracker {
     getRunStatus(): RunStatus { return this._runStatus; }
 
     /**
-     * Append a single record as a JSONL line (Plan 26-11).
+     * Append a single record as a JSONL line (Plan 25-11).
      * O(1) per call instead of O(n) full-ledger rewrite.
      */
     private appendJsonlRecord(record: TokenCallRecord): void {
@@ -146,7 +146,7 @@ export class TokenTracker {
     }
 
     /**
-     * Flush the full JSON snapshot to disk (debounced, Plan 26-11).
+     * Flush the full JSON snapshot to disk (debounced, Plan 25-11).
      * Kept for backward compatibility with consumers that read token-usage.json.
      */
     private saveJsonSnapshot(): void {
@@ -160,7 +160,7 @@ export class TokenTracker {
     }
 
     /**
-     * Schedule a debounced full JSON flush (Plan 26-11).
+     * Schedule a debounced full JSON flush (Plan 25-11).
      * The JSONL file has all records immediately; the full JSON is written
      * at most once per JSON_FLUSH_INTERVAL_MS for backward compatibility.
      */
@@ -209,7 +209,7 @@ export class TokenTracker {
             `${record.agentId} [${record.model}] ${record.phase}: `
             + `in=${record.inputTokens} out=${record.outputTokens} total=${record.totalTokens}`,
         );
-        // Plan 26-11: append a single JSONL line (O(1)) for crash safety,
+        // Plan 25-11: append a single JSONL line (O(1)) for crash safety,
         // and schedule a debounced full JSON flush for backward compat.
         this.appendJsonlRecord(record);
         this.scheduleJsonFlush();
@@ -406,7 +406,7 @@ export class TokenTracker {
     }
 }
 
-// ─── Context-aware singleton (Sub-Plan 26-14) ──────────────────────────────
+// ─── Context-aware singleton (Sub-Plan 25-14) ──────────────────────────────
 //
 // When running inside a RunContext (server mode), the proxy delegates to the
 // per-run TokenTracker instance. When no context is active (CLI mode), the

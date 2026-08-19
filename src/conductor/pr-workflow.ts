@@ -2,7 +2,7 @@
  * PR Workflow — backward-compatible re-export shim.
  *
  * The implementation has been decomposed into focused modules under
- * `src/conductor/pr/` (Sub-Plan 26-08). This file re-exports the
+ * `src/conductor/pr/` (Sub-Plan 25-08). This file re-exports the
  * public API so that existing consumers continue to work unchanged.
  *
  * @see ./pr/index.ts  for the full barrel

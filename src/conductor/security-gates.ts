@@ -163,7 +163,7 @@ export function scanForSecrets(workspacePath: string): SecurityFinding[] {
     const findings: SecurityFinding[] = [];
 
     // Get git-tracked files; fall back to filesystem walk on git failure
-    // (Plan 25, 26-04 §3: never silently skip the scan).
+    // (Plan 25-04 §3: never silently skip the scan).
     const trackedOutput = gitExec(workspacePath, 'ls-files');
     let trackedFiles: string[];
     if (!trackedOutput || trackedOutput.startsWith('Error:')) {
@@ -455,7 +455,7 @@ export async function runSecurityGates(
             log.info('Secret scan: clean');
         }
     } catch (err: any) {
-        // Plan 25, 26-04 §4: record errors instead of silently swallowing
+        // Plan 25-04 §4: record errors instead of silently swallowing
         log.error(`Secret scan error: ${err.message}`);
         errors.push(`Secret scan crashed: ${err.message}`);
     }
@@ -488,7 +488,7 @@ export async function runSecurityGates(
         errors.push(`Licence check crashed: ${err.message}`);
     }
 
-    // Plan 25, 26-04 §4: fail-closed — if any sub-gate crashed, the overall
+    // Plan 25-04 §4: fail-closed — if any sub-gate crashed, the overall
     // result is inconclusive/failed rather than silently passing.
     const hasCritical = findings.some(f => f.severity === 'critical');
     const passed = !hasCritical && errors.length === 0;
@@ -558,7 +558,7 @@ export function securityReportToMarkdown(report: SecurityReport): string {
     return lines.join('\n');
 }
 
-// ─── SecurityReport → GateOutcome adapter (Sub-Plan 26-10) ──────────────────
+// ─── SecurityReport → GateOutcome adapter (Sub-Plan 25-10) ──────────────────
 
 /**
  * Convert a SecurityReport into a standard GateOutcome for the unified gate interface.

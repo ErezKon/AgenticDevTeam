@@ -1,7 +1,7 @@
 /**
  * Escalation — invoke a senior dev and reviewer when CRITICALs persist.
  *
- * Extracted from pr-workflow.ts (Sub-Plan 26-08).
+ * Extracted from pr-workflow.ts (Sub-Plan 25-08).
  */
 import { getLogger } from '../../utils/logger';
 import { buildDevAgent } from '../../agents/developers/dev-agent.builder';

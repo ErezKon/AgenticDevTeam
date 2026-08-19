@@ -186,7 +186,7 @@ function getExpectedBehavior(kind: SufficiencyViolation['kind']): string {
     }
 }
 
-// ─── SufficiencyViolation[] → GateOutcome adapter (Sub-Plan 26-10) ──────────
+// ─── SufficiencyViolation[] → GateOutcome adapter (Sub-Plan 25-10) ──────────
 
 /**
  * Convert sufficiency violations into a standard GateOutcome.

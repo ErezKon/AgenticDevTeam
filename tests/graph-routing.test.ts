@@ -226,7 +226,7 @@ describe('afterQaRouter', () => {
 
         const { afterQaRouter } = require('../src/conductor/graph');
         const state = makeMinimalState({
-            // Plan 25, 26-04 §5: iterationIndex must match current bugfix iteration
+            // Plan 25-04 §5: iterationIndex must match current bugfix iteration
             testReports: [makeTestReport('fail', { iterationIndex: 3 })],
             iteration: { bugfix: 3 },
         });
@@ -243,7 +243,7 @@ describe('afterQaRouter', () => {
 
         const { afterQaRouter } = require('../src/conductor/graph');
         const state = makeMinimalState({
-            // Plan 25, 26-04 §5: iterationIndex must match current bugfix iteration
+            // Plan 25-04 §5: iterationIndex must match current bugfix iteration
             testReports: [makeTestReport('fail', { iterationIndex: 3 })],
             iteration: { bugfix: 3 },
         });

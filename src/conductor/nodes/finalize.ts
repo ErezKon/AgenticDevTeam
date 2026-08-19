@@ -77,7 +77,7 @@ export async function finalizeNode(state: ProjectStateType): Promise<Partial<Pro
     const usageSummary = tokenTracker.getRunSummary();
     const usageSnapshot = tokenTracker.getSnapshot();
 
-    // Plan 25, 26-04 §13: Wrap report-building in try/catch so that
+    // Plan 25-04 §13: Wrap report-building in try/catch so that
     // writeStateSnapshot + writeRunManifest always execute in finally.
     let traceReport: ReturnType<typeof buildTraceabilityReport> | null = null;
     let filesDelivered = 0;
@@ -227,7 +227,7 @@ export async function finalizeNode(state: ProjectStateType): Promise<Partial<Pro
         finalLog.warn(`Traceability report failed (non-fatal): ${traceErr.message}`);
     }
 
-    // Plan 25, 26-04 §8: Add acceptance blockers and phase timeline BEFORE
+    // Plan 25-04 §8: Add acceptance blockers and phase timeline BEFORE
     // building summaryText, so they appear in the summary artifact.
 
     // ── Acceptance blockers
@@ -373,7 +373,7 @@ export async function finalizeNode(state: ProjectStateType): Promise<Partial<Pro
     finalLog.info(`Token usage HTML report: ${htmlPath}`);
 
     } catch (reportErr: any) {
-        // Plan 25, 26-04 §13: report generation crashed — log but continue
+        // Plan 25-04 §13: report generation crashed — log but continue
         finalLog.error(`Report generation failed (state will still be saved): ${reportErr.message}`);
     }
 

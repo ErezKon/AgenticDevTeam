@@ -53,7 +53,7 @@ describe('generateFallbackDeployment', () => {
         const df = fs.readFileSync(path.join(tempDir, 'Dockerfile'), 'utf-8');
         expect(df).toContain('nginx:alpine');
         expect(df).toContain('/dist');
-        // strict-ssl false is no longer injected by default (Plan 26-02, D3)
+        // strict-ssl false is no longer injected by default (Plan 25-02, D3)
         expect(df).not.toContain('npm config set strict-ssl false');
     });
 

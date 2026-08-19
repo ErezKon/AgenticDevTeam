@@ -27,7 +27,7 @@ if (!globalThis.crypto) {
 // TLS: honour NODE_EXTRA_CA_CERTS for corporate CAs instead of disabling
 // certificate validation globally. Only disable TLS verification if the
 // operator explicitly sets NODE_TLS_REJECT_UNAUTHORIZED=0 in their .env file.
-// (Plan 26-02, D1: removed default '0' assignment)
+// (Plan 25-02, D1: removed default '0' assignment)
 import './env';
 import express from 'express';
 import cors from 'cors';
@@ -69,7 +69,7 @@ if (API_TOKEN) {
     log.info('API_TOKEN is set — API endpoints require Bearer authentication');
 }
 
-// ─── In-memory session store (Sub-Plan 26-14: fix key-space collision) ──────
+// ─── In-memory session store (Sub-Plan 25-14: fix key-space collision) ──────
 //
 // Both sessions and states are now keyed consistently by threadId.
 // A secondary index maps systemName → threadId for autonomous run lookup.
@@ -189,7 +189,7 @@ app.post('/api/run', async (req, res) => {
         const runMode = mode === 'autonomous' ? 'autonomous' : 'human';
 
         if (runMode === 'autonomous') {
-            // Sub-Plan 26-14: generate a threadId and use it as the key (fixes key-space collision)
+            // Sub-Plan 25-14: generate a threadId and use it as the key (fixes key-space collision)
             const autoThreadId = `run-${systemName}-${Date.now()}`;
             broadcast('run:started', { systemName, threadId: autoThreadId, mode: 'autonomous' });
 
@@ -260,7 +260,7 @@ app.post('/api/run', async (req, res) => {
 });
 
 app.get('/api/run/:id', async (req, res) => {
-    // Sub-Plan 26-14: resolve systemName alias to threadId for backward compat
+    // Sub-Plan 25-14: resolve systemName alias to threadId for backward compat
     const resolvedId = _systemNameIndex.get(req.params.id) ?? req.params.id;
     const session = sessions.get(resolvedId);
     if (session) {
@@ -534,7 +534,7 @@ if (fs.existsSync(dashboardPath)) {
 // ─── Signal handlers — flush token report on unexpected exit ─────────────────
 installProcessHandlers((msg) => log.error(msg));
 
-// ─── Exports for testability (Sub-Plan 26-09) ───────────────────────────────
+// ─── Exports for testability (Sub-Plan 25-09) ───────────────────────────────
 // Importing index.ts no longer starts the server — call createApp() / createHttpServer()
 // and listen() explicitly in tests or alternative entry points.
 export { app, httpServer, wss, broadcast, sessions, states };

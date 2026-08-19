@@ -3,7 +3,7 @@
  * token reports on unexpected exits (SIGINT, SIGTERM, uncaught exceptions,
  * unhandled rejections).
  *
- * Extracted in Sub-Plan 26-09 to eliminate duplication between entry points.
+ * Extracted in Sub-Plan 25-09 to eliminate duplication between entry points.
  */
 import { tokenTracker } from './token-tracker';
 import { refreshTokenReport } from './token-report';

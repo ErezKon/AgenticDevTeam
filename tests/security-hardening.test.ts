@@ -1,5 +1,5 @@
 /**
- * Security hardening regression tests — Plan 26-02.
+ * Security hardening regression tests — Plan 25-02.
  *
  * Validates that critical security fixes (command injection, secret
  * redaction, ref validation, path traversal, env allowlisting) work

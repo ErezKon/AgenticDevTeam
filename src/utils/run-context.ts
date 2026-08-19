@@ -10,7 +10,7 @@
  * the per-run instance if found, otherwise falls back to its module-level
  * default.
  *
- * Sub-Plan 26-14
+ * Sub-Plan 25-14
  */
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { EventEmitter } from 'node:events';

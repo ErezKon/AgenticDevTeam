@@ -111,7 +111,7 @@ export function canonicalBranchName(
     let branch = a.branchName ?? featureBranch(projectSlug, storyKey, a.description);
     if (!branch.startsWith(`${projectSlug}/`)) branch = `${projectSlug}/${branch}`;
     // Sanitize the entire branch name to prevent command injection via LLM-controlled
-    // branchName or storyId values (Plan 26-02, A4).
+    // branchName or storyId values (Plan 25-02, A4).
     branch = branch.replace(/[^a-zA-Z0-9/_.-]/g, '-').replace(/-{2,}/g, '-');
     assertValidRef(branch);
     storyBranches.set(storyKey, branch);

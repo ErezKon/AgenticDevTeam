@@ -349,7 +349,7 @@ export const qaNode = phaseNode('qa', qaLog, { haltCheck: true }, async (state, 
             content: `## Security Report\n\n${securityReportToMarkdown(securityReport)}`,
         });
 
-        // Plan 25, 26-04 §4: propagate sub-gate errors to verificationErrors
+        // Plan 25-04 §4: propagate sub-gate errors to verificationErrors
         if (securityReport.errors && securityReport.errors.length > 0) {
             for (const err of securityReport.errors) {
                 verificationErrors.push({ stage: 'security-gates', message: err });

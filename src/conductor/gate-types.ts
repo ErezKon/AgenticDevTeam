@@ -8,13 +8,13 @@
  * acceptance-gate.ts (implementation), so they must live in a module
  * that neither imports.
  *
- * Sub-Plan 26-10: Added unified Gate abstraction types — GateStatus,
+ * Sub-Plan 25-10: Added unified Gate abstraction types — GateStatus,
  * GateFinding, GateOutcome, and WorkspaceIndex.
  */
 
 import type { Bug } from '../agents/_shared/schemas/bug.schema';
 
-// ─── Unified Gate Abstraction (Sub-Plan 26-10) ─────────────────────────────
+// ─── Unified Gate Abstraction (Sub-Plan 25-10) ─────────────────────────────
 
 /** Standard gate outcome status — all gates must use one of these. */
 export type GateStatus = 'pass' | 'fail' | 'inconclusive' | 'skipped';

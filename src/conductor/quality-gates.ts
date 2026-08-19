@@ -847,7 +847,7 @@ export function gateReportToMarkdown(report: GateReport): string {
     return lines.join('\n');
 }
 
-// ─── GateReport → GateOutcome adapter (Sub-Plan 26-10) ──────────────────────
+// ─── GateReport → GateOutcome adapter (Sub-Plan 25-10) ──────────────────────
 
 /**
  * Convert a GateReport into a standard GateOutcome for the unified gate interface.

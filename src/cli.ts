@@ -7,7 +7,7 @@
  * - Human-in-the-loop mode: pauses after each phase for approve/deny/enhance.
  * - Requirements from file path or inline text.
  *
- * Sub-Plan 26-09: Split into focused modules under src/cli/.
+ * Sub-Plan 25-09: Split into focused modules under src/cli/.
  * This file is now a thin entry point — all logic lives in:
  *   cli/printers.ts  — display helpers (header, roster, artifacts, phase status)
  *   cli/prompts.ts   — readline wrapper, requirements gathering, repo target
@@ -18,7 +18,7 @@ import { webcrypto } from 'node:crypto';
 if (!globalThis.crypto) (globalThis as any).crypto = webcrypto;
 
 // TLS: honour NODE_EXTRA_CA_CERTS for corporate CAs instead of disabling
-// certificate validation globally. (Plan 26-02, D1)
+// certificate validation globally. (Plan 25-02, D1)
 import './env';
 
 import { installProcessHandlers } from './utils/crash-handlers';

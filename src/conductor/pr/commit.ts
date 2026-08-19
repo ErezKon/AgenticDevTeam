@@ -1,7 +1,7 @@
 /**
  * Durable commit — stage, commit and push worktree changes.
  *
- * Extracted from pr-workflow.ts (Sub-Plan 26-08).
+ * Extracted from pr-workflow.ts (Sub-Plan 25-08).
  */
 import { getLogger } from '../../utils/logger';
 import { gitExec, gitPush } from '../../utils/git-exec';

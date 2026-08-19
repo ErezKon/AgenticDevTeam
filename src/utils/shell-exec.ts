@@ -4,7 +4,7 @@
  * Consolidates the duplicated ExecFn type, safeChildEnv, defaultExec,
  * and isToolAvailable from quality-gates, security-gates, and test-runner.
  *
- * Plan 26-11: Added async variants (`AsyncExecFn`, `defaultExecAsync`,
+ * Plan 25-11: Added async variants (`AsyncExecFn`, `defaultExecAsync`,
  * `isToolAvailableAsync`) that use `child_process.execFile` with promises
  * to stop blocking the Node.js event loop during gate execution.
  */
@@ -87,7 +87,7 @@ export function isToolAvailable(
     }
 }
 
-// ─── Async variants (Plan 26-11) ────────────────────────────────────────────
+// ─── Async variants (Plan 25-11) ────────────────────────────────────────────
 
 /** Async injectable exec seam — returns a promise instead of blocking. */
 export type AsyncExecFn = (cmd: string, opts: { cwd: string; timeout: number }) => Promise<string>;

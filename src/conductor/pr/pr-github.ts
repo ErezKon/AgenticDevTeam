@@ -1,7 +1,7 @@
 /**
  * GitHub API operations — Octokit wrapper, PR creation, merge, branch cleanup.
  *
- * Extracted from pr-workflow.ts (Sub-Plan 26-08).
+ * Extracted from pr-workflow.ts (Sub-Plan 25-08).
  */
 import { execSync } from 'child_process';
 import { Octokit } from '@octokit/rest';

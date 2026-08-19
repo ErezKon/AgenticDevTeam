@@ -707,7 +707,7 @@ AgenticDevTeam/
 │   ├── index.ts                            # Express REST + WebSocket server (testable — guarded listen())
 │   ├── config.ts                           # Environment-driven configuration
 │   │
-│   ├── cli/                                # CLI modules (Sub-Plan 26-09)
+│   ├── cli/                                # CLI modules (Sub-Plan 25-09)
 │   │   ├── printers.ts                     # Display helpers (header, roster, artifacts, status)
 │   │   ├── prompts.ts                      # Readline wrapper, requirements gathering, repo target
 │   │   ├── hitl-loop.ts                    # Unified HITL decision loop
@@ -765,18 +765,39 @@ AgenticDevTeam/
 │   │   ├── log-colors.util.ts              # ANSI 256-color codes
 │   │   ├── oauth-auth.util.ts              # OAuth2 client-credentials token cache
 │   │   ├── workspace.ts                    # Project workspace + output dir creation
+│   │   ├── coding-conventions.ts           # Convention file resolution + deployment
 │   │   ├── conventions-digest.ts           # Compact in-prompt conventions digest
 │   │   ├── run-context.ts                  # Per-run AsyncLocalStorage context (RunContext) for concurrent server safety
+│   │   ├── event-bus.ts                    # Typed event bus (14 event types); context-aware via RunContext
 │   │   ├── token-tracker.ts                # Per-invocation token tracking + efficiency metrics
-│   │   ├── token-report.ts                 # HTML token usage report (+ Invocation Efficiency table)
+│   │   ├── token-callback.ts               # LangChain callback for token recording (two-tier provider lookup)
+│   │   ├── token-usage-extractor.ts        # Shared usage normalisation + per-invocation aggregation
+│   │   ├── token-report.ts                 # HTML + JSON token usage report (+ Invocation Efficiency table)
+│   │   ├── cost.ts                         # USD cost estimation per model
+│   │   ├── run-budget.ts                   # Run budget tracking (token/cost/wall-clock limits, 4 levels)
+│   │   ├── run-snapshot.ts                 # state.json + run-manifest.json writer + writePeriodicSnapshot()
+│   │   ├── run-ledger.ts                   # Append-only JSONL evidence ledger for post-mortem diagnostics
+│   │   ├── ledger-report.ts                # Produces outputs/<run>/run-report.md from ledger data
+│   │   ├── run-diagnosis.ts                # Automated failure-cause summary (run-diagnosis.md)
+│   │   ├── response-log.ts                 # Full-response dump per agent invocation (outputs/<run>/full-responses/)
+│   │   ├── structured-output.ts            # JSON extraction, repair, Zod validation, content-block handling
+│   │   ├── git-exec.ts                     # Centralized git command execution (execFileSync, shellSplit, assertValidRef)
+│   │   ├── github-local.ts                 # Local GitHub stand-in backed by bare git repo
+│   │   ├── github-repo-manager.ts          # GitHub repo creation + management
+│   │   ├── retry.ts                        # Retry-with-backoff for transient + rate-limit errors
+│   │   ├── llm-throttle.ts                 # Process-wide LLM rate-limit protection + provider recovery
+│   │   ├── llm-cassette.ts                 # Record/replay VCR for deterministic offline testing
+│   │   ├── traceability.ts                 # Requirements traceability matrix
 │   │   ├── codebase-analysis-writer.ts     # Write analysis markdown to project + outputs
+│   │   ├── repo-contract-writer.ts         # Write, read, and render .agent/repo-contract.json + Markdown
 │   │   ├── fs-walk.ts                      # Shared filesystem walker (walkDir, collectFiles, isTestFile)
 │   │   ├── source-graph.ts                 # Import extraction, graph building, transitive reachability
 │   │   ├── markdown-table.ts               # Shared mdTable() + mdSection() with pipe-escaping
 │   │   ├── shell-exec.ts                   # Shared ExecFn, safeChildEnv, defaultExec, isToolAvailable
 │   │   ├── branch-naming.ts                # Canonical slugify, systemBranch, featureBranch, isSystemBranch
 │   │   ├── artifact-writer.ts              # writeOutputFile + appendOutputLine for output-dir artifacts
-│   │   └── crash-handlers.ts              # flushTokenReportOnExit + installProcessHandlers (shared)
+│   │   ├── workspace-index.ts              # buildWorkspaceIndex() — pre-built file index passed to all gates
+│   │   └── crash-handlers.ts               # flushTokenReportOnExit + installProcessHandlers (shared)
 │   │
 │   ├── templates/
 │   │   └── codebase-analysis.template.ts   # Markdown renderer for CodebaseAnalysis

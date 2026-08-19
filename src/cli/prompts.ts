@@ -1,7 +1,7 @@
 /**
  * CLI input helpers — readline wrapper, requirements gathering, repo target.
  *
- * Extracted from cli.ts in Sub-Plan 26-09 to reduce the 871-line monolith.
+ * Extracted from cli.ts in Sub-Plan 25-09 to reduce the 871-line monolith.
  */
 import * as fs from 'fs';
 import * as path from 'path';

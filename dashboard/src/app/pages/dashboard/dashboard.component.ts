@@ -64,7 +64,7 @@ export class DashboardComponent implements OnInit, OnDestroy {
 
   ngOnDestroy() { this.sub?.unsubscribe(); }
 
-  // ── trackBy functions (Plan 26-11) ─────────────────────────────────────
+  // ── trackBy functions (Plan 25-11) ─────────────────────────────────────
   trackByAgent(_i: number, agent: AgentEntry): string { return agent.tag; }
   trackByRun(_i: number, run: any): string { return run.threadId; }
   getColor(code: number): string {

@@ -957,7 +957,7 @@ export function tamperFindingsToMarkdown(findings: TamperFinding[]): string {
     return `## Gate Integrity\n\n${mdTable(headers, rows)}`;
 }
 
-// ─── TamperFinding[] → GateOutcome adapter (Sub-Plan 26-10) ─────────────────
+// ─── TamperFinding[] → GateOutcome adapter (Sub-Plan 25-10) ─────────────────
 
 /**
  * Convert tamper findings into a standard GateOutcome.

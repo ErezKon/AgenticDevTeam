@@ -130,7 +130,7 @@ export function evaluateAcceptance(state: ProjectStateType): AcceptanceReport {
                 r => r.step === 'test' && r.mode !== 'absent' && !r.skipped,
             );
             // Only count reports with source === 'executed' (parsed from a real runner)
-            // to prevent LLM-claimed tests from inflating counts (Plan 25, 26-04 §1).
+            // to prevent LLM-claimed tests from inflating counts (Plan 25-04 §1).
             const realTestReports = (state.testReports ?? []).filter(
                 r => (r.type === 'unit' || r.type === 'integration') && r.source === 'executed',
             );
@@ -191,7 +191,7 @@ export function evaluateAcceptance(state: ProjectStateType): AcceptanceReport {
     }
 
     // ── INTEGRITY ────────────────────────────────────────────────────────
-    // Plan 25, 26-04 §2: Read integrityFindings from pullRequests instead
+    // Plan 25-04 §2: Read integrityFindings from pullRequests instead
     // of the non-existent 'TAMPER-' bug prefix. PR-level integrityFindings
     // are populated by pr-workflow.ts via detectTampering().
     {
@@ -566,7 +566,7 @@ export function acceptanceReportToMarkdown(report: AcceptanceReport): string {
     return lines.join('\n');
 }
 
-// ─── AcceptanceReport → GateOutcome adapter (Sub-Plan 26-10) ────────────────
+// ─── AcceptanceReport → GateOutcome adapter (Sub-Plan 25-10) ────────────────
 
 /**
  * Convert an AcceptanceReport into a standard GateOutcome.
