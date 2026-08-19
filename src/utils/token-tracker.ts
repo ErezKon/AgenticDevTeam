@@ -40,6 +40,9 @@ export interface AgentUsageSummary {
     inputTokens: number;
     outputTokens: number;
     totalTokens: number;
+    /** Plan 28: per-agent cache token totals for dashboard & report tables. */
+    cacheReadTokens: number;
+    cacheCreationTokens: number;
 }
 
 /** Full run usage summary with per-agent breakdown. */
@@ -55,8 +58,8 @@ export interface RunUsageSummary {
     /** Share of input tokens served from cache, 0–1. The pacmanclaude run scored 0. */
     cacheHitRate: number;
     byAgent: AgentUsageSummary[];
-    byPhase: { phase: string; inputTokens: number; outputTokens: number; totalTokens: number; callCount: number }[];
-    byModel: { model: string; inputTokens: number; outputTokens: number; totalTokens: number; callCount: number }[];
+    byPhase: { phase: string; inputTokens: number; outputTokens: number; totalTokens: number; callCount: number; cacheReadTokens: number; cacheCreationTokens: number }[];
+    byModel: { model: string; inputTokens: number; outputTokens: number; totalTokens: number; callCount: number; cacheReadTokens: number; cacheCreationTokens: number }[];
 }
 
 // ─── Run status ─────────────────────────────────────────────────────────────
@@ -195,6 +198,9 @@ export class TokenTracker {
                     totalTokens: summary.totalTokens,
                     totalInputTokens: summary.totalInputTokens,
                     totalOutputTokens: summary.totalOutputTokens,
+                    totalCacheReadTokens: summary.totalCacheReadTokens,
+                    totalCacheCreationTokens: summary.totalCacheCreationTokens,
+                    cacheHitRate: summary.cacheHitRate,
                 });
             } catch { /* best-effort */ }
         }, TokenTracker.REFRESH_DEBOUNCE_MS);
@@ -219,32 +225,41 @@ export class TokenTracker {
     /** Get the full run usage summary with breakdowns. */
     getRunSummary(): RunUsageSummary {
         const byAgentMap = new Map<string, AgentUsageSummary>();
-        const byPhaseMap = new Map<string, { phase: string; inputTokens: number; outputTokens: number; totalTokens: number; callCount: number }>();
-        const byModelMap = new Map<string, { model: string; inputTokens: number; outputTokens: number; totalTokens: number; callCount: number }>();
+        const byPhaseMap = new Map<string, { phase: string; inputTokens: number; outputTokens: number; totalTokens: number; callCount: number; cacheReadTokens: number; cacheCreationTokens: number }>();
+        const byModelMap = new Map<string, { model: string; inputTokens: number; outputTokens: number; totalTokens: number; callCount: number; cacheReadTokens: number; cacheCreationTokens: number }>();
 
         for (const r of this.ledger) {
+            const cacheRead = r.cacheReadTokens ?? 0;
+            const cacheWrite = r.cacheCreationTokens ?? 0;
+
             // By agent
-            const agent = byAgentMap.get(r.agentId) ?? { agentId: r.agentId, model: r.model, callCount: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0 };
+            const agent = byAgentMap.get(r.agentId) ?? { agentId: r.agentId, model: r.model, callCount: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 };
             agent.callCount++;
             agent.inputTokens += r.inputTokens;
             agent.outputTokens += r.outputTokens;
             agent.totalTokens += r.totalTokens;
+            agent.cacheReadTokens += cacheRead;
+            agent.cacheCreationTokens += cacheWrite;
             byAgentMap.set(r.agentId, agent);
 
             // By phase
-            const phase = byPhaseMap.get(r.phase) ?? { phase: r.phase, inputTokens: 0, outputTokens: 0, totalTokens: 0, callCount: 0 };
+            const phase = byPhaseMap.get(r.phase) ?? { phase: r.phase, inputTokens: 0, outputTokens: 0, totalTokens: 0, callCount: 0, cacheReadTokens: 0, cacheCreationTokens: 0 };
             phase.callCount++;
             phase.inputTokens += r.inputTokens;
             phase.outputTokens += r.outputTokens;
             phase.totalTokens += r.totalTokens;
+            phase.cacheReadTokens += cacheRead;
+            phase.cacheCreationTokens += cacheWrite;
             byPhaseMap.set(r.phase, phase);
 
             // By model
-            const model = byModelMap.get(r.model) ?? { model: r.model, inputTokens: 0, outputTokens: 0, totalTokens: 0, callCount: 0 };
+            const model = byModelMap.get(r.model) ?? { model: r.model, inputTokens: 0, outputTokens: 0, totalTokens: 0, callCount: 0, cacheReadTokens: 0, cacheCreationTokens: 0 };
             model.callCount++;
             model.inputTokens += r.inputTokens;
             model.outputTokens += r.outputTokens;
             model.totalTokens += r.totalTokens;
+            model.cacheReadTokens += cacheRead;
+            model.cacheCreationTokens += cacheWrite;
             byModelMap.set(r.model, model);
         }
 

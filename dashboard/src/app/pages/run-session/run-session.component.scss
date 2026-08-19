@@ -211,6 +211,8 @@
   font-size: 0.85rem;
 }
 
+.obs-cache { color: #00bcd4; }
+
 .status-ok { color: #4caf50; }
 .status-warn { color: #ff9800; }
 .status-degrade { color: #f44336; }
@@ -305,6 +307,8 @@
   font-size: 1.3rem;
   font-weight: 700;
   font-family: monospace;
+
+  &.stat-cache { color: #00bcd4; }
 }
 
 .output-path {
@@ -328,6 +332,18 @@
 .cancelled-title {
   color: var(--accent-red);
   margin-bottom: 0.5rem;
+}
+
+// ── Token Charts Card (Plan 28) ─────────────────────────────────────────
+.token-charts-card {
+  border-color: #00bcd4;
+  border-width: 2px;
+}
+
+.token-charts-title {
+  color: #00bcd4;
+  margin-bottom: 1rem;
+  font-size: 1rem;
 }
 
 // ── Mission Report Card ─────────────────────────────────────────────────

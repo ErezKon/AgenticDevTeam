@@ -8,6 +8,7 @@ import { MarkdownViewerComponent } from '../../components/markdown-viewer/markdo
 import { EventLogComponent } from '../../components/event-log/event-log.component';
 import { FileChangesTableComponent } from '../../components/file-changes-table/file-changes-table.component';
 import { PrBadgeComponent } from '../../components/pr-badge/pr-badge.component';
+import { TokenChartsComponent, type TokenChartData } from '../../components/token-charts/token-charts.component';
 
 interface PhaseStep {
   id: string;
@@ -32,7 +33,7 @@ const PIPELINE_PHASES: PhaseStep[] = [
 @Component({
   selector: 'app-run-session',
   standalone: true,
-  imports: [CommonModule, FormsModule, RouterLink, MarkdownViewerComponent, EventLogComponent, FileChangesTableComponent, PrBadgeComponent],
+  imports: [CommonModule, FormsModule, RouterLink, MarkdownViewerComponent, EventLogComponent, FileChangesTableComponent, PrBadgeComponent, TokenChartsComponent],
   templateUrl: './run-session.component.html',
   styleUrls: ['./run-session.component.scss'],
   changeDetection: ChangeDetectionStrategy.OnPush,
@@ -57,8 +58,17 @@ export class RunSessionComponent implements OnInit, OnDestroy {
   // Stats
   totalTokens = 0;
   totalCalls = 0;
+  totalInputTokens = 0;
+  totalOutputTokens = 0;
+  totalCacheReadTokens = 0;
+  totalCacheCreationTokens = 0;
+  cacheHitRate = 0;
+  estimatedCost = 0;
   budgetLevel = 'ok';
   budgetUtilisation = 0;
+
+  // Chart data (Plan 28: token usage charts)
+  tokenChartData: TokenChartData | null = null;
 
   // Precomputed fields (Plan 25-11: avoid getter recalculation on every CD cycle)
   visiblePhases: PhaseStep[] = [];
@@ -99,6 +109,12 @@ export class RunSessionComponent implements OnInit, OnDestroy {
       if (msg.event === 'tokens:update') {
         this.totalTokens = data.totalTokens ?? this.totalTokens;
         this.totalCalls = data.totalCalls ?? this.totalCalls;
+        this.totalInputTokens = data.totalInputTokens ?? this.totalInputTokens;
+        this.totalOutputTokens = data.totalOutputTokens ?? this.totalOutputTokens;
+        this.totalCacheReadTokens = data.totalCacheReadTokens ?? this.totalCacheReadTokens;
+        this.totalCacheCreationTokens = data.totalCacheCreationTokens ?? this.totalCacheCreationTokens;
+        this.cacheHitRate = data.cacheHitRate ?? this.cacheHitRate;
+        this.recomputeChartData();
       }
       if (msg.event === 'budget:level') {
         this.budgetLevel = data.level ?? 'ok';
@@ -126,6 +142,22 @@ export class RunSessionComponent implements OnInit, OnDestroy {
           this.totalTokens = res.tokenUsage.reduce(
             (sum: number, r: any) => sum + (r.totalTokens ?? 0), 0
           );
+          this.totalInputTokens = res.tokenUsage.reduce(
+            (sum: number, r: any) => sum + (r.inputTokens ?? 0), 0
+          );
+          this.totalOutputTokens = res.tokenUsage.reduce(
+            (sum: number, r: any) => sum + (r.outputTokens ?? 0), 0
+          );
+          this.totalCacheReadTokens = res.tokenUsage.reduce(
+            (sum: number, r: any) => sum + (r.cacheReadTokens ?? 0), 0
+          );
+          this.totalCacheCreationTokens = res.tokenUsage.reduce(
+            (sum: number, r: any) => sum + (r.cacheCreationTokens ?? 0), 0
+          );
+          this.cacheHitRate = this.totalInputTokens > 0
+            ? this.totalCacheReadTokens / this.totalInputTokens
+            : 0;
+          this.recomputeChartData();
         }
 
         // Recompute precomputed fields (Plan 25-11)
@@ -215,6 +247,19 @@ export class RunSessionComponent implements OnInit, OnDestroy {
   }
 
   // ── Pipeline timeline helpers ──────────────────────────────────────────
+
+  /** Recompute chart data when token stats change (Plan 28). */
+  private recomputeChartData(): void {
+    if (this.totalInputTokens > 0 || this.totalOutputTokens > 0) {
+      this.tokenChartData = {
+        totalInputTokens: this.totalInputTokens,
+        totalOutputTokens: this.totalOutputTokens,
+        totalCacheReadTokens: this.totalCacheReadTokens,
+        totalCacheCreationTokens: this.totalCacheCreationTokens,
+        cacheHitRate: this.cacheHitRate,
+      };
+    }
+  }
 
   /** Recompute visible phases when state or phase changes (Plan 25-11). */
   private recomputeVisiblePhases(): void {

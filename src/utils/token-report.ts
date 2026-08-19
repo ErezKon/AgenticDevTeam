@@ -15,17 +15,14 @@ import type { TokenCallRecord, RunUsageSummary, RunStatus } from './token-tracke
 import { tokenTracker } from './token-tracker';
 import { getCumulativeCompactionStats } from '../agents/_shared/history-compactor';
 import { getTruncationStats } from '../tools/_shared/truncate';
-import { estimateRunCost } from './cost';
+import { estimateCost, estimateRunCost } from './cost';
 
 const log = getLogger('[TokenReport]', 220);
 
-// ─── Cost helper ────────────────────────────────────────────────────────────
+// ─── Cost helpers ───────────────────────────────────────────────────────────
 
-function estimateCostLocal(model: string, inputTokens: number, outputTokens: number): number {
-    const pricing = MODEL_PRICING[model];
-    if (!pricing) return 0;
-    return (inputTokens / 1000) * pricing.inputPer1k + (outputTokens / 1000) * pricing.outputPer1k;
-}
+const DEFAULT_CACHE_READ_MULTIPLIER = 0.1;
+const DEFAULT_CACHE_WRITE_MULTIPLIER = 1.25;
 
 // ─── Aggregation ────────────────────────────────────────────────────────────
 
@@ -36,8 +33,11 @@ interface AgentCostRow {
     inputTokens: number;
     outputTokens: number;
     totalTokens: number;
+    cacheReadTokens: number;
+    cacheCreationTokens: number;
     inputCost: number;
     outputCost: number;
+    cacheCost: number;
     totalCost: number;
 }
 
@@ -47,14 +47,18 @@ interface PhaseCostRow {
     inputTokens: number;
     outputTokens: number;
     totalTokens: number;
+    cacheReadTokens: number;
+    cacheCreationTokens: number;
 }
 
 function buildAgentCostRows(summary: RunUsageSummary): AgentCostRow[] {
     return summary.byAgent.map(a => {
         const pricing = MODEL_PRICING[a.model];
-        const inputCost = pricing ? (a.inputTokens / 1000) * pricing.inputPer1k : 0;
+        const listInputCost = pricing ? (a.inputTokens / 1000) * pricing.inputPer1k : 0;
         const outputCost = pricing ? (a.outputTokens / 1000) * pricing.outputPer1k : 0;
-        return { ...a, inputCost, outputCost, totalCost: inputCost + outputCost };
+        const billedCost = estimateCost(a.model, a.inputTokens, a.outputTokens, a.cacheReadTokens, a.cacheCreationTokens);
+        const cacheCost = listInputCost + outputCost - billedCost; // savings from cache (positive = saved)
+        return { ...a, inputCost: listInputCost, outputCost, cacheCost, totalCost: billedCost };
     });
 }
 
@@ -108,8 +112,11 @@ function generateHtml(
     const pieData = JSON.stringify(agentRows.map(r => r.totalTokens));
     const pieColors = JSON.stringify(agentRows.map((_, i) => pickColor(i)));
 
+    // Bar chart: cache-aware input breakdown by agent
     const barAgentLabels = JSON.stringify(agentRows.map(r => r.agentId));
-    const barInputData = JSON.stringify(agentRows.map(r => r.inputTokens));
+    const barCacheReadData = JSON.stringify(agentRows.map(r => r.cacheReadTokens));
+    const barCacheWriteData = JSON.stringify(agentRows.map(r => r.cacheCreationTokens));
+    const barUncachedData = JSON.stringify(agentRows.map(r => Math.max(0, r.inputTokens - r.cacheReadTokens - r.cacheCreationTokens)));
     const barOutputData = JSON.stringify(agentRows.map(r => r.outputTokens));
 
     const phaseRows: PhaseCostRow[] = summary.byPhase;
@@ -117,20 +124,43 @@ function generateHtml(
     const barPhaseData = JSON.stringify(phaseRows.map(r => r.totalTokens));
     const barPhaseColors = JSON.stringify(phaseRows.map((_, i) => pickColor(i)));
 
-    // Cost by agent bar chart
+    // Cost by agent bar chart — cache-aware breakdown
     const costLabels = JSON.stringify(agentRows.map(r => r.agentId));
-    const costInputData = JSON.stringify(agentRows.map(r => r.inputCost));
+    const costCacheReadData = JSON.stringify(agentRows.map(r => {
+        const pricing = MODEL_PRICING[r.model];
+        if (!pricing) return 0;
+        const mul = pricing.cacheReadMultiplier ?? DEFAULT_CACHE_READ_MULTIPLIER;
+        return (r.cacheReadTokens * mul * pricing.inputPer1k) / 1000;
+    }));
+    const costCacheWriteData = JSON.stringify(agentRows.map(r => {
+        const pricing = MODEL_PRICING[r.model];
+        if (!pricing) return 0;
+        const mul = pricing.cacheWriteMultiplier ?? DEFAULT_CACHE_WRITE_MULTIPLIER;
+        return (r.cacheCreationTokens * mul * pricing.inputPer1k) / 1000;
+    }));
+    const costUncachedData = JSON.stringify(agentRows.map(r => {
+        const pricing = MODEL_PRICING[r.model];
+        if (!pricing) return 0;
+        const uncached = Math.max(0, r.inputTokens - r.cacheReadTokens - r.cacheCreationTokens);
+        return (uncached * pricing.inputPer1k) / 1000;
+    }));
     const costOutputData = JSON.stringify(agentRows.map(r => r.outputCost));
+
+    // Cache efficiency by agent chart
+    const cacheEffLabels = JSON.stringify(agentRows.map(r => r.agentId));
+    const cacheEffData = JSON.stringify(agentRows.map(r => r.inputTokens > 0 ? Math.round((r.cacheReadTokens / r.inputTokens) * 1000) / 10 : 0));
 
     // Build detail table rows
     const detailRows = records.map(r => {
-        const cost = estimateCostLocal(r.model, r.inputTokens, r.outputTokens);
+        const cost = estimateCost(r.model, r.inputTokens, r.outputTokens, r.cacheReadTokens, r.cacheCreationTokens);
         return `<tr>
             <td>${escapeHtml(r.agentId)}</td>
             <td>${escapeHtml(r.phase)}</td>
             <td>${escapeHtml(r.model)}</td>
             <td class="num">${formatNumber(r.inputTokens)}</td>
             <td class="num">${formatNumber(r.outputTokens)}</td>
+            <td class="num">${formatNumber(r.cacheReadTokens ?? 0)}</td>
+            <td class="num">${formatNumber(r.cacheCreationTokens ?? 0)}</td>
             <td class="num">${formatNumber(r.totalTokens)}</td>
             <td class="num">${formatCost(cost)}</td>
             <td>${r.timestamp}</td>
@@ -145,10 +175,11 @@ function generateHtml(
             <td class="num">${r.callCount}</td>
             <td class="num">${formatNumber(r.inputTokens)}</td>
             <td class="num">${formatNumber(r.outputTokens)}</td>
+            <td class="num">${formatNumber(r.cacheReadTokens)}</td>
+            <td class="num">${formatNumber(r.cacheCreationTokens)}</td>
             <td class="num">${formatNumber(r.totalTokens)}</td>
-            <td class="num">${formatCost(r.inputCost)}</td>
-            <td class="num">${formatCost(r.outputCost)}</td>
             <td class="num">${formatCost(r.totalCost)}</td>
+            <td class="num">${r.cacheCost > 0.0001 ? formatCost(r.cacheCost) : '—'}</td>
         </tr>`,
     ).join('\n');
 
@@ -159,31 +190,39 @@ function generateHtml(
             <td class="num">${r.callCount}</td>
             <td class="num">${formatNumber(r.inputTokens)}</td>
             <td class="num">${formatNumber(r.outputTokens)}</td>
+            <td class="num">${formatNumber(r.cacheReadTokens)}</td>
+            <td class="num">${formatNumber(r.cacheCreationTokens)}</td>
             <td class="num">${formatNumber(r.totalTokens)}</td>
         </tr>`,
     ).join('\n');
 
     // Model table rows
     const modelTableRows = summary.byModel.map(r => {
-        const cost = estimateCostLocal(r.model, r.inputTokens, r.outputTokens);
+        const cost = estimateCost(r.model, r.inputTokens, r.outputTokens, r.cacheReadTokens, r.cacheCreationTokens);
         return `<tr>
             <td>${escapeHtml(r.model)}</td>
             <td class="num">${r.callCount}</td>
             <td class="num">${formatNumber(r.inputTokens)}</td>
             <td class="num">${formatNumber(r.outputTokens)}</td>
+            <td class="num">${formatNumber(r.cacheReadTokens)}</td>
+            <td class="num">${formatNumber(r.cacheCreationTokens)}</td>
             <td class="num">${formatNumber(r.totalTokens)}</td>
             <td class="num">${formatCost(cost)}</td>
         </tr>`;
     }).join('\n');
 
-    // Pricing rates table
-    const pricingRows = Object.entries(MODEL_PRICING).map(([model, pricing]) =>
-        `<tr>
+    // Pricing rates table — include effective cache rates
+    const pricingRows = Object.entries(MODEL_PRICING).map(([model, pricing]) => {
+        const readMul = pricing.cacheReadMultiplier ?? DEFAULT_CACHE_READ_MULTIPLIER;
+        const writeMul = pricing.cacheWriteMultiplier ?? DEFAULT_CACHE_WRITE_MULTIPLIER;
+        return `<tr>
             <td>${escapeHtml(model)}</td>
             <td class="num">${formatCost(pricing.inputPer1k)}</td>
             <td class="num">${formatCost(pricing.outputPer1k)}</td>
-        </tr>`,
-    ).join('\n');
+            <td class="num">${formatCost(pricing.inputPer1k * readMul)}</td>
+            <td class="num">${formatCost(pricing.inputPer1k * writeMul)}</td>
+        </tr>`;
+    }).join('\n');
 
     // Invocation efficiency table
     const invocationRows = tokenTracker.getInvocationSummaries();
@@ -410,7 +449,11 @@ ${runStatus === 'in-progress'
     </div>
     <div class="summary-card">
         <div class="value">${formatNumber(summary.totalCacheReadTokens)}</div>
-        <div class="label">Cached Input Tokens</div>
+        <div class="label">Cache Read Tokens</div>
+    </div>
+    <div class="summary-card">
+        <div class="value">${formatNumber(summary.totalCacheCreationTokens)}</div>
+        <div class="label">Cache Write Tokens</div>
     </div>
     <div class="summary-card">
         <div class="value">${summary.totalOutputTokens > 0 ? (summary.totalInputTokens / summary.totalOutputTokens).toFixed(1) : '—'}:1</div>
@@ -433,7 +476,7 @@ ${runStatus === 'in-progress'
         <canvas id="pieChart"></canvas>
     </div>
     <div class="chart-container">
-        <h3>Input vs Output Tokens by Agent</h3>
+        <h3>Token Breakdown by Agent (Cache + Uncached + Output)</h3>
         <canvas id="barChart"></canvas>
     </div>
     <div class="chart-container">
@@ -441,8 +484,12 @@ ${runStatus === 'in-progress'
         <canvas id="phaseChart"></canvas>
     </div>
     <div class="chart-container">
-        <h3>Estimated Cost by Agent (Input vs Output)</h3>
+        <h3>Estimated Cost by Agent (Cache-Aware)</h3>
         <canvas id="costChart"></canvas>
+    </div>
+    <div class="chart-container">
+        <h3>Cache Hit Rate by Agent (%)</h3>
+        <canvas id="cacheEffChart"></canvas>
     </div>
 </div>
 <noscript>
@@ -455,8 +502,8 @@ ${runStatus === 'in-progress'
     <thead>
         <tr>
             <th>Agent</th><th>Model</th><th>Calls</th>
-            <th>Input Tokens</th><th>Output Tokens</th><th>Total Tokens</th>
-            <th>Input Cost</th><th>Output Cost</th><th>Total Cost</th>
+            <th>Input</th><th>Output</th><th>Cache Read</th><th>Cache Write</th><th>Total</th>
+            <th>Billed Cost</th><th>Cache Savings</th>
         </tr>
     </thead>
     <tbody>
@@ -467,10 +514,11 @@ ${runStatus === 'in-progress'
             <td colspan="3">Total</td>
             <td class="num">${formatNumber(summary.totalInputTokens)}</td>
             <td class="num">${formatNumber(summary.totalOutputTokens)}</td>
+            <td class="num">${formatNumber(summary.totalCacheReadTokens)}</td>
+            <td class="num">${formatNumber(summary.totalCacheCreationTokens)}</td>
             <td class="num">${formatNumber(summary.totalTokens)}</td>
-            <td class="num">${formatCost(agentRows.reduce((s, r) => s + r.inputCost, 0))}</td>
-            <td class="num">${formatCost(agentRows.reduce((s, r) => s + r.outputCost, 0))}</td>
             <td class="num">${formatCost(totalCost)}</td>
+            <td class="num">${cacheSavings > 0.0001 ? formatCost(cacheSavings) : '—'}</td>
         </tr>
     </tfoot>
 </table>
@@ -479,7 +527,7 @@ ${runStatus === 'in-progress'
 <h2>Usage by Phase</h2>
 <table>
     <thead>
-        <tr><th>Phase</th><th>Calls</th><th>Input</th><th>Output</th><th>Total</th></tr>
+        <tr><th>Phase</th><th>Calls</th><th>Input</th><th>Output</th><th>Cache Read</th><th>Cache Write</th><th>Total</th></tr>
     </thead>
     <tbody>${phaseTableRows}</tbody>
 </table>
@@ -488,7 +536,7 @@ ${runStatus === 'in-progress'
 <h2>Usage by Model</h2>
 <table>
     <thead>
-        <tr><th>Model</th><th>Calls</th><th>Input</th><th>Output</th><th>Total</th><th>Est. Cost</th></tr>
+        <tr><th>Model</th><th>Calls</th><th>Input</th><th>Output</th><th>Cache Read</th><th>Cache Write</th><th>Total</th><th>Est. Cost</th></tr>
     </thead>
     <tbody>${modelTableRows}</tbody>
 </table>
@@ -543,7 +591,7 @@ ${(compaction.invocations > 0 || truncation.truncated > 0) ? `<h2>History Compac
 <h2>Configured Pricing Rates</h2>
 <table>
     <thead>
-        <tr><th>Model</th><th>Input ($/1K tokens)</th><th>Output ($/1K tokens)</th></tr>
+        <tr><th>Model</th><th>Input ($/1K)</th><th>Output ($/1K)</th><th>Cache Read ($/1K)</th><th>Cache Write ($/1K)</th></tr>
     </thead>
     <tbody>${pricingRows}</tbody>
 </table>
@@ -555,7 +603,7 @@ ${(compaction.invocations > 0 || truncation.truncated > 0) ? `<h2>History Compac
     <thead>
         <tr>
             <th>Agent</th><th>Phase</th><th>Model</th>
-            <th>Input</th><th>Output</th><th>Total</th>
+            <th>Input</th><th>Output</th><th>Cache Read</th><th>Cache Write</th><th>Total</th>
             <th>Cost</th><th>Timestamp</th>
         </tr>
     </thead>
@@ -595,13 +643,15 @@ ${(compaction.invocations > 0 || truncation.truncated > 0) ? `<h2>History Compac
         },
     });
 
-    // Bar: input vs output by agent
+    // Bar: cache-aware token breakdown by agent
     new Chart(document.getElementById('barChart'), {
         type: 'bar',
         data: {
             labels: ${barAgentLabels},
             datasets: [
-                { label: 'Input', data: ${barInputData}, backgroundColor: '#36a2eb' },
+                { label: 'Cache Read', data: ${barCacheReadData}, backgroundColor: '#00bcd4' },
+                { label: 'Cache Write', data: ${barCacheWriteData}, backgroundColor: '#ff9800' },
+                { label: 'Uncached Input', data: ${barUncachedData}, backgroundColor: '#36a2eb' },
                 { label: 'Output', data: ${barOutputData}, backgroundColor: '#ff6384' },
             ],
         },
@@ -631,13 +681,15 @@ ${(compaction.invocations > 0 || truncation.truncated > 0) ? `<h2>History Compac
         },
     });
 
-    // Bar: cost by agent (input vs output cost)
+    // Bar: cost by agent (cache-aware breakdown)
     new Chart(document.getElementById('costChart'), {
         type: 'bar',
         data: {
             labels: ${costLabels},
             datasets: [
-                { label: 'Input Cost', data: ${costInputData}, backgroundColor: '#9ece6a' },
+                { label: 'Cache Read Cost', data: ${costCacheReadData}, backgroundColor: '#00bcd4' },
+                { label: 'Cache Write Cost', data: ${costCacheWriteData}, backgroundColor: '#ff9800' },
+                { label: 'Uncached Input Cost', data: ${costUncachedData}, backgroundColor: '#9ece6a' },
                 { label: 'Output Cost', data: ${costOutputData}, backgroundColor: '#e0af68' },
             ],
         },
@@ -648,6 +700,27 @@ ${(compaction.invocations > 0 || truncation.truncated > 0) ? `<h2>History Compac
                 y: { stacked: true, beginAtZero: true, ticks: { callback: function(v) { return '$' + v.toFixed(4); } } },
             },
             plugins: { legend: { position: 'top' } },
+        },
+    });
+
+    // Horizontal bar: cache hit rate by agent
+    new Chart(document.getElementById('cacheEffChart'), {
+        type: 'bar',
+        data: {
+            labels: ${cacheEffLabels},
+            datasets: [{
+                label: 'Cache Hit Rate %',
+                data: ${cacheEffData},
+                backgroundColor: '#00bcd4',
+            }],
+        },
+        options: {
+            responsive: true,
+            indexAxis: 'y',
+            scales: {
+                x: { beginAtZero: true, max: 100, ticks: { callback: function(v) { return v + '%'; } } },
+            },
+            plugins: { legend: { display: false } },
         },
     });
 })();

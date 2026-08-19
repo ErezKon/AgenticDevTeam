@@ -89,6 +89,8 @@ describe('estimateRunCost', () => {
                     inputTokens: 1000,    // 50% of totalInput
                     outputTokens: 500,
                     totalTokens: 1500,
+                    cacheReadTokens: 0,
+                    cacheCreationTokens: 0,
                 },
                 {
                     agentId: 'agent-b',
@@ -97,6 +99,8 @@ describe('estimateRunCost', () => {
                     inputTokens: 1000,    // 50% of totalInput
                     outputTokens: 500,
                     totalTokens: 1500,
+                    cacheReadTokens: 0,
+                    cacheCreationTokens: 0,
                 },
             ],
             byPhase: [],
@@ -134,6 +138,8 @@ describe('estimateRunCost', () => {
                     inputTokens: 1000,
                     outputTokens: 500,
                     totalTokens: 1500,
+                    cacheReadTokens: 0,
+                    cacheCreationTokens: 0,
                 },
             ],
             byPhase: [],
@@ -161,6 +167,8 @@ describe('estimateRunCost', () => {
                     inputTokens: 1000,
                     outputTokens: 500,
                     totalTokens: 1500,
+                    cacheReadTokens: 0,
+                    cacheCreationTokens: 0,
                 },
             ],
             byPhase: [],
@@ -187,6 +195,8 @@ describe('estimateRunCost', () => {
                     inputTokens: 800,    // 80%
                     outputTokens: 400,
                     totalTokens: 1200,
+                    cacheReadTokens: 0,
+                    cacheCreationTokens: 0,
                 },
                 {
                     agentId: 'light',
@@ -195,6 +205,8 @@ describe('estimateRunCost', () => {
                     inputTokens: 200,    // 20%
                     outputTokens: 200,
                     totalTokens: 400,
+                    cacheReadTokens: 0,
+                    cacheCreationTokens: 0,
                 },
             ],
             byPhase: [],

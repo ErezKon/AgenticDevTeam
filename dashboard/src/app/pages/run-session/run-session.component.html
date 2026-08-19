@@ -59,8 +59,28 @@
         <span class="obs-value">{{ totalCalls }}</span>
       </div>
       <div class="obs-item" *ngIf="totalTokens > 0">
-        <span class="obs-label">Tokens</span>
+        <span class="obs-label">Total Tokens</span>
         <span class="obs-value">{{ totalTokens.toLocaleString() }}</span>
+      </div>
+      <div class="obs-item" *ngIf="totalInputTokens > 0">
+        <span class="obs-label">Input</span>
+        <span class="obs-value">{{ totalInputTokens.toLocaleString() }}</span>
+      </div>
+      <div class="obs-item" *ngIf="totalOutputTokens > 0">
+        <span class="obs-label">Output</span>
+        <span class="obs-value">{{ totalOutputTokens.toLocaleString() }}</span>
+      </div>
+      <div class="obs-item" *ngIf="totalCacheReadTokens > 0">
+        <span class="obs-label">Cache Read</span>
+        <span class="obs-value obs-cache">{{ totalCacheReadTokens.toLocaleString() }}</span>
+      </div>
+      <div class="obs-item" *ngIf="totalCacheCreationTokens > 0">
+        <span class="obs-label">Cache Write</span>
+        <span class="obs-value obs-cache">{{ totalCacheCreationTokens.toLocaleString() }}</span>
+      </div>
+      <div class="obs-item" *ngIf="cacheHitRate > 0">
+        <span class="obs-label">Cache Hit Rate</span>
+        <span class="obs-value obs-cache">{{ (cacheHitRate * 100).toFixed(1) }}%</span>
       </div>
       <div class="obs-item">
         <span class="obs-label">Budget</span>
@@ -68,6 +88,12 @@
           {{ budgetLevel }} ({{ (budgetUtilisation * 100).toFixed(0) }}%)
         </span>
       </div>
+    </section>
+
+    <!-- Token Usage Charts (Plan 28) -->
+    <section class="card token-charts-card" *ngIf="tokenChartData">
+      <h2 class="token-charts-title">Token Usage</h2>
+      <app-token-charts [data]="tokenChartData"></app-token-charts>
     </section>
 
     <!-- Agent Mission Report (Primary Review View) -->
@@ -169,6 +195,22 @@
         <div class="stat-item">
           <span class="stat-label">LLM Calls</span>
           <span class="stat-value">{{ totalCalls }}</span>
+        </div>
+        <div class="stat-item">
+          <span class="stat-label">Total Tokens</span>
+          <span class="stat-value">{{ totalTokens.toLocaleString() }}</span>
+        </div>
+        <div class="stat-item" *ngIf="cacheHitRate > 0">
+          <span class="stat-label">Cache Hit Rate</span>
+          <span class="stat-value stat-cache">{{ (cacheHitRate * 100).toFixed(1) }}%</span>
+        </div>
+        <div class="stat-item" *ngIf="totalCacheReadTokens > 0">
+          <span class="stat-label">Cache Read</span>
+          <span class="stat-value stat-cache">{{ totalCacheReadTokens.toLocaleString() }}</span>
+        </div>
+        <div class="stat-item" *ngIf="totalCacheCreationTokens > 0">
+          <span class="stat-label">Cache Write</span>
+          <span class="stat-value stat-cache">{{ totalCacheCreationTokens.toLocaleString() }}</span>
         </div>
       </div>
       <div *ngIf="state.outputPath" class="output-path">
