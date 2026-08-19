@@ -8,14 +8,15 @@
  * implicit scaffold dependencies are injected, and overlapping module
  * owners are serialised instead of batched.
  */
-import { MAX_CONCURRENT_DEVS, INTER_BATCH_DELAY_MS, CONFIG_OWNERSHIP_SCAFFOLD_ONLY, MAX_BRANCH_WALL_MS } from '../../config';
+import { MAX_CONCURRENT_DEVS, INTER_BATCH_DELAY_MS, MAX_BRANCH_WALL_MS } from '../../config';
+import { slugify, featureBranch } from '../../utils/branch-naming';
 import { getLogger } from '../../utils/logger';
 import { executePRWorkflow } from '../../conductor/pr-workflow';
 import { completedIdsFromPullRequests } from '../../conductor/assignment-policy';
 import type { CompletionEvidence } from '../../conductor/assignment-policy';
 import { getEffectiveLimits, getBudgetStatus } from '../../utils/run-budget';
 import { getDevAgent } from './registry';
-import { gitExec } from '../../utils/git-exec';
+import { gitExec, assertValidRef } from '../../utils/git-exec';
 import { classifyProviderFailure, isProviderLevelFailure } from '../../conductor/provider-failure';
 import { awaitProviderRecovery, createProviderProbe } from '../../utils/llm-throttle';
 import { emitRunEvent } from '../../utils/event-bus';
@@ -107,8 +108,12 @@ export function canonicalBranchName(
     const existing = storyBranches.get(storyKey);
     if (existing) return existing;
 
-    let branch = a.branchName ?? `${projectSlug}/feature/${slugify(storyKey)}-${slugify(a.description)}`;
+    let branch = a.branchName ?? featureBranch(projectSlug, storyKey, a.description);
     if (!branch.startsWith(`${projectSlug}/`)) branch = `${projectSlug}/${branch}`;
+    // Sanitize the entire branch name to prevent command injection via LLM-controlled
+    // branchName or storyId values (Plan 25-02, A4).
+    branch = branch.replace(/[^a-zA-Z0-9/_.-]/g, '-').replace(/-{2,}/g, '-');
+    assertValidRef(branch);
     storyBranches.set(storyKey, branch);
     return branch;
 }
@@ -130,14 +135,6 @@ function groupByBranch(
         groups.set(branch, existing);
     }
     return groups;
-}
-
-function slugify(text: string): string {
-    return text
-        .toLowerCase()
-        .replace(/[^a-z0-9]+/g, '-')
-        .replace(/^-|-$/g, '')
-        .slice(0, 50);
 }
 
 // ─── Scaffold barrier (Sub-Plan 06 §5a) ─────────────────────────────────────
@@ -227,7 +224,7 @@ export function isBootstrapAssignment(a: Assignment): boolean {
  *
  * A branch is bootstrap if any of its assignments is a bootstrap assignment.
  */
-export function isBootstrapBranch(branch: string, assignments: Assignment[]): boolean {
+export function isBootstrapBranch(_branch: string, assignments: Assignment[]): boolean {
     return assignments.length > 0 && assignments.some(isBootstrapAssignment);
 }
 

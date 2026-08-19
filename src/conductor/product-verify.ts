@@ -14,6 +14,7 @@ import * as http from 'http';
 import * as net from 'net';
 import { getLogger } from '../utils/logger';
 import { emitRunEvent } from '../utils/event-bus';
+import { SOURCE_EXTENSIONS_WIDE, walkDir as sharedWalkDir } from '../utils/fs-walk';
 import {
     PRODUCT_VERIFY_ENABLED,
     PRODUCT_MIN_ARTIFACT_BYTES,
@@ -22,6 +23,7 @@ import {
     PRODUCT_SMOKE_TIMEOUT_MS,
 } from '../config';
 import type { StackRoot } from './quality-gates';
+import type { GateOutcome, GateFinding, GateStatus } from './gate-types';
 
 const log = getLogger('[ProductVerify]', 183);
 
@@ -92,7 +94,7 @@ const ARTIFACT_DIRS = ['dist', 'build', 'out', '.next', 'public/build'];
 /**
  * Check each root's build output for real artifacts.
  */
-export function verifyBuildArtifacts(workspacePath: string, roots: StackRoot[]): ArtifactCheck[] {
+export function verifyBuildArtifacts(_workspacePath: string, roots: StackRoot[]): ArtifactCheck[] {
     const results: ArtifactCheck[] = [];
 
     for (const root of roots) {
@@ -260,10 +262,8 @@ function countDirContents(dir: string): { count: number; bytes: number; hasHtml:
 
 // ─── 5b. Unresolved reference detection ─────────────────────────────────────
 
-const SOURCE_EXTENSIONS = new Set([
-    '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.vue', '.svelte',
-    '.html', '.css', '.scss',
-]);
+// SOURCE_EXTENSIONS_WIDE imported from ../utils/fs-walk
+const SOURCE_EXTENSIONS = SOURCE_EXTENSIONS_WIDE;
 
 const RESOLVE_EXTENSIONS = ['', '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.json', '.css', '.scss', '.vue', '.svelte'];
 
@@ -536,33 +536,11 @@ function loadPackageDeps(dir: string): Set<string> {
 
 function collectSourceFiles(workspacePath: string, maxFiles: number): string[] {
     const files: string[] = [];
-    const PRUNE_DIRS = new Set([
-        'node_modules', '.git', '.worktrees', 'dist', 'build', '.next', 'out',
-        'coverage', '.venv', 'venv', 'vendor', 'target', '.conventions',
-    ]);
-
-    function walk(dir: string): void {
-        if (files.length >= maxFiles) return;
-        let entries: string[];
-        try { entries = fs.readdirSync(dir); } catch { return; }
-        for (const entry of entries) {
-            if (files.length >= maxFiles) return;
-            if (PRUNE_DIRS.has(entry)) continue;
-            const absPath = path.join(dir, entry);
-            try {
-                const stat = fs.statSync(absPath);
-                if (stat.isDirectory()) {
-                    walk(absPath);
-                } else if (SOURCE_EXTENSIONS.has(path.extname(entry).toLowerCase())) {
-                    files.push(absPath);
-                }
-            } catch {
-                // skip
-            }
+    sharedWalkDir(workspacePath, workspacePath, (relPath) => {
+        if (SOURCE_EXTENSIONS.has(path.extname(relPath).toLowerCase())) {
+            files.push(path.join(workspacePath, relPath));
         }
-    }
-
-    walk(workspacePath);
+    }, { maxFiles });
     return files;
 }
 
@@ -739,7 +717,7 @@ export async function runSmokeTest(
 }
 
 function findWebRoot(
-    workspacePath: string,
+    _workspacePath: string,
     roots: StackRoot[],
     artifactChecks: ArtifactCheck[],
 ): { root: StackRoot; serveDir: string } | null {
@@ -956,7 +934,53 @@ export async function runProductVerification(
     const summary = `Product verification: ${passed ? 'PASSED' : 'FAILED'} — ${summaryParts.join(', ')}`;
     log.info(summary);
 
-    emitRunEvent('gate:result', { kind: 'product-verify', passed, artifacts: artifacts.length, resolveIssues: resolveIssues.length, smoke: smoke?.passed ?? null });
+    emitRunEvent('gate:result', { gate: 'product-verify', passed, artifacts: artifacts.length, resolveIssues: resolveIssues.length, smoke: smoke?.passed ?? null });
 
     return { artifacts, resolveIssues, smoke, passed, summary };
+}
+
+// ─── ProductVerifyReport → GateOutcome adapter (Sub-Plan 25-10) ─────────────
+
+/**
+ * Convert a ProductVerifyReport into a standard GateOutcome.
+ */
+export function productVerifyGateOutcome(report: ProductVerifyReport): GateOutcome<ProductVerifyReport> {
+    const status: GateStatus = report.passed ? 'pass' : 'fail';
+
+    const findings: GateFinding[] = [];
+    for (const ac of report.artifacts) {
+        if (!ac.passed) {
+            findings.push({
+                id: `PRODUCT-ARTIFACTS-${ac.root || 'root'}`,
+                severity: 'critical',
+                detail: ac.reason,
+                file: ac.root || undefined,
+            });
+        }
+    }
+    for (const ri of report.resolveIssues) {
+        findings.push({
+            id: `PRODUCT-RESOLVE-${ri.file}-${ri.line}`,
+            severity: 'critical',
+            detail: `Unresolved ${ri.kind}: '${ri.specifier}' (${ri.reason})`,
+            file: ri.file,
+            line: ri.line,
+        });
+    }
+    if (report.smoke && !report.smoke.passed) {
+        findings.push({
+            id: 'PRODUCT-SMOKE',
+            severity: 'critical',
+            detail: report.smoke.reason,
+        });
+    }
+
+    return {
+        gate: 'product-verify',
+        status,
+        findings,
+        detail: report,
+        markdown: report.summary,
+        bugs: [],  // Bugs are synthesised via synthesiseGateBugs in quality-gates
+    };
 }

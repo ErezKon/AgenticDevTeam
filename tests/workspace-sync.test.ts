@@ -83,7 +83,7 @@ describe('syncWorkspaceToBranch', () => {
         if (env?.root) cleanup(env.root);
     });
 
-    it('should fast-forward when remote has new commits', () => {
+    it('should fast-forward when remote has new commits', async () => {
         env = createTestRepos();
         const { mainDir, devDir, branch } = env;
 
@@ -95,7 +95,7 @@ describe('syncWorkspaceToBranch', () => {
         git(devDir, `push origin ${branch}`);
 
         // main clone is behind — sync should fast-forward
-        const result = syncWorkspaceToBranch(mainDir, branch);
+        const result = await syncWorkspaceToBranch(mainDir, branch);
 
         expect(result.ok).toBe(true);
         expect(result.strategy).toBe('fast-forward');
@@ -105,7 +105,7 @@ describe('syncWorkspaceToBranch', () => {
         expect(fs.existsSync(path.join(mainDir, 'src', 'app.ts'))).toBe(true);
     }, TIMEOUT);
 
-    it('should commit dirty files before syncing, and preserve them', () => {
+    it('should commit dirty files before syncing, and preserve them', async () => {
         env = createTestRepos();
         const { mainDir, devDir, branch } = env;
 
@@ -119,7 +119,7 @@ describe('syncWorkspaceToBranch', () => {
         // Create an uncommitted file in main
         fs.writeFileSync(path.join(mainDir, 'docs', 'local-notes.md'), '# Notes\n');
 
-        const result = syncWorkspaceToBranch(mainDir, branch);
+        const result = await syncWorkspaceToBranch(mainDir, branch);
 
         expect(result.ok).toBe(true);
         // The uncommitted file should have been committed and preserved
@@ -128,7 +128,7 @@ describe('syncWorkspaceToBranch', () => {
         expect(fs.existsSync(path.join(mainDir, 'src', 'index.ts'))).toBe(true);
     }, TIMEOUT);
 
-    it('should hard-reset when local and remote have diverged and allowReset is true', () => {
+    it('should hard-reset when local and remote have diverged and allowReset is true', async () => {
         env = createTestRepos();
         const { mainDir, devDir, branch } = env;
 
@@ -148,7 +148,7 @@ describe('syncWorkspaceToBranch', () => {
         const remoteSha = git(devDir, 'rev-parse HEAD');
 
         // Sync with allowReset: true (explicit, though it's the default)
-        const result = syncWorkspaceToBranch(mainDir, branch, null, { allowReset: true });
+        const result = await syncWorkspaceToBranch(mainDir, branch, null, { allowReset: true });
 
         expect(result.ok).toBe(true);
         expect(result.strategy).toBe('reset');
@@ -159,12 +159,12 @@ describe('syncWorkspaceToBranch', () => {
         expect(fs.existsSync(path.join(mainDir, 'src', 'server.ts'))).toBe(true);
     }, TIMEOUT);
 
-    it('should return already-current when no sync is needed', () => {
+    it('should return already-current when no sync is needed', async () => {
         env = createTestRepos();
         const { mainDir, branch } = env;
 
         // No new commits — should be already current
-        const result = syncWorkspaceToBranch(mainDir, branch);
+        const result = await syncWorkspaceToBranch(mainDir, branch);
 
         expect(result.ok).toBe(true);
         expect(result.strategy).toBe('already-current');

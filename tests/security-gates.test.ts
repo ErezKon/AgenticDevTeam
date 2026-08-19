@@ -19,7 +19,6 @@ import {
     synthesiseSecurityBugs,
     securityReportToMarkdown,
     SECRET_PATTERNS,
-    type SecurityFinding,
     type SecurityReport,
 } from '../src/conductor/security-gates';
 
@@ -209,7 +208,7 @@ describe('scanForSecrets', () => {
 // ─── auditDependencies ──────────────────────────────────────────────────────
 
 describe('auditDependencies', () => {
-    it('maps npm audit high -> critical and moderate -> major from a fixture', () => {
+    it('maps npm audit high -> critical and moderate -> major from a fixture', async () => {
         const repo = createTestRepo();
         try {
             // Create package.json so detectStacks finds 'node'
@@ -237,7 +236,7 @@ describe('auditDependencies', () => {
             });
 
             // Inject a fake exec that returns our fixture for npm audit
-            const fakeExec = (cmd: string, opts: { cwd: string; timeout: number }): string => {
+            const fakeExec = async (cmd: string, _opts: { cwd: string; timeout: number }): Promise<string> => {
                 if (cmd.includes('which npm')) return '/usr/bin/npm';
                 if (cmd.includes('npm audit')) {
                     const err = new Error('npm audit found issues') as any;
@@ -247,7 +246,7 @@ describe('auditDependencies', () => {
                 throw new Error(`unexpected command: ${cmd}`);
             };
 
-            const findings = auditDependencies(repo.dir, { exec: fakeExec });
+            const findings = await auditDependencies(repo.dir, { exec: fakeExec });
             const critical = findings.filter(f => f.severity === 'critical');
             const major = findings.filter(f => f.severity === 'major');
             const minor = findings.filter(f => f.severity === 'minor');
@@ -263,28 +262,28 @@ describe('auditDependencies', () => {
         }
     }, TIMEOUT);
 
-    it('returns empty findings when audit tool is not on PATH', () => {
+    it('returns empty findings when audit tool is not on PATH', async () => {
         const repo = createTestRepo();
         try {
             fs.writeFileSync(path.join(repo.dir, 'package.json'), '{"name":"test","version":"1.0.0"}\n');
 
-            const fakeExec = (cmd: string): string => {
+            const fakeExec = async (cmd: string): Promise<string> => {
                 if (cmd.includes('which')) throw new Error('not found');
                 throw new Error(`unexpected: ${cmd}`);
             };
 
-            const findings = auditDependencies(repo.dir, { exec: fakeExec });
+            const findings = await auditDependencies(repo.dir, { exec: fakeExec });
             expect(findings.length).toBe(0);
         } finally {
             repo.cleanup();
         }
     }, TIMEOUT);
 
-    it('returns empty findings for a workspace with no recognized stacks', () => {
+    it('returns empty findings for a workspace with no recognized stacks', async () => {
         const repo = createTestRepo();
         try {
             // No package.json, go.mod, etc.
-            const findings = auditDependencies(repo.dir);
+            const findings = await auditDependencies(repo.dir);
             expect(findings.length).toBe(0);
         } finally {
             repo.cleanup();
@@ -314,7 +313,7 @@ describe('checkLicences', () => {
                 license: 'GPL-3.0',
             }));
 
-            const findings = checkLicences(repo.dir);
+            checkLicences(repo.dir);
             // Note: this test relies on LICENCE_DENYLIST being set at config module
             // load time. If it's empty (default), no findings will be produced.
             // The env var was set before the test but config.ts was already loaded.
@@ -359,10 +358,10 @@ describe('checkLicences', () => {
 // ─── runSecurityGates ───────────────────────────────────────────────────────
 
 describe('runSecurityGates', () => {
-    it('returns passed=true and empty findings for a clean workspace', () => {
+    it('returns passed=true and empty findings for a clean workspace', async () => {
         const repo = createTestRepo();
         try {
-            const report = runSecurityGates(repo.dir);
+            const report = await runSecurityGates(repo.dir);
             expect(report.passed).toBe(true);
             expect(report.findings.length).toBe(0);
         } finally {
@@ -370,7 +369,7 @@ describe('runSecurityGates', () => {
         }
     }, TIMEOUT);
 
-    it('returns passed=false when a critical secret is found', () => {
+    it('returns passed=false when a critical secret is found', async () => {
         const repo = createTestRepo();
         try {
             fs.mkdirSync(path.join(repo.dir, 'src'), { recursive: true });
@@ -378,7 +377,7 @@ describe('runSecurityGates', () => {
             git(repo.dir, 'add .');
             git(repo.dir, 'commit -m "add secret"');
 
-            const report = runSecurityGates(repo.dir);
+            const report = await runSecurityGates(repo.dir);
             expect(report.passed).toBe(false);
             expect(report.findings.length).toBeGreaterThan(0);
             expect(report.findings[0].severity).toBe('critical');
@@ -387,7 +386,7 @@ describe('runSecurityGates', () => {
         }
     }, TIMEOUT);
 
-    it('returns passed=true and empty findings when SECURITY_GATES_ENABLED=false', () => {
+    it('returns passed=true and empty findings when SECURITY_GATES_ENABLED=false', async () => {
         const orig = process.env.SECURITY_GATES_ENABLED;
         process.env.SECURITY_GATES_ENABLED = 'false';
         const repo = createTestRepo();
@@ -400,7 +399,7 @@ describe('runSecurityGates', () => {
             // Note: SECURITY_GATES_ENABLED is read at module load from config.ts,
             // so this env change won't affect the already-loaded config constant.
             // This test verifies the function behavior at the API level.
-            const report = runSecurityGates(repo.dir);
+            await runSecurityGates(repo.dir);
             // The gate runs since config was loaded with SECURITY_GATES_ENABLED=true
             // This is expected — env changes after load don't propagate.
         } finally {

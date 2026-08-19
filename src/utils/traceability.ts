@@ -18,6 +18,7 @@
  *  - Gap-first ordering, Top Gaps, Claimed vs Executed sections
  */
 import type { ProjectStateType } from '../conductor/state';
+import { mdTable } from './markdown-table';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -445,11 +446,6 @@ export function buildTraceabilityReport(state: ProjectStateType): TraceabilityRe
 
 // ─── Markdown Renderer ──────────────────────────────────────────────────────
 
-/** Escape pipe characters in markdown table cells. */
-function escPipe(text: string): string {
-    return text.replace(/\|/g, '\\|');
-}
-
 /** Status icon for display. */
 function statusIcon(status: AcStatus): string {
     switch (status) {
@@ -471,18 +467,21 @@ export function renderTraceabilityMarkdown(report: TraceabilityReport): string {
     // Summary
     lines.push('## Requirements Traceability Summary');
     lines.push('');
-    lines.push(`| Metric | Value |`);
-    lines.push(`|--------|-------|`);
-    lines.push(`| Total acceptance criteria | ${totals.criteria} |`);
-    lines.push(`| Verified (merged + executed test passed) | ${totals.verified} |`);
-    lines.push(`| Tested but failing | ${totals.testedFailing} |`);
-    lines.push(`| Implemented but untested | ${totals.implemented} |`);
-    lines.push(`| Planned only (no merged PR) | ${totals.plannedOnly} |`);
-    lines.push(`| Blocked | ${totals.blocked} |`);
-    lines.push(`| Missing (no assignment) | ${totals.missing} |`);
-    lines.push(`| Verified % | ${(totals.verifiedPct * 100).toFixed(1)}% |`);
-    lines.push(`| Implemented % | ${(totals.implementedPct * 100).toFixed(1)}% |`);
-    lines.push(`| Delivery score | ${totals.deliveryScore.toFixed(2)} |`);
+    lines.push(mdTable(
+        ['Metric', 'Value'],
+        [
+            ['Total acceptance criteria', totals.criteria],
+            ['Verified (merged + executed test passed)', totals.verified],
+            ['Tested but failing', totals.testedFailing],
+            ['Implemented but untested', totals.implemented],
+            ['Planned only (no merged PR)', totals.plannedOnly],
+            ['Blocked', totals.blocked],
+            ['Missing (no assignment)', totals.missing],
+            ['Verified %', `${(totals.verifiedPct * 100).toFixed(1)}%`],
+            ['Implemented %', `${(totals.implementedPct * 100).toFixed(1)}%`],
+            ['Delivery score', totals.deliveryScore.toFixed(2)],
+        ],
+    ));
     lines.push('');
 
     // Top Gaps (gap-first ordering: missing, tested-failing, blocked, implemented-untested)
@@ -501,17 +500,16 @@ export function renderTraceabilityMarkdown(report: TraceabilityReport): string {
         lines.push('## Top Gaps');
         lines.push('');
         const topGaps = gaps.slice(0, 15);
-        lines.push('| Story | AC# | Criterion | Status | Assignment/Module |');
-        lines.push('|-------|-----|-----------|--------|-------------------|');
-        for (const row of topGaps) {
+        const gapRows: (string | number)[][] = topGaps.map(row => {
             const assignCol = row.assignmentIds.length > 0
                 ? row.assignmentIds[0]
                 : `Story ${row.storyId}`;
-            lines.push(`| ${escPipe(row.storyId)} | ${row.acIndex} | ${escPipe(row.acText.slice(0, 80))} | ${statusIcon(row.status)} | ${escPipe(assignCol)} |`);
-        }
+            return [row.storyId, row.acIndex, row.acText.slice(0, 80), statusIcon(row.status), assignCol];
+        });
         if (gaps.length > 15) {
-            lines.push(`| ... | ... | (${gaps.length - 15} more gaps) | ... | ... |`);
+            gapRows.push(['...', '...', `(${gaps.length - 15} more gaps)`, '...', '...']);
         }
+        lines.push(mdTable(['Story', 'AC#', 'Criterion', 'Status', 'Assignment/Module'], gapRows));
         lines.push('');
     }
 
@@ -520,9 +518,7 @@ export function renderTraceabilityMarkdown(report: TraceabilityReport): string {
 
     lines.push('## Traceability Matrix');
     lines.push('');
-    lines.push('| Epic | Story | AC# | Acceptance Criterion | Status | PRs | Tests |');
-    lines.push('|------|-------|-----|----------------------|--------|-----|-------|');
-    for (const row of sortedRows) {
+    const matrixRows: (string | number)[][] = sortedRows.map(row => {
         const prCol = row.prNumbers.length > 0
             ? row.prNumbers.map((n, i) => `#${n} (${row.prStatuses[i]})`).join(', ')
             : '--';
@@ -535,19 +531,19 @@ export function renderTraceabilityMarkdown(report: TraceabilityReport): string {
         if (claimedCount > 0) testParts.push(`${claimedCount} claimed`);
         if (plannedCount > 0) testParts.push(`${plannedCount} planned`);
         const testCol = testParts.length > 0 ? testParts.join(', ') : '--';
-        lines.push(`| ${escPipe(row.epicId)} | ${escPipe(row.storyId)} | ${row.acIndex} | ${escPipe(row.acText)} | ${statusIcon(row.status)} | ${escPipe(prCol)} | ${escPipe(testCol)} |`);
-    }
+        return [row.epicId, row.storyId, row.acIndex, row.acText, statusIcon(row.status), prCol, testCol];
+    });
+    lines.push(mdTable(['Epic', 'Story', 'AC#', 'Acceptance Criterion', 'Status', 'PRs', 'Tests'], matrixRows));
     lines.push('');
 
     // Blocked deliveries
     if (blockedDeliveries.length > 0) {
         lines.push('## Blocked Deliveries');
         lines.push('');
-        lines.push('| Branch | PR | Status | Reason |');
-        lines.push('|--------|-----|--------|--------|');
-        for (const bd of blockedDeliveries) {
-            lines.push(`| ${escPipe(bd.branchName)} | #${bd.prNumber} | ${bd.status} | ${escPipe(bd.reason)} |`);
-        }
+        lines.push(mdTable(
+            ['Branch', 'PR', 'Status', 'Reason'],
+            blockedDeliveries.map(bd => [bd.branchName, `#${bd.prNumber}`, bd.status, bd.reason]),
+        ));
         lines.push('');
     }
 
@@ -555,11 +551,10 @@ export function renderTraceabilityMarkdown(report: TraceabilityReport): string {
     if (claimedVsExecuted.length > 0) {
         lines.push('## Claimed vs Executed');
         lines.push('');
-        lines.push('| Agent | Claimed Total | Claimed Passed | Claimed Failed | Executed Total | Executed Passed | Executed Failed |');
-        lines.push('|-------|---------------|----------------|----------------|----------------|-----------------|-----------------|');
-        for (const cve of claimedVsExecuted) {
-            lines.push(`| ${escPipe(cve.agentId)} | ${cve.claimedTotal} | ${cve.claimedPassed} | ${cve.claimedFailed} | ${cve.executedTotal} | ${cve.executedPassed} | ${cve.executedFailed} |`);
-        }
+        lines.push(mdTable(
+            ['Agent', 'Claimed Total', 'Claimed Passed', 'Claimed Failed', 'Executed Total', 'Executed Passed', 'Executed Failed'],
+            claimedVsExecuted.map(cve => [cve.agentId, cve.claimedTotal, cve.claimedPassed, cve.claimedFailed, cve.executedTotal, cve.executedPassed, cve.executedFailed]),
+        ));
         lines.push('');
     }
 

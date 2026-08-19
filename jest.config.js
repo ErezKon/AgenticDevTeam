@@ -5,7 +5,16 @@ module.exports = {
     roots: ['<rootDir>/tests'],
     testMatch: ['**/*.test.ts'],
     setupFiles: ['<rootDir>/tests/setup.ts'],
-    testTimeout: 900_000, // 15 min default for LLM-heavy integration tests
+    setupFilesAfterFramework: ['<rootDir>/tests/setup-env-guard.ts'],
+    testTimeout: 10_000,
+    restoreMocks: true,
+    testPathIgnorePatterns: [
+        '/tests/fixtures/',
+        'greenfield',
+        'maintain',
+        'oauth',
+        'pipeline-replay',
+    ],
     transform: {
         '^.+\\.tsx?$': 'ts-jest',
         '^.+\\.jsx?$': ['ts-jest', { tsconfig: { allowJs: true } }],
@@ -13,4 +22,18 @@ module.exports = {
     transformIgnorePatterns: [
         'node_modules/(?!(@octokit|universal-user-agent|before-after-hook)/)',
     ],
+    collectCoverageFrom: [
+        'src/**/*.ts',
+        '!src/**/*.d.ts',
+        '!src/index.ts',
+        '!src/cli.ts',
+    ],
+    coverageThreshold: {
+        global: {
+            lines: 25,
+            branches: 20,
+            functions: 20,
+            statements: 25,
+        },
+    },
 };

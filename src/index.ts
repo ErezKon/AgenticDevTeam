@@ -24,7 +24,10 @@ if (!globalThis.crypto) {
   (globalThis as any).crypto = webcrypto;
 }
 
-process.env.NODE_TLS_REJECT_UNAUTHORIZED ??= '0';
+// TLS: honour NODE_EXTRA_CA_CERTS for corporate CAs instead of disabling
+// certificate validation globally. Only disable TLS verification if the
+// operator explicitly sets NODE_TLS_REJECT_UNAUTHORIZED=0 in their .env file.
+// (Plan 25-02, D1: removed default '0' assignment)
 import './env';
 import express from 'express';
 import cors from 'cors';
@@ -32,28 +35,67 @@ import { createServer } from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
 import { DASHBOARD_PORT } from './config';
 import { AGENT_REGISTRY } from './agents/registry';
-import { runAutonomous, runHumanInTheLoop, resumeRun, continueRun, type RunSession, type HitlDecision } from './conductor/run';
+import { runAutonomous, runHumanInTheLoop, continueRun, type RunSession } from './conductor/run';
 import { listStoppedRuns, collectRunState, reconstructState } from './conductor/continue';
 import { parseRequirementsFile } from './tools/requirements/parse-requirements';
 import { getLogger } from './utils/logger';
-import { LogColors, color256 } from './utils/log-colors.util';
 import { tokenTracker } from './utils/token-tracker';
-import { refreshTokenReport } from './utils/token-report';
-import { onRunEvent, getRecentEvents, getAllEvents } from './utils/event-bus';
+import { redactState } from './utils/run-snapshot';
+import { installProcessHandlers } from './utils/crash-handlers';
+import { onRunEvent, getRecentEvents } from './utils/event-bus';
 import * as path from 'path';
 import * as fs from 'fs';
 
-const TAG = `${color256(33)}[Server]${LogColors.RESET}`;
 const log = getLogger('[Server]', 33);
 
+/** API token for bearer-token authentication (optional but recommended). */
+const API_TOKEN = process.env.API_TOKEN ?? '';
+
 const app = express();
-app.use(cors());
+// Restrict CORS to the dashboard origin (localhost dev server).
+app.use(cors({ origin: API_TOKEN ? ['http://localhost:4200', `http://127.0.0.1:${DASHBOARD_PORT}`] : undefined }));
 app.use(express.json({ limit: '10mb' }));
 
-// ─── In-memory session store ────────────────────────────────────────────────
+// ─── Bearer-token auth middleware (when API_TOKEN is set) ────────────────────
+if (API_TOKEN) {
+    app.use('/api', (req, res, next) => {
+        const auth = req.headers.authorization;
+        if (!auth || auth !== `Bearer ${API_TOKEN}`) {
+            res.status(401).json({ error: 'Unauthorized: provide Authorization: Bearer <API_TOKEN>' });
+            return;
+        }
+        next();
+    });
+    log.info('API_TOKEN is set — API endpoints require Bearer authentication');
+}
+
+// ─── In-memory session store (Sub-Plan 25-14: fix key-space collision) ──────
+//
+// Both sessions and states are now keyed consistently by threadId.
+// A secondary index maps systemName → threadId for autonomous run lookup.
+// LRU eviction prevents unbounded growth in long-running server processes.
+
+const MAX_CACHED_RUNS = 200;
 
 const sessions = new Map<string, RunSession>();
 const states = new Map<string, any>();
+/** systemName → threadId alias for backward-compat lookup of autonomous runs. */
+const _systemNameIndex = new Map<string, string>();
+
+/** Evict oldest entries when maps exceed MAX_CACHED_RUNS. */
+function _evictIfNeeded(): void {
+    while (states.size > MAX_CACHED_RUNS) {
+        const oldest = states.keys().next().value;
+        if (oldest === undefined) break;
+        states.delete(oldest);
+        sessions.delete(oldest);
+    }
+    while (_systemNameIndex.size > MAX_CACHED_RUNS) {
+        const oldest = _systemNameIndex.keys().next().value;
+        if (oldest === undefined) break;
+        _systemNameIndex.delete(oldest);
+    }
+}
 
 // ─── WebSocket broadcast ────────────────────────────────────────────────────
 
@@ -147,19 +189,23 @@ app.post('/api/run', async (req, res) => {
         const runMode = mode === 'autonomous' ? 'autonomous' : 'human';
 
         if (runMode === 'autonomous') {
-            broadcast('run:started', { systemName, mode: 'autonomous' });
+            // Sub-Plan 25-14: generate a threadId and use it as the key (fixes key-space collision)
+            const autoThreadId = `run-${systemName}-${Date.now()}`;
+            broadcast('run:started', { systemName, threadId: autoThreadId, mode: 'autonomous' });
 
             // Fire and forget — results come via WebSocket
             runAutonomous({ systemName, requirementsText: text, mode: 'autonomous', runType: resolvedRunType, existingProjectPath, repoTarget })
                 .then((state) => {
-                    states.set(systemName, state);
+                    states.set(autoThreadId, state);
+                    _systemNameIndex.set(systemName, autoThreadId);
+                    _evictIfNeeded();
                     const acceptance = state.acceptance;
                     const status = state.cancelled ? 'cancelled'
                         : acceptance?.status === 'accepted' ? 'completed'
                         : acceptance?.status === 'partial' ? 'partial'
                         : acceptance?.status === 'inconclusive' ? 'inconclusive'
                         : 'failed';
-                    broadcast('run:complete', { systemName, state, status, blockers: acceptance?.blockers ?? [] });
+                    broadcast('run:complete', { systemName, threadId: autoThreadId, state, status, blockers: acceptance?.blockers ?? [] });
                 })
                 .catch((err) => {
                     // run.ts already flushes the token report on failure,
@@ -168,12 +214,13 @@ app.post('/api/run', async (req, res) => {
                     const reportPath = tokenTracker.getOutputPath();
                     broadcast('run:error', {
                         systemName,
+                        threadId: autoThreadId,
                         error: err.message,
                         tokenReportPath: reportPath ? `${reportPath}/token-usage-report.html` : null,
                     });
                 });
 
-            res.json({ status: 'started', systemName, mode: 'autonomous' });
+            res.json({ status: 'started', threadId: autoThreadId, systemName, mode: 'autonomous' });
         } else {
             const session = await runHumanInTheLoop({
                 systemName,
@@ -187,6 +234,7 @@ app.post('/api/run', async (req, res) => {
             sessions.set(session.threadId, session);
             const state = await session.getState();
             states.set(session.threadId, state);
+            _evictIfNeeded();
             broadcast('run:started', { systemName, threadId: session.threadId, mode: 'human' });
             // With interruptAfter, the first HITL phase has already completed.
             // Notify the dashboard that the phase output is ready for review.
@@ -212,16 +260,18 @@ app.post('/api/run', async (req, res) => {
 });
 
 app.get('/api/run/:id', async (req, res) => {
-    const session = sessions.get(req.params.id);
+    // Sub-Plan 25-14: resolve systemName alias to threadId for backward compat
+    const resolvedId = _systemNameIndex.get(req.params.id) ?? req.params.id;
+    const session = sessions.get(resolvedId);
     if (session) {
         const state = await session.getState();
-        states.set(req.params.id, state);
-        res.json(state);
+        states.set(resolvedId, state);
+        res.json(redactState(state));
         return;
     }
-    const cached = states.get(req.params.id);
+    const cached = states.get(resolvedId);
     if (cached) {
-        res.json(cached);
+        res.json(redactState(cached));
         return;
     }
     res.status(404).json({ error: 'Run not found' });
@@ -243,7 +293,7 @@ app.post('/api/run/:id/approve', async (req, res) => {
             // Legacy: approved boolean (default true)
             hitlDecision = approved === false ? 'deny' : 'approve';
         }
-        const result = await session.resume(hitlDecision, feedback);
+        await session.resume(hitlDecision, feedback);
         const state = await session.getState();
         states.set(req.params.id, state);
         broadcast('run:phase-complete', { threadId: req.params.id, phase: state.phase, decision: hitlDecision });
@@ -256,7 +306,7 @@ app.post('/api/run/:id/approve', async (req, res) => {
                 latestArtifact: state.artifacts?.[state.artifacts.length - 1] ?? null,
             });
         }
-        res.json({ phase: state.phase, decision: hitlDecision, state, waiting: state.phase !== 'finalize' });
+        res.json({ phase: state.phase, decision: hitlDecision, state: redactState(state), waiting: state.phase !== 'finalize' });
     } catch (err: any) {
         log.error(`POST /api/run/:id/approve failed: ${err.message}`);
         res.status(500).json({ error: err.message });
@@ -275,7 +325,14 @@ app.get('/api/run/:id/artifact/:agentId', async (req, res) => {
     );
     if (!artifact) { res.status(404).json({ error: 'Artifact not found' }); return; }
 
-    const filePath = path.join(state.workspacePath, artifact.filePath);
+    // Validate that artifact.filePath stays within the workspace (path traversal guard).
+    const filePath = path.resolve(state.workspacePath, artifact.filePath);
+    const wsRoot = path.resolve(state.workspacePath);
+    const rel = path.relative(wsRoot, filePath);
+    if (rel.startsWith('..') || path.isAbsolute(rel)) {
+        res.status(400).json({ error: 'Artifact path escapes workspace' });
+        return;
+    }
     if (!fs.existsSync(filePath)) {
         res.status(404).json({ error: 'Artifact file not found on disk' });
         return;
@@ -399,7 +456,9 @@ app.post('/api/run/continue', async (req, res) => {
             continueRun({ outputPath, mode: 'autonomous', threadId: resolvedThreadId })
                 .then((state) => {
                     const finalState = state as any;
-                    states.set(systemName, finalState);
+                    states.set(resolvedThreadId, finalState);
+                    _systemNameIndex.set(systemName, resolvedThreadId);
+                    _evictIfNeeded();
                     const acceptance = finalState.acceptance;
                     const status = finalState.cancelled ? 'cancelled'
                         : acceptance?.status === 'accepted' ? 'completed'
@@ -435,6 +494,7 @@ app.post('/api/run/continue', async (req, res) => {
             sessions.set(session.threadId, session);
             const state = await session.getState();
             states.set(session.threadId, state);
+            _evictIfNeeded();
             broadcast('run:started', { systemName, threadId: session.threadId, mode: 'human', continuing: true, resumePhase });
             broadcast('hitl:waiting', {
                 threadId: session.threadId,
@@ -472,34 +532,32 @@ if (fs.existsSync(dashboardPath)) {
 }
 
 // ─── Signal handlers — flush token report on unexpected exit ─────────────────
+installProcessHandlers((msg) => log.error(msg));
 
-function flushTokenReportOnExit(reason: string) {
-    try {
-        if (tokenTracker.getOutputPath()) {
-            tokenTracker.setRunStatus('failed');
-            refreshTokenReport();
-            log.info(`Token report saved on ${reason}.`);
-        }
-    } catch { /* best-effort */ }
+// ─── Exports for testability (Sub-Plan 25-09) ───────────────────────────────
+// Importing index.ts no longer starts the server — call createApp() / createHttpServer()
+// and listen() explicitly in tests or alternative entry points.
+export { app, httpServer, wss, broadcast, sessions, states };
+
+/**
+ * Convenience factory — returns the fully-configured Express app.
+ * Useful for supertest or custom server setups.
+ */
+export function createApp() { return app; }
+
+/**
+ * Convenience factory — returns the HTTP server (Express + WebSocket).
+ */
+export function createHttpServer() { return httpServer; }
+
+// ─── Start (guarded so index.ts is importable without side effects) ──────────
+
+if (require.main === module) {
+    // Bind to loopback by default — only expose to the network if explicitly requested.
+    const BIND_HOST = process.env.BIND_HOST ?? '127.0.0.1';
+    httpServer.listen(DASHBOARD_PORT, BIND_HOST, () => {
+        log.info(`Server listening on http://${BIND_HOST}:${DASHBOARD_PORT}`);
+        log.info(`WebSocket on ws://${BIND_HOST}:${DASHBOARD_PORT}/ws`);
+        log.info(`Agents registered: ${AGENT_REGISTRY.length}`);
+    });
 }
-
-process.on('SIGINT', () => { flushTokenReportOnExit('SIGINT'); process.exit(130); });
-process.on('SIGTERM', () => { flushTokenReportOnExit('SIGTERM'); process.exit(143); });
-process.on('uncaughtException', (err) => {
-    log.error(`Uncaught exception: ${err.message}`);
-    flushTokenReportOnExit('uncaughtException');
-    process.exit(1);
-});
-process.on('unhandledRejection', (reason) => {
-    log.error(`Unhandled rejection: ${reason}`);
-    flushTokenReportOnExit('unhandledRejection');
-    process.exit(1);
-});
-
-// ─── Start ──────────────────────────────────────────────────────────────────
-
-httpServer.listen(DASHBOARD_PORT, () => {
-    log.info(`Server listening on http://localhost:${DASHBOARD_PORT}`);
-    log.info(`WebSocket on ws://localhost:${DASHBOARD_PORT}/ws`);
-    log.info(`Agents registered: ${AGENT_REGISTRY.length}`);
-});

@@ -10,6 +10,7 @@
  * burning another hour and $50 on a dead run.
  */
 import { getLogger } from '../utils/logger';
+import { mdTable } from '../utils/markdown-table';
 import {
     ACCEPT_MIN_TESTS,
     ACCEPT_REQUIRE_SMOKE,
@@ -18,45 +19,24 @@ import {
     MIN_AC_IMPLEMENTED_PCT,
     UNRECOVERABLE_ZERO_ROUNDS,
 } from '../config';
-import { buildTraceabilityReport, type CoverageTotals } from '../utils/traceability';
+import { buildTraceabilityReport } from '../utils/traceability';
 import type { ProjectStateType } from './state';
 import type { GateReport } from './quality-gates';
-import type { TamperFinding } from './gate-integrity';
+import type { Bug } from '../agents/_shared/schemas/bug.schema';
+import { makeGateBug } from './bug-factory';
 
-const log = getLogger('[AcceptanceGate]', 214);
 
-// ─── Types ──────────────────────────────────────────────────────────────────
 
-export type AcceptanceStatus = 'accepted' | 'partial' | 'rejected' | 'inconclusive';
+// ─── Types (re-exported from gate-types to preserve public API) ─────────────
 
-export interface AcceptanceCriterionResult {
-    /** Criterion identifier. */
-    id: string;
-    label: string;
-    required: boolean;
-    passed: boolean;
-    inconclusive: boolean;
-    /** One-line detail, quotable in a report. */
-    detail: string;
-}
+export type {
+    AcceptanceStatus,
+    AcceptanceCriterionResult,
+    AcceptanceReport,
+    DispatchRound,
+} from './gate-types';
 
-export interface AcceptanceReport {
-    status: AcceptanceStatus;
-    criteria: AcceptanceCriterionResult[];
-    /** Ordered, human-readable list of what must be fixed. Goes in the manifest and the final log. */
-    blockers: string[];
-    /** True when no further pipeline work can plausibly change the outcome. */
-    unrecoverable: boolean;
-    unrecoverableReason?: string;
-}
-
-export interface DispatchRound {
-    fileChanges: number;
-    /** **Merged** PRs only. `PR-SKIPPED-*` placeholders (status `closed`, prNumber 0)
-     *  are recorded for every no-commit branch and must never count as progress. */
-    prs: number;
-    completed: number;
-}
+import type { AcceptanceStatus, AcceptanceCriterionResult, AcceptanceReport, GateOutcome, GateFinding, GateStatus } from './gate-types';
 
 // ─── Evaluate Acceptance ────────────────────────────────────────────────────
 
@@ -149,9 +129,10 @@ export function evaluateAcceptance(state: ProjectStateType): AcceptanceReport {
             const testResults = gateReport.results.filter(
                 r => r.step === 'test' && r.mode !== 'absent' && !r.skipped,
             );
-            // Also check for real QA test reports
+            // Only count reports with source === 'executed' (parsed from a real runner)
+            // to prevent LLM-claimed tests from inflating counts (Plan 25-04 §1).
             const realTestReports = (state.testReports ?? []).filter(
-                r => r.type === 'unit' || r.type === 'integration',
+                r => (r.type === 'unit' || r.type === 'integration') && r.source === 'executed',
             );
             const totalExecuted = realTestReports.reduce((sum, r) => sum + r.total, 0);
             if (testResults.length > 0 || totalExecuted > 0) {
@@ -210,19 +191,21 @@ export function evaluateAcceptance(state: ProjectStateType): AcceptanceReport {
     }
 
     // ── INTEGRITY ────────────────────────────────────────────────────────
+    // Plan 25-04 §2: Read integrityFindings from pullRequests instead
+    // of the non-existent 'TAMPER-' bug prefix. PR-level integrityFindings
+    // are populated by pr-workflow.ts via detectTampering().
     {
         let passed = true;
         let inconclusive = false;
         let detail = 'No tampering detected';
-        // Check configBaseline for tamper findings
-        // TamperFindings are surfaced as bugs with id prefix 'TAMPER-'
-        const tamperBugs = (state.bugs ?? []).filter(b => b.id.startsWith('TAMPER-'));
-        const criticalTamperBugs = tamperBugs.filter(b => b.severity === 'critical');
-        if (criticalTamperBugs.length > 0) {
+        const allIntegrityFindings = (state.pullRequests ?? [])
+            .flatMap(pr => pr.integrityFindings ?? []);
+        const criticalFindings = allIntegrityFindings.filter(f => f.severity === 'critical');
+        if (criticalFindings.length > 0) {
             passed = false;
-            detail = `${criticalTamperBugs.length} critical tamper finding(s): ${criticalTamperBugs[0].title}`;
-        } else if (tamperBugs.length > 0) {
-            detail = `${tamperBugs.length} non-critical tamper finding(s)`;
+            detail = `${criticalFindings.length} critical integrity finding(s): ${criticalFindings[0].detail}`;
+        } else if (allIntegrityFindings.length > 0) {
+            detail = `${allIntegrityFindings.length} non-critical integrity finding(s)`;
         }
         criteria.push({ id: 'INTEGRITY', label: 'Gate integrity', required: true, passed, inconclusive, detail });
     }
@@ -235,29 +218,12 @@ export function evaluateAcceptance(state: ProjectStateType): AcceptanceReport {
         let inconclusive = false;
         let detail = 'All stories have assignments';
         const stories = state.userStories ?? [];
-        const assignments = state.assignments ?? [];
-        const mergedPrs = (state.pullRequests ?? []).filter(pr => pr.status === 'merged');
-        const mergedBranches = new Set(mergedPrs.map(pr => pr.branchName));
 
         if (stories.length === 0) {
             inconclusive = true;
             detail = 'No user stories to evaluate';
         } else {
-            // Check which stories have at least one assignment with a merged PR
             const storyIdsWithMerge = new Set<string>();
-            for (const a of assignments) {
-                // Check if any merged PR matches this assignment's branch
-                const ba = (state.branchAssignments ?? []).find(
-                    b => b.assignmentIds.includes(a.id) && mergedBranches.has(b.branchName),
-                );
-                if (ba) {
-                    if (a.storyId) storyIdsWithMerge.add(a.storyId);
-                    // Also mark additionalStoryIds as covered (Sub-Plan 04)
-                    for (const sid of a.additionalStoryIds ?? []) {
-                        storyIdsWithMerge.add(sid);
-                    }
-                }
-            }
             const orphanedStories = stories.filter(s => !storyIdsWithMerge.has(s.id));
             if (orphanedStories.length > 0) {
                 passed = false;
@@ -545,26 +511,18 @@ export function haltIfUnrecoverable(
  * Convert acceptance blockers into Bug objects with stable ids for the
  * bugfix loop. Each blocker gets an `ACCEPT-<criterionId>` id.
  */
-export function acceptanceBlockersToBugs(report: AcceptanceReport): Array<{
-    id: string;
-    title: string;
-    severity: 'critical' | 'major';
-    stepsToReproduce: string;
-    expectedBehavior: string;
-    actualBehavior: string;
-    suspectedArea: string;
-    reportedBy: string;
-}> {
+export function acceptanceBlockersToBugs(report: AcceptanceReport): Bug[] {
     return report.criteria
         .filter(c => !c.passed && !c.inconclusive && c.required)
-        .map(c => ({
-            id: `ACCEPT-${c.id}`,
-            title: `Acceptance criterion failed: ${c.label}`,
-            severity: 'critical' as const,
-            stepsToReproduce: `Run the acceptance gate — criterion ${c.id} fails`,
-            expectedBehavior: `${c.label} should pass`,
-            actualBehavior: c.detail,
-            suspectedArea: c.id === 'BUILD' ? 'package.json / source code'
+        .map(c => makeGateBug(
+            `ACCEPT-${c.id}`,
+            `Acceptance criterion failed: ${c.label}`,
+            'critical',
+            'acceptance-gate',
+            `Run the acceptance gate — criterion ${c.id} fails`,
+            `${c.label} should pass`,
+            c.detail,
+            c.id === 'BUILD' ? 'package.json / source code'
                 : c.id === 'RESOLVE' ? 'import/require statements'
                 : c.id === 'TESTS' ? 'test files and runner'
                 : c.id === 'ARTIFACTS' ? 'build output directory'
@@ -573,8 +531,7 @@ export function acceptanceBlockersToBugs(report: AcceptanceReport): Array<{
                 : c.id === 'DEPLOY' ? 'Dockerfile / docker-compose.yml'
                 : c.id === 'E2E' ? 'E2E test setup / Playwright MCP'
                 : 'general',
-            reportedBy: 'acceptance-gate',
-        }));
+        ));
 }
 
 /**
@@ -592,12 +549,12 @@ export function acceptanceReportToMarkdown(report: AcceptanceReport): string {
     lines.push('');
     lines.push('## Criteria');
     lines.push('');
-    lines.push('| Criterion | Required | Passed | Detail |');
-    lines.push('|-----------|----------|--------|--------|');
-    for (const c of report.criteria) {
+    const headers = ['Criterion', 'Required', 'Passed', 'Detail'];
+    const rows = report.criteria.map(c => {
         const passIcon = c.inconclusive ? '?' : c.passed ? 'Yes' : 'No';
-        lines.push(`| ${c.id} — ${c.label} | ${c.required ? 'Yes' : 'No'} | ${passIcon} | ${c.detail} |`);
-    }
+        return [`${c.id} — ${c.label}`, c.required ? 'Yes' : 'No', passIcon, c.detail];
+    });
+    lines.push(mdTable(headers, rows));
     if (report.blockers.length > 0) {
         lines.push('');
         lines.push('## Blockers');
@@ -607,4 +564,35 @@ export function acceptanceReportToMarkdown(report: AcceptanceReport): string {
         }
     }
     return lines.join('\n');
+}
+
+// ─── AcceptanceReport → GateOutcome adapter (Sub-Plan 25-10) ────────────────
+
+/**
+ * Convert an AcceptanceReport into a standard GateOutcome.
+ */
+export function acceptanceGateOutcome(report: AcceptanceReport): GateOutcome<AcceptanceReport> {
+    const statusMap: Record<AcceptanceStatus, GateStatus> = {
+        accepted: 'pass',
+        partial: 'fail',
+        rejected: 'fail',
+        inconclusive: 'inconclusive',
+    };
+
+    const findings: GateFinding[] = report.criteria
+        .filter(c => !c.passed && !c.inconclusive)
+        .map(c => ({
+            id: `ACCEPT-${c.id}`,
+            severity: c.required ? 'critical' as const : 'major' as const,
+            detail: `${c.label}: ${c.detail}`,
+        }));
+
+    return {
+        gate: 'acceptance',
+        status: statusMap[report.status],
+        findings,
+        detail: report,
+        markdown: acceptanceReportToMarkdown(report),
+        bugs: acceptanceBlockersToBugs(report),
+    };
 }

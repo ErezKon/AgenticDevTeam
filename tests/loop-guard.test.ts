@@ -129,7 +129,7 @@ describe('Tool Loop Guard', () => {
         const readFile = makeMockTool('read_file', 'content');
         const writeFile = makeMockTool('write_file', 'written');
 
-        const { tools: guarded, isCeilingReached } = withLoopGuard(
+        const { tools: guarded } = withLoopGuard(
             [readFile.tool, writeFile.tool], 'test-agent',
             { budgets: { reads: 3, writes: 25, shell: 10 }, progressBonus: 5, hardCeiling: 80 },
         );

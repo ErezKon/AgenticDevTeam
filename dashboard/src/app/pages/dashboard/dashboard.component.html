@@ -29,7 +29,7 @@
   <!-- Active Runs -->
   <section class="card" style="margin-bottom: 1.5rem;" *ngIf="activeRuns.length > 0">
     <h2 style="margin-bottom: 1rem;">Active Runs ({{ activeRuns.length }})</h2>
-    <div *ngFor="let run of activeRuns" class="run-entry">
+    <div *ngFor="let run of activeRuns; trackBy: trackByRun" class="run-entry">
       <span class="badge badge-purple">{{ run.phase }}</span>
       <span class="run-system-name">{{ run.systemName }}</span>
       <span class="run-meta">
@@ -46,7 +46,7 @@
   <section class="card" style="margin-bottom: 1.5rem;">
     <h2 style="margin-bottom: 1rem;">Agent Roster ({{ agents.length }})</h2>
     <div class="agent-grid">
-      <div *ngFor="let agent of agents" class="agent-card">
+      <div *ngFor="let agent of agents; trackBy: trackByAgent" class="agent-card">
         <span class="agent-tag" [style.color]="getColor(agent.colorCode)">{{ agent.tag }}</span>
         <span class="agent-name">{{ agent.name }}</span>
         <span class="badge" [ngClass]="'badge-' + categoryColor(agent.category)">{{ agent.category }}</span>
@@ -57,15 +57,6 @@
   <!-- Live Events -->
   <section class="card">
     <h2 style="margin-bottom: 1rem;">Live Events ({{ events.length }})</h2>
-    <div class="event-log">
-      <div *ngFor="let msg of events" class="event-entry">
-        <span class="event-time">{{ msg.timestamp | date:'HH:mm:ss' }}</span>
-        <span class="event-type badge" [ngClass]="eventBadgeClass(msg.event)">{{ msg.event }}</span>
-        <span class="event-data">{{ msg.data | json }}</span>
-      </div>
-      <div *ngIf="events.length === 0" class="empty-state">
-        No events yet. Start a new run to see live updates.
-      </div>
-    </div>
+    <app-event-log [events]="events" emptyMessage="No events yet. Start a new run to see live updates."></app-event-log>
   </section>
 </div>

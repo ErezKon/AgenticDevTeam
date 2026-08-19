@@ -149,7 +149,7 @@ export function consolidateBranches(
 
     // Step 2: Find connected components via shared modules
     let collisionCount = 0;
-    for (const [mod, owners] of moduleOwners) {
+    for (const [, owners] of moduleOwners) {
         if (owners.length > 1) {
             collisionCount++;
             for (let i = 1; i < owners.length; i++) {

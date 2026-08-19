@@ -5,6 +5,43 @@
  * variables here — nothing is hardcoded to a specific vendor.
  */
 
+// ─── Validated Env Helpers ──────────────────────────────────────────────────
+
+/** Read an integer env var with validation. Throws at startup on non-numeric values. */
+export function envInt(key: string, def: number): number {
+    const raw = process.env[key];
+    if (raw === undefined || raw === '') return def;
+    const n = parseInt(raw, 10);
+    if (isNaN(n)) throw new Error(`Invalid integer for ${key}: "${raw}"`);
+    return n;
+}
+
+/** Read a float env var with validation. Throws at startup on non-numeric values. */
+export function envFloat(key: string, def: number): number {
+    const raw = process.env[key];
+    if (raw === undefined || raw === '') return def;
+    const n = parseFloat(raw);
+    if (isNaN(n)) throw new Error(`Invalid float for ${key}: "${raw}"`);
+    return n;
+}
+
+/** Read a boolean env var ('true'/'false'). Throws at startup on unrecognised values. */
+export function envBool(key: string, def: boolean): boolean {
+    const raw = process.env[key];
+    if (raw === undefined || raw === '') return def;
+    if (raw === 'true') return true;
+    if (raw === 'false') return false;
+    throw new Error(`Invalid boolean for ${key}: "${raw}" (expected "true" or "false")`);
+}
+
+/** Read a string enum env var. Throws at startup on values not in the allowed set. */
+export function envEnum<T extends string>(key: string, values: readonly T[], def: T): T {
+    const raw = process.env[key];
+    if (raw === undefined || raw === '') return def;
+    if ((values as readonly string[]).includes(raw)) return raw as T;
+    throw new Error(`Invalid value for ${key}: "${raw}" (expected one of: ${values.join(', ')})`);
+}
+
 // ─── LLM ────────────────────────────────────────────────────────────────────
 
 /** OpenAI-compatible LLM base URL (no trailing slash). */
@@ -105,9 +142,12 @@ export const MODEL_PRICING: Record<string, ModelPricingEntry> = {
     'gemini-2.5-flash':                  { inputPer1k: 0.00015, outputPer1k: 0.0006 },
     'gemini-2.0-flash':                  { inputPer1k: 0.0001,  outputPer1k: 0.0004 },
     // Merge env-based overrides if provided
-    ...(process.env.MODEL_PRICING_OVERRIDES
-        ? JSON.parse(process.env.MODEL_PRICING_OVERRIDES) as Record<string, ModelPricingEntry>
-        : {}),
+    ...((() => {
+        const raw = process.env.MODEL_PRICING_OVERRIDES;
+        if (!raw) return {};
+        try { return JSON.parse(raw) as Record<string, ModelPricingEntry>; }
+        catch (e) { throw new Error(`Invalid JSON for MODEL_PRICING_OVERRIDES: ${(e as Error).message}`); }
+    })()),
 };
 
 // ─── Multi-Provider LLM (Sub-Plan 20) ───────────────────────────────────────
@@ -135,16 +175,16 @@ export const ANTHROPIC_BASE_URL =
  *  The pacmanclaude run reported `cache_read: 0` on all 227 Anthropic calls and
  *  billed 2.32M input tokens against 99.7K output for one branch of fifteen. */
 export const ANTHROPIC_PROMPT_CACHE_ENABLED =
-    (process.env.ANTHROPIC_PROMPT_CACHE_ENABLED ?? 'true') === 'true';
+    envBool('ANTHROPIC_PROMPT_CACHE_ENABLED', true);
 
 /** Log an ERROR when Anthropic reports zero cache reads after SANITY_ASSERT_CACHE_AFTER
  *  calls (Plan 22, D2). A silent cache miss is expensive and otherwise invisible. */
 export const SANITY_ASSERT_CACHE =
-    (process.env.SANITY_ASSERT_CACHE ?? 'true') === 'true';
+    envBool('SANITY_ASSERT_CACHE', true);
 
 /** Number of Anthropic calls after which the zero-cache assertion fires. */
 export const SANITY_ASSERT_CACHE_AFTER =
-    parseInt(process.env.SANITY_ASSERT_CACHE_AFTER ?? '20', 10);
+    envInt('SANITY_ASSERT_CACHE_AFTER', 20);
 
 /** Optional base URL override for Google (for proxies). */
 export const GOOGLE_BASE_URL =
@@ -156,7 +196,7 @@ export const GOOGLE_BASE_URL =
  * - 'openai': Force all models through the OpenAI-compatible endpoint (escape hatch for proxies).
  */
 export const LLM_PROVIDER_DETECTION =
-    (process.env.LLM_PROVIDER_DETECTION ?? 'auto') as 'auto' | 'openai';
+    envEnum('LLM_PROVIDER_DETECTION', ['auto', 'openai'] as const, 'auto');
 
 // ─── OAuth2 (client-credentials) ────────────────────────────────────────────
 
@@ -170,29 +210,29 @@ export const OAUTH_CLIENT_SECRET = process.env.OAUTH_CLIENT_SECRET ?? process.en
 // ─── Run behaviour ──────────────────────────────────────────────────────────
 
 /** Run mode: 'autonomous' (no stops) or 'human' (pause after each phase). */
-export const RUN_MODE: 'autonomous' | 'human' =
-    (process.env.RUN_MODE as 'autonomous' | 'human') ?? 'human';
+export const RUN_MODE =
+    envEnum('RUN_MODE', ['autonomous', 'human'] as const, 'human');
 
 /** Max bug-fix loop iterations before the conductor gives up. */
 export const MAX_BUGFIX_ITERATIONS =
-    parseInt(process.env.MAX_BUGFIX_ITERATIONS ?? '3', 10);
+    envInt('MAX_BUGFIX_ITERATIONS', 3);
 
 /** Maximum feature branches per dispatch round (Plan 24, E2).
  *  Each branch carries fixed scaffold, gate, review, and merge overhead;
  *  branches that share a module are serialised. The dispatcher warned at
  *  >8 since Plan 13 and the planner was never told. */
 export const MAX_BRANCHES =
-    parseInt(process.env.MAX_BRANCHES ?? '8', 10);
+    envInt('MAX_BRANCHES', 8);
 
 /** Allow a hard reset to origin/<branch> when ff/rebase both fail during workspace sync. */
 export const WORKSPACE_SYNC_ALLOW_RESET =
-    (process.env.WORKSPACE_SYNC_ALLOW_RESET ?? 'true') === 'true';
+    envBool('WORKSPACE_SYNC_ALLOW_RESET', true);
 
 /** Timeout (ms) for git subcommands that hit the network (fetch/push/clone).
  *  The default 30 s local timeout is too tight for a GitHub fetch on a loaded
  *  machine, and a SIGTERM'd git produces an empty error (Plan 21, E6). */
 export const GIT_NETWORK_TIMEOUT_MS =
-    parseInt(process.env.GIT_NETWORK_TIMEOUT_MS ?? '120000', 10);
+    envInt('GIT_NETWORK_TIMEOUT_MS', 120000);
 
 /**
  * LangGraph recursion limits per agent type.
@@ -210,18 +250,18 @@ export const GIT_NETWORK_TIMEOUT_MS =
  * Per-type env vars override the global fallback.
  */
 export const PIPELINE_RECURSION_LIMIT =
-    parseInt(process.env.PIPELINE_RECURSION_LIMIT ?? process.env.AGENT_RECURSION_LIMIT ?? '15', 10);
+    envInt('PIPELINE_RECURSION_LIMIT', envInt('AGENT_RECURSION_LIMIT', 15));
 
 /** Dev recursion limit.  Was 58 — raised to 140 because 6 recursion-limit kills
  *  in pacman8 destroyed dev agents mid-work.  The loop guard (read/write/shell
  *  budgets) is now the binding constraint. */
 export const DEV_RECURSION_LIMIT =
-    parseInt(process.env.DEV_RECURSION_LIMIT ?? process.env.AGENT_RECURSION_LIMIT ?? '140', 10);
+    envInt('DEV_RECURSION_LIMIT', envInt('AGENT_RECURSION_LIMIT', 140));
 
 /** Reviewer recursion limit.  Was 26 — raised to 40 because reviewers abstained
  *  on recursion limits and that counted as approval under the old policy. */
 export const REVIEWER_RECURSION_LIMIT =
-    parseInt(process.env.REVIEWER_RECURSION_LIMIT ?? process.env.AGENT_RECURSION_LIMIT ?? '40', 10);
+    envInt('REVIEWER_RECURSION_LIMIT', envInt('AGENT_RECURSION_LIMIT', 40));
 
 /**
  * Recursion limit for pipeline agents that USE TOOLS (codebase-analyzer,
@@ -232,22 +272,22 @@ export const REVIEWER_RECURSION_LIMIT =
  * 8 QA phases across both runs.
  */
 export const TOOL_PIPELINE_RECURSION_LIMIT =
-    parseInt(process.env.TOOL_PIPELINE_RECURSION_LIMIT ?? '120', 10);
+    envInt('TOOL_PIPELINE_RECURSION_LIMIT', 120);
 
 /** Loop-guard ceiling (total tool calls) for tool-using pipeline agents.
  *  Was 25 — raised to 50 because qa-unit was poisoned at 6–7 calls in all
  *  8 QA phases across both runs. */
 export const TOOL_PIPELINE_MAX_TOOL_CALLS =
-    parseInt(process.env.TOOL_PIPELINE_MAX_TOOL_CALLS ?? '50', 10);
+    envInt('TOOL_PIPELINE_MAX_TOOL_CALLS', 50);
 
 /** Loop-guard ceiling for reviewer agents (must be < REVIEWER_RECURSION_LIMIT / 2).
  *  Was 8 — raised to 14 because reviewers abstained on budget exhaustion. */
 export const REVIEWER_MAX_TOOL_CALLS =
-    parseInt(process.env.REVIEWER_MAX_TOOL_CALLS ?? '14', 10);
+    envInt('REVIEWER_MAX_TOOL_CALLS', 14);
 
 /** @deprecated Use per-type limits (PIPELINE_RECURSION_LIMIT, DEV_RECURSION_LIMIT, REVIEWER_RECURSION_LIMIT). */
 export const AGENT_RECURSION_LIMIT =
-    parseInt(process.env.AGENT_RECURSION_LIMIT ?? '30', 10);
+    envInt('AGENT_RECURSION_LIMIT', 30);
 
 /**
  * Terminal-guidance responses an agent may receive before the factory withholds
@@ -257,21 +297,21 @@ export const AGENT_RECURSION_LIMIT =
  * the budget was gone, because nothing stopped the loop.
  */
 export const MAX_POST_EXHAUSTION_CALLS =
-    parseInt(process.env.MAX_POST_EXHAUSTION_CALLS ?? '2', 10);
+    envInt('MAX_POST_EXHAUSTION_CALLS', 2);
 
 /** Max file-change entries injected into the dev context prompt.
  *  Lowered from 60 to 25 — summariseFileChanges now groups by directory
  *  so fewer entries convey the same information. */
 export const DEV_CONTEXT_FILE_CHANGES_LIMIT =
-    parseInt(process.env.DEV_CONTEXT_FILE_CHANGES_LIMIT ?? '25', 10);
+    envInt('DEV_CONTEXT_FILE_CHANGES_LIMIT', 25);
 
 /** Max parallel developer agents during fan-out. */
 export const MAX_CONCURRENT_DEVS =
-    parseInt(process.env.MAX_CONCURRENT_DEVS ?? '2', 10);
+    envInt('MAX_CONCURRENT_DEVS', 2);
 
 /** Delay (ms) between dispatching batches of branches to avoid rate limits. */
 export const INTER_BATCH_DELAY_MS =
-    parseInt(process.env.INTER_BATCH_DELAY_MS ?? '5000', 10);
+    envInt('INTER_BATCH_DELAY_MS', 5000);
 
 // ─── Paths ──────────────────────────────────────────────────────────────────
 
@@ -295,128 +335,124 @@ export const DOCKER_HOST =
 
 /** Actually build/run Docker artifacts and health-check them after the DevOps agent finishes. */
 export const DEVOPS_VERIFY_ENABLED =
-    (process.env.DEVOPS_VERIFY_ENABLED ?? 'true') === 'true';
+    envBool('DEVOPS_VERIFY_ENABLED', true);
 
 /** Timeout (ms) for each shell step during deployment verification. */
 export const DEVOPS_VERIFY_TIMEOUT_MS =
-    parseInt(process.env.DEVOPS_VERIFY_TIMEOUT_MS ?? '600000', 10);
+    envInt('DEVOPS_VERIFY_TIMEOUT_MS', 600000);
 
 /** First host port for mapping container EXPOSE ports during Dockerfile-mode verification. */
 export const DEVOPS_VERIFY_BASE_PORT =
-    parseInt(process.env.DEVOPS_VERIFY_BASE_PORT ?? '18080', 10);
+    envInt('DEVOPS_VERIFY_BASE_PORT', 18080);
 
 /** Number of retries for each health-check URL. */
 export const DEVOPS_HEALTH_RETRIES =
-    parseInt(process.env.DEVOPS_HEALTH_RETRIES ?? '5', 10);
+    envInt('DEVOPS_HEALTH_RETRIES', 5);
 
 /** Delay (ms) between health-check retries. */
 export const DEVOPS_HEALTH_DELAY_MS =
-    parseInt(process.env.DEVOPS_HEALTH_DELAY_MS ?? '3000', 10);
+    envInt('DEVOPS_HEALTH_DELAY_MS', 3000);
 
 /** Tear down containers started by verifyDeployment during finalize. */
 export const DEVOPS_TEARDOWN =
-    (process.env.DEVOPS_TEARDOWN ?? 'true') === 'true';
+    envBool('DEVOPS_TEARDOWN', true);
 
 /** Allow E2E test failures to trigger a bugfix loop.
  *  Was false — flipped to true because E2E never ran in either post-mortem run,
  *  so the cost concern was hypothetical. With Sub-Plan 03's early-halt and the
  *  run budget, an E2E failure is worth spending a bugfix iteration on. */
 export const E2E_BUGFIX_ENABLED =
-    (process.env.E2E_BUGFIX_ENABLED ?? 'true') === 'true';
+    envBool('E2E_BUGFIX_ENABLED', true);
 
 // ─── Run Budget ─────────────────────────────────────────────────────────────
 
 /** Max total tokens for a run. 0 = unlimited (default). All three limits are checked; the closest one binds. */
 export const MAX_RUN_TOKENS =
-    parseInt(process.env.MAX_RUN_TOKENS ?? '0', 10);
+    envInt('MAX_RUN_TOKENS', 0);
 
 /** Max estimated USD cost for a run.  Was 0 (unlimited) — set to 150 now that
  *  raised budgets make individual agents more expensive.  Sub-Plan 03's early-halt
  *  on unrecoverability is what makes this safe: money goes to runs that can still
  *  succeed, and failing runs stop early. */
 export const MAX_RUN_COST_USD =
-    parseFloat(process.env.MAX_RUN_COST_USD ?? '150');
+    envFloat('MAX_RUN_COST_USD', 150);
 
 /** Max wall-clock time (ms) for a run.  Was 0 (unlimited) — set to 5 hours. */
 export const MAX_RUN_WALL_MS =
-    parseInt(process.env.MAX_RUN_WALL_MS ?? '18000000', 10);
+    envInt('MAX_RUN_WALL_MS', 18000000);
 
 /** Max input tokens for a single agent invocation (Plan 24, D1).
  *  Prevents a single runaway invocation from consuming the entire run budget.
  *  0 = unlimited. */
 export const MAX_INVOCATION_INPUT_TOKENS =
-    parseInt(process.env.MAX_INVOCATION_INPUT_TOKENS ?? '600000', 10);
+    envInt('MAX_INVOCATION_INPUT_TOKENS', 600000);
 
 /** Max estimated USD cost for a single branch workflow (Plan 24, D2).
  *  0 = unlimited. */
 export const MAX_BRANCH_COST_USD =
-    parseFloat(process.env.MAX_BRANCH_COST_USD ?? '6');
+    envFloat('MAX_BRANCH_COST_USD', 6);
 
 /** Max wall-clock time (ms) for a single branch workflow (Plan 24, D2).
  *  Default 15 minutes. 0 = unlimited. */
 export const MAX_BRANCH_WALL_MS =
-    parseInt(process.env.MAX_BRANCH_WALL_MS ?? '900000', 10);
+    envInt('MAX_BRANCH_WALL_MS', 900000);
 
 /** Utilisation threshold for budget warning level (default: 0.70). */
 export const BUDGET_WARN_AT =
-    parseFloat(process.env.BUDGET_WARN_AT ?? '0.70');
+    envFloat('BUDGET_WARN_AT', 0.70);
 
 /** Utilisation threshold for budget degrade level (default: 0.90). */
 export const BUDGET_DEGRADE_AT =
-    parseFloat(process.env.BUDGET_DEGRADE_AT ?? '0.90');
+    envFloat('BUDGET_DEGRADE_AT', 0.90);
 
 // ─── LLM Output Limits ──────────────────────────────────────────────────────
 
 /** Hard output-token ceiling for all agents (default 16 000). */
 export const LLM_MAX_OUTPUT_TOKENS =
-    parseInt(process.env.LLM_MAX_OUTPUT_TOKENS ?? '16000', 10);
+    envInt('LLM_MAX_OUTPUT_TOKENS', 16000);
 
 /** Output-token ceiling for planning agents (architect, PM, DBA, team-leader). Default 64 000.
  *  Raised from 32 000: PM on complex specs (e.g. Pac-Man, 35 stories + 66 tasks) hit the
  *  ceiling at exactly 32 005 tokens, truncating the last task mid-word and crashing the run. */
 export const PLANNING_MAX_OUTPUT_TOKENS =
-    parseInt(process.env.PLANNING_MAX_OUTPUT_TOKENS ?? '64000', 10);
+    envInt('PLANNING_MAX_OUTPUT_TOKENS', 64000);
 
 /** Per-request LLM timeout (ms). The hardcoded 120 000 was too short for long planning generations. */
 export const LLM_REQUEST_TIMEOUT_MS =
-    parseInt(process.env.LLM_REQUEST_TIMEOUT_MS ?? '300000', 10);
+    envInt('LLM_REQUEST_TIMEOUT_MS', 300000);
 
 // ─── Agent Output Validation ────────────────────────────────────────────────
 
 /** Number of repair attempts when agent output fails schema validation (0 disables). */
 export const AGENT_OUTPUT_REPAIR_ATTEMPTS =
-    parseInt(process.env.AGENT_OUTPUT_REPAIR_ATTEMPTS ?? '2', 10);
-
-/** Continuation attempts when an agent's JSON output is truncated mid-array. */
-export const AGENT_OUTPUT_CONTINUATION_ATTEMPTS =
-    parseInt(process.env.AGENT_OUTPUT_CONTINUATION_ATTEMPTS ?? '3', 10);
+    envInt('AGENT_OUTPUT_REPAIR_ATTEMPTS', 2);
 
 // ─── Context Budget ─────────────────────────────────────────────────────────
 
 /** Hard character budget for assembled context per agent prompt. */
 export const CONTEXT_MAX_CHARS =
-    parseInt(process.env.CONTEXT_MAX_CHARS ?? '24000', 10);
+    envInt('CONTEXT_MAX_CHARS', 24000);
 
 /** Max characters for clipped descriptions in architecture summaries. */
 export const CONTEXT_MAX_DESC_CHARS =
-    parseInt(process.env.CONTEXT_MAX_DESC_CHARS ?? '200', 10);
+    envInt('CONTEXT_MAX_DESC_CHARS', 200);
 
 /** Strip deep description fields from injected JSON Schema to save tokens (default: true). */
 export const RESPONSE_SCHEMA_COMPACT =
-    (process.env.RESPONSE_SCHEMA_COMPACT ?? 'true') === 'true';
+    envBool('RESPONSE_SCHEMA_COMPACT', true);
 
 /** Strip ALL descriptions and noise from injected JSON Schema (default: true).
  *  Field names are self-documenting; full descriptions are only useful the first
  *  time a developer sees the schema but are re-billed on every LLM call. */
 export const RESPONSE_SCHEMA_STRIP_ALL_DESCRIPTIONS =
-    (process.env.RESPONSE_SCHEMA_STRIP_ALL_DESCRIPTIONS ?? 'true') === 'true';
+    envBool('RESPONSE_SCHEMA_STRIP_ALL_DESCRIPTIONS', true);
 
 /** Request JSON mode from the LLM API when a responseFormat schema is set (default: true).
  *  Sets `response_format: { type: "json_object" }` on the model, which constrains
  *  the model to always output valid JSON. Requires an OpenAI-compatible API that
  *  supports JSON mode. Disable with LLM_JSON_MODE=false if the API doesn't support it. */
 export const LLM_JSON_MODE =
-    (process.env.LLM_JSON_MODE ?? 'true') === 'true';
+    envBool('LLM_JSON_MODE', true);
 
 // ─── Context Compaction ─────────────────────────────────────────────────────
 
@@ -424,13 +460,13 @@ export const LLM_JSON_MODE =
  *  Was 6000 — raised to 10000 because a 4,210-char source file read was
  *  being truncated, so agents re-read with offsets (costing more tokens). */
 export const MAX_TOOL_RESULT_CHARS =
-    parseInt(process.env.MAX_TOOL_RESULT_CHARS ?? '10000', 10);
+    envInt('MAX_TOOL_RESULT_CHARS', 10000);
 
 /** Number of most-recent tool results kept verbatim in ReAct history.
  *  Was 2 — raised to 4 because agents re-read files they had already read
  *  since the result had been stubbed out of history. */
 export const HISTORY_KEEP_RECENT_TOOL_RESULTS =
-    parseInt(process.env.HISTORY_KEEP_RECENT_TOOL_RESULTS ?? '4', 10);
+    envInt('HISTORY_KEEP_RECENT_TOOL_RESULTS', 4);
 
 /** Number of most-recent *model turns* whose tool results are kept verbatim
  *  (Plan 22, B4). This is the primary recent-window control;
@@ -441,66 +477,62 @@ export const HISTORY_KEEP_RECENT_TOOL_RESULTS =
  *  boundary *inside* the turn the model was about to reason over, so it re-read
  *  files it had just read and exhausted its tool budget doing it. */
 export const HISTORY_KEEP_RECENT_TURNS =
-    parseInt(process.env.HISTORY_KEEP_RECENT_TURNS ?? '3', 10);
+    envInt('HISTORY_KEEP_RECENT_TURNS', 3);
 
 /** Number of most-recent write turns whose tool-call arguments are NEVER elided
  *  (Plan 22, B3). The model needs its last writes verbatim to diff against, and
  *  this is the window where placeholder imitation was observed. */
 export const HISTORY_KEEP_RECENT_WRITE_ARGS =
-    parseInt(process.env.HISTORY_KEEP_RECENT_WRITE_ARGS ?? '2', 10);
+    envInt('HISTORY_KEEP_RECENT_WRITE_ARGS', 2);
 
 /** Enable the middleware that compacts ReAct history before each LLM call. */
 export const HISTORY_COMPACTION_ENABLED =
-    (process.env.HISTORY_COMPACTION_ENABLED ?? 'true') === 'true';
+    envBool('HISTORY_COMPACTION_ENABLED', true);
 
 /** Strip streaming residue (`*_delta` blocks, id-less `tool_use` blocks) from
  *  AIMessage content before every LLM call. Guards against the Anthropic
  *  `tool_use.id: Field required` 400 (Plan 21, E1), including on checkpoint resume. */
 export const SANITIZE_STREAM_BLOCKS =
-    (process.env.SANITIZE_STREAM_BLOCKS ?? 'true') === 'true';
+    envBool('SANITIZE_STREAM_BLOCKS', true);
 
 /** Hard character ceiling for the assembled ReAct history passed to the LLM.
  *  Was 30000 — raised to 60000.  With `growth 1.88x` observed, over-aggressive
  *  compaction caused re-reads that cost *more* tokens than the saved context. */
 export const HISTORY_MAX_CHARS =
-    parseInt(process.env.HISTORY_MAX_CHARS ?? '60000', 10);
+    envInt('HISTORY_MAX_CHARS', 60000);
 
 /** Max aggregate characters across all tool results for a single model turn
  *  (Plan 24, C4). When exceeded, results are proportionally shrunk with a
  *  1500-char floor per result. 0 = disabled. */
 export const MAX_TURN_TOOL_RESULT_CHARS =
-    parseInt(process.env.MAX_TURN_TOOL_RESULT_CHARS ?? '30000', 10);
+    envInt('MAX_TURN_TOOL_RESULT_CHARS', 30000);
 
 /** Inject a distilled conventions digest in the prompt instead of making agents read_file them. */
 export const CONVENTIONS_INLINE_DIGEST =
-    (process.env.CONVENTIONS_INLINE_DIGEST ?? 'true') === 'true';
+    envBool('CONVENTIONS_INLINE_DIGEST', true);
 
 /** Give developer agents git tools. The PR workflow already commits/pushes for them. */
 export const DEV_GIT_TOOLS_ENABLED =
-    (process.env.DEV_GIT_TOOLS_ENABLED ?? 'false') === 'true';
+    envBool('DEV_GIT_TOOLS_ENABLED', false);
 
 /** Use the short persona variant for developer agents. */
 export const PERSONA_COMPACT =
-    (process.env.PERSONA_COMPACT ?? 'true') === 'true';
+    envBool('PERSONA_COMPACT', true);
 
 /** Respawn a dev agent with a summarised handoff instead of poisoning tools at the ceiling. */
 export const AGENT_RESPAWN_ENABLED =
-    (process.env.AGENT_RESPAWN_ENABLED ?? 'true') === 'true';
+    envBool('AGENT_RESPAWN_ENABLED', true);
 
 /** Max respawn generations per logical dev task.
  *  Was 2 — raised to 4 because with a real handoff respawn becomes productive. */
 export const AGENT_RESPAWN_MAX_GENERATIONS =
-    parseInt(process.env.AGENT_RESPAWN_MAX_GENERATIONS ?? '4', 10);
-
-/** Input-token threshold that triggers a respawn on the next step. */
-export const AGENT_RESPAWN_TOKEN_THRESHOLD =
-    parseInt(process.env.AGENT_RESPAWN_TOKEN_THRESHOLD ?? '14000', 10);
+    envInt('AGENT_RESPAWN_MAX_GENERATIONS', 4);
 
 // ─── Quality Gates ──────────────────────────────────────────────────────────
 
 /** Enable multi-language quality gates (install/build/lint/test) in PR workflow and QA. */
 export const QUALITY_GATES_ENABLED =
-    (process.env.QUALITY_GATES_ENABLED ?? 'true') === 'true';
+    envBool('QUALITY_GATES_ENABLED', true);
 
 /** Which gate steps to run (comma-separated). */
 export const QUALITY_GATE_STEPS =
@@ -508,47 +540,47 @@ export const QUALITY_GATE_STEPS =
 
 /** Timeout (ms) for each quality gate step (default 5 min). */
 export const QUALITY_GATE_TIMEOUT_MS =
-    parseInt(process.env.QUALITY_GATE_TIMEOUT_MS ?? '300000', 10);
+    envInt('QUALITY_GATE_TIMEOUT_MS', 300000);
 
 /** Fail the gate when a stack's toolchain is missing (default: true — missing tools fail the gate). */
 export const QUALITY_GATE_STRICT_TOOLCHAIN =
-    (process.env.QUALITY_GATE_STRICT_TOOLCHAIN ?? 'true') === 'true';
+    envBool('QUALITY_GATE_STRICT_TOOLCHAIN', true);
 
 /** Max directory depth scanned when detecting stack roots (monorepo packages). */
 export const QUALITY_GATE_SCAN_DEPTH =
-    parseInt(process.env.QUALITY_GATE_SCAN_DEPTH ?? '3', 10);
+    envInt('QUALITY_GATE_SCAN_DEPTH', 3);
 
 /** Max stack roots gated per run (guards pathological trees). */
 export const QUALITY_GATE_MAX_ROOTS =
-    parseInt(process.env.QUALITY_GATE_MAX_ROOTS ?? '8', 10);
+    envInt('QUALITY_GATE_MAX_ROOTS', 8);
 
 // ─── Product Verification ───────────────────────────────────────────────────
 
 /** Enable artifact / import-resolution / smoke verification of the generated product. */
 export const PRODUCT_VERIFY_ENABLED =
-    (process.env.PRODUCT_VERIFY_ENABLED ?? 'true') === 'true';
+    envBool('PRODUCT_VERIFY_ENABLED', true);
 
 /** Minimum total bytes a build must emit before it counts as a real build. */
 export const PRODUCT_MIN_ARTIFACT_BYTES =
-    parseInt(process.env.PRODUCT_MIN_ARTIFACT_BYTES ?? '2048', 10);
+    envInt('PRODUCT_MIN_ARTIFACT_BYTES', 2048);
 
 /** Max source files scanned by the import-resolution check. */
 export const PRODUCT_RESOLVE_MAX_FILES =
-    parseInt(process.env.PRODUCT_RESOLVE_MAX_FILES ?? '2000', 10);
+    envInt('PRODUCT_RESOLVE_MAX_FILES', 2000);
 
 /** First host port used by the smoke server (probes upward when busy). */
 export const PRODUCT_SMOKE_BASE_PORT =
-    parseInt(process.env.PRODUCT_SMOKE_BASE_PORT ?? '18190', 10);
+    envInt('PRODUCT_SMOKE_BASE_PORT', 18190);
 
 /** Timeout (ms) for the smoke server to become ready and answer. */
 export const PRODUCT_SMOKE_TIMEOUT_MS =
-    parseInt(process.env.PRODUCT_SMOKE_TIMEOUT_MS ?? '60000', 10);
+    envInt('PRODUCT_SMOKE_TIMEOUT_MS', 60000);
 
 // ─── Gate Integrity ─────────────────────────────────────────────────────────
 
 /** Baseline-diff enforcement for gate tampering: 'off' | 'warn' | 'enforce'. */
 export const GATE_INTEGRITY_MODE =
-    (process.env.GATE_INTEGRITY_MODE ?? 'enforce') as 'off' | 'warn' | 'enforce';
+    envEnum('GATE_INTEGRITY_MODE', ['off', 'warn', 'enforce'] as const, 'enforce');
 
 /**
  * Delete test files the integrity gate flags as trivial (Plan 22, F3).
@@ -563,21 +595,21 @@ export const GATE_INTEGRITY_MODE =
  * body is archived to `outputs/<run>/deleted-tests/` first.
  */
 export const GATE_INTEGRITY_DELETE_TRIVIAL_TESTS =
-    (process.env.GATE_INTEGRITY_DELETE_TRIVIAL_TESTS ?? 'false') === 'true';
+    envBool('GATE_INTEGRITY_DELETE_TRIVIAL_TESTS', false);
 
 /** Protect configuration files from agent writes: 'off' | 'warn' | 'deny'. Per-agent overrides apply. */
 export const FS_CONFIG_PROTECTION =
-    (process.env.FS_CONFIG_PROTECTION ?? 'deny') as 'off' | 'warn' | 'deny';
+    envEnum('FS_CONFIG_PROTECTION', ['off', 'warn', 'deny'] as const, 'deny');
 
 /** Reject test files whose subject is not reachable from an application entry point. */
 export const REJECT_TRIVIAL_TESTS =
-    (process.env.REJECT_TRIVIAL_TESTS ?? 'true') === 'true';
+    envBool('REJECT_TRIVIAL_TESTS', true);
 
 /** Minimum product modules the reachable set must cover for the `subject-not-in-product`
  *  and `no-product-import` checks to fire. When the entry-point closure is degenerate
  *  (< N modules), those checks produce false positives and are skipped (Plan 24 B4). */
 export const GATE_REACHABILITY_MIN_CLOSURE =
-    parseInt(process.env.GATE_REACHABILITY_MIN_CLOSURE ?? '3', 10);
+    envInt('GATE_REACHABILITY_MIN_CLOSURE', 3);
 
 // ─── Run Acceptance ─────────────────────────────────────────────────────────
 
@@ -588,37 +620,37 @@ export const GATE_REACHABILITY_MIN_CLOSURE =
  *  'legacy'   — pre-Plan-19 behaviour: always 'completed'. For regression comparison only.
  */
 export const RUN_FAIL_POLICY =
-    (process.env.RUN_FAIL_POLICY ?? 'halt') as 'halt' | 'finalize' | 'legacy';
+    envEnum('RUN_FAIL_POLICY', ['halt', 'finalize', 'legacy'] as const, 'halt');
 
 /** Minimum number of really-executed tests for the TESTS acceptance criterion. */
 export const ACCEPT_MIN_TESTS =
-    parseInt(process.env.ACCEPT_MIN_TESTS ?? '1', 10);
+    envInt('ACCEPT_MIN_TESTS', 1);
 
 /** Treat the SMOKE criterion as required for web products. */
 export const ACCEPT_REQUIRE_SMOKE =
-    (process.env.ACCEPT_REQUIRE_SMOKE ?? 'true') === 'true';
+    envBool('ACCEPT_REQUIRE_SMOKE', true);
 
 /** Consecutive zero-output dispatch rounds that mark a run unrecoverable. */
 export const UNRECOVERABLE_ZERO_ROUNDS =
-    parseInt(process.env.UNRECOVERABLE_ZERO_ROUNDS ?? '2', 10);
+    envInt('UNRECOVERABLE_ZERO_ROUNDS', 2);
 
 // ─── Security Gates ─────────────────────────────────────────────────────────
 
 /** Enable security gates (secret scan, dependency audit, licence check) in QA. */
 export const SECURITY_GATES_ENABLED =
-    (process.env.SECURITY_GATES_ENABLED ?? 'true') === 'true';
+    envBool('SECURITY_GATES_ENABLED', true);
 
 /** When true, critical security findings become Bugs that feed the bug-fix loop. */
 export const SECURITY_GATE_BLOCKING =
-    (process.env.SECURITY_GATE_BLOCKING ?? 'false') === 'true';
+    envBool('SECURITY_GATE_BLOCKING', false);
 
 /** Run scanForSecrets on PR worktrees before opening PRs. A critical secret blocks the merge. */
 export const SECURITY_GATE_IN_PR =
-    (process.env.SECURITY_GATE_IN_PR ?? 'false') === 'true';
+    envBool('SECURITY_GATE_IN_PR', false);
 
 /** Enable deep dependency audit (e.g. OWASP dependency-check for Maven). Downloads large CVE DB. */
 export const SECURITY_DEEP_AUDIT =
-    (process.env.SECURITY_DEEP_AUDIT ?? 'false') === 'true';
+    envBool('SECURITY_DEEP_AUDIT', false);
 
 /** Comma-separated SPDX licence IDs to deny (e.g. GPL-3.0,AGPL-3.0). Empty = no licence check. */
 export const LICENCE_DENYLIST =
@@ -626,23 +658,23 @@ export const LICENCE_DENYLIST =
 
 // ─── Shell Tool ─────────────────────────────────────────────────────────────
 
-/** Allow agents to run shell commands on the host (default: true).
- *  Set to false to disable all host shell execution. */
+/** Allow agents to run shell commands on the host (default: false).
+ *  Set to true to enable host shell execution (commands use an env allowlist). */
 export const SHELL_ALLOW_HOST =
-    (process.env.SHELL_ALLOW_HOST ?? 'true') === 'true';
+    envBool('SHELL_ALLOW_HOST', false);
 
 /** Default timeout (seconds) for shell commands when none is specified. */
 export const SHELL_DEFAULT_TIMEOUT_S =
-    parseInt(process.env.SHELL_DEFAULT_TIMEOUT_S ?? '60', 10);
+    envInt('SHELL_DEFAULT_TIMEOUT_S', 60);
 
 /** Maximum timeout (seconds) for shell commands — agent-requested values are clamped to this. */
 export const SHELL_MAX_TIMEOUT_S =
-    parseInt(process.env.SHELL_MAX_TIMEOUT_S ?? '900', 10);
+    envInt('SHELL_MAX_TIMEOUT_S', 900);
 
 /** Max files a `cat`/`head` chain in `run_command` may touch before being refused
  *  with a message pointing at `read_file` (Plan 24, C5). */
 export const SHELL_READ_MAX_FILES =
-    parseInt(process.env.SHELL_READ_MAX_FILES ?? '4', 10);
+    envInt('SHELL_READ_MAX_FILES', 4);
 
 // ─── Playwright MCP ─────────────────────────────────────────────────────────
 
@@ -674,19 +706,19 @@ export const GIT_USER_EMAIL = process.env.GIT_USER_EMAIL ?? 'agenticdevteam@nore
 
 /** Max PR review iterations before force-merging or escalating. */
 export const MAX_REVIEW_ITERATIONS =
-    parseInt(process.env.MAX_REVIEW_ITERATIONS ?? '3', 10);
+    envInt('MAX_REVIEW_ITERATIONS', 3);
 
 /** Timeout (ms) for `npm install` inside a PR worktree (default 5 min). */
 export const PR_TEST_INSTALL_TIMEOUT_MS =
-    parseInt(process.env.PR_TEST_INSTALL_TIMEOUT_MS ?? '300000', 10);
+    envInt('PR_TEST_INSTALL_TIMEOUT_MS', 300000);
 
 /** Timeout (ms) for `npm test` inside a PR worktree (default 3 min). */
 export const PR_TEST_TIMEOUT_MS =
-    parseInt(process.env.PR_TEST_TIMEOUT_MS ?? '180000', 10);
+    envInt('PR_TEST_TIMEOUT_MS', 180000);
 
 /** Number of automated repair attempts when pre-PR tests fail (0 disables). */
 export const PR_TEST_REPAIR_ATTEMPTS =
-    parseInt(process.env.PR_TEST_REPAIR_ATTEMPTS ?? '1', 10);
+    envInt('PR_TEST_REPAIR_ATTEMPTS', 1);
 
 // ─── GitHub Project (multi-repo targeting) ──────────────────────────────────
 
@@ -700,27 +732,27 @@ export const GITHUB_PROJECT_OWNER = process.env.GITHUB_PROJECT_OWNER ?? '';
 
 /** Persist graph checkpoints to disk so a HITL or crashed run can survive a server restart. */
 export const CHECKPOINT_PERSIST =
-    (process.env.CHECKPOINT_PERSIST ?? 'false') === 'true';
+    envBool('CHECKPOINT_PERSIST', false);
 
 // ─── Observability (Sub-Plan 12) ────────────────────────────────────────────
 
 /** Events kept in the ring buffer (was 500 — both post-mortem runs saturated it). */
 export const EVENT_BUFFER_SIZE =
-    parseInt(process.env.EVENT_BUFFER_SIZE ?? '5000', 10);
+    envInt('EVENT_BUFFER_SIZE', 5000);
 
 /** High-severity events retained regardless of ring eviction. */
 export const EVENT_PRIORITY_BUFFER_SIZE =
-    parseInt(process.env.EVENT_PRIORITY_BUFFER_SIZE ?? '500', 10);
+    envInt('EVENT_PRIORITY_BUFFER_SIZE', 500);
 
 /** Write outputs/<run>/ledger.jsonl and run-report.md. */
 export const RUN_LEDGER_ENABLED =
-    (process.env.RUN_LEDGER_ENABLED ?? 'true') === 'true';
+    envBool('RUN_LEDGER_ENABLED', true);
 
 /** Dump every agent's full LangGraph result to outputs/<run>/full-responses/.
  *  This is the only record of what a model actually returned — without it an
  *  unexpected response shape shows up as silently empty phase output. */
 export const FULL_RESPONSE_LOG_ENABLED =
-    (process.env.FULL_RESPONSE_LOG_ENABLED ?? 'true') === 'true';
+    envBool('FULL_RESPONSE_LOG_ENABLED', true);
 
 /** Directory name (under the run output dir) for full-response dumps. */
 export const FULL_RESPONSE_LOG_DIR_NAME =
@@ -728,11 +760,11 @@ export const FULL_RESPONSE_LOG_DIR_NAME =
 
 /** Max characters per full-response dump file (0 = unlimited). */
 export const FULL_RESPONSE_LOG_MAX_CHARS =
-    parseInt(process.env.FULL_RESPONSE_LOG_MAX_CHARS ?? '0', 10);
+    envInt('FULL_RESPONSE_LOG_MAX_CHARS', 0);
 
 /** Run-invariant enforcement: 'off' | 'warn' | 'strict'. */
 export const RUN_INVARIANTS_MODE =
-    (process.env.RUN_INVARIANTS_MODE ?? 'warn') as 'off' | 'warn' | 'strict';
+    envEnum('RUN_INVARIANTS_MODE', ['off', 'warn', 'strict'] as const, 'warn');
 
 // ─── Requirements Traceability (Sub-Plan 10) ────────────────────────────────
 
@@ -740,124 +772,156 @@ export const RUN_INVARIANTS_MODE =
  *  Was 0 (off) — now 70.  The metric is meaningful after Sub-Plan 10:
  *  only source:'executed' test reports count, claimed reports are excluded. */
 export const MIN_AC_COVERAGE_PCT =
-    parseInt(process.env.MIN_AC_COVERAGE_PCT ?? '70', 10);
+    envInt('MIN_AC_COVERAGE_PCT', 70);
 
 /** Minimum implemented (merged code exists) AC % — a weaker but mandatory bar. 0 = off. */
 export const MIN_AC_IMPLEMENTED_PCT =
-    parseInt(process.env.MIN_AC_IMPLEMENTED_PCT ?? '90', 10);
+    envInt('MIN_AC_IMPLEMENTED_PCT', 90);
 
 /** Max bugs synthesised for uncovered criteria.
  *  Was 10 — raised to 25 so the bugfix loop gets enough specifics. */
 export const MIN_AC_COVERAGE_MAX_BUGS =
-    parseInt(process.env.MIN_AC_COVERAGE_MAX_BUGS ?? '25', 10);
+    envInt('MIN_AC_COVERAGE_MAX_BUGS', 25);
 
 /** Write outputs/<run>/traceability.json alongside the markdown. */
 export const TRACEABILITY_JSON =
-    (process.env.TRACEABILITY_JSON ?? 'true') === 'true';
+    envBool('TRACEABILITY_JSON', true);
 
 // ─── LLM Cassettes ──────────────────────────────────────────────────────────
 
 /** Cassette mode: 'off' (default), 'record', or 'replay'. */
 export const LLM_CASSETTE_MODE =
-    process.env.LLM_CASSETTE_MODE ?? 'off';
+    envEnum('LLM_CASSETTE_MODE', ['off', 'record', 'replay'] as const, 'off');
 
-/** Name of the cassette file (without extension). Used in record and replay modes. */
+/** Name of the cassette file (without extension, stored in tests/cassettes/). */
 export const CASSETTE_NAME =
     process.env.CASSETTE_NAME ?? '';
 
-/** Behaviour on a replay miss: 'strict' (throws) or 'passthrough' (calls real LLM). */
+/** Behaviour on a replay miss: 'strict' throws, 'passthrough' calls the real LLM. */
 export const LLM_CASSETTE_ON_MISS =
-    process.env.LLM_CASSETTE_ON_MISS ?? 'strict';
+    envEnum('LLM_CASSETTE_ON_MISS', ['strict', 'passthrough'] as const, 'strict');
 
-/** Warn when a cassette file exceeds this size (MB). */
+/** Warn when a cassette file exceeds this size in MB. */
 export const CASSETTE_MAX_MB =
-    parseInt(process.env.CASSETTE_MAX_MB ?? '25', 10);
+    envInt('CASSETTE_MAX_MB', 25);
 
-/** GitHub mode: 'live' (default) or 'local' (offline, bare-repo backed). */
-export const GITHUB_MODE_CONFIG =
-    process.env.GITHUB_MODE ?? 'live';
+// ─── LLM Throttle & Rate-Limit Protection ──────────────────────────────────
+
+/** Process-wide max concurrent LLM requests (semaphore). */
+export const LLM_MAX_CONCURRENT_REQUESTS =
+    envInt('LLM_MAX_CONCURRENT_REQUESTS', 2);
+
+/** Minimum spacing between LLM request starts (ms). */
+export const LLM_MIN_REQUEST_INTERVAL_MS =
+    envInt('LLM_MIN_REQUEST_INTERVAL_MS', 400);
+
+/** Maximum adaptive interval ceiling (ms, raised on 429, decays on success). */
+export const LLM_MAX_REQUEST_INTERVAL_MS =
+    envInt('LLM_MAX_REQUEST_INTERVAL_MS', 5000);
+
+/** Base cooldown on 429 (doubles per consecutive 429). */
+export const LLM_COOLDOWN_BASE_MS =
+    envInt('LLM_COOLDOWN_BASE_MS', 5000);
+
+/** Maximum cooldown duration (ms). */
+export const LLM_COOLDOWN_MAX_MS =
+    envInt('LLM_COOLDOWN_MAX_MS', 90000);
+
+/** Max time to wait for a provider outage to clear (ms). */
+export const PROVIDER_PAUSE_MAX_MS =
+    envInt('PROVIDER_PAUSE_MAX_MS', 900000);
+
+/** Optional base URL override for OpenAI-compatible endpoints (for proxies). */
+export const OPENAI_BASE_URL =
+    process.env.OPENAI_BASE_URL ?? process.env.OPENAI_API_BASE ?? '';
+
+// ─── LLM Retry ──────────────────────────────────────────────────────────────
+
+/** Max retry attempts for transient LLM/network failures. */
+export const LLM_RETRY_ATTEMPTS =
+    envInt('LLM_RETRY_ATTEMPTS', 8);
+
+/** Initial backoff delay (ms) for retries. */
+export const LLM_RETRY_INITIAL_MS =
+    envInt('LLM_RETRY_INITIAL_MS', 8000);
+
+/** Maximum retry delay cap (ms). */
+export const LLM_RETRY_MAX_MS =
+    envInt('LLM_RETRY_MAX_MS', 120000);
 
 // ─── Dashboard ──────────────────────────────────────────────────────────────
 
 /** Port for the Express + WebSocket server. */
 export const DASHBOARD_PORT =
-    parseInt(process.env.DASHBOARD_PORT ?? '3000', 10);
+    envInt('DASHBOARD_PORT', 3000);
 
 // ─── Plan Coverage (Sub-Plan 04) ────────────────────────────────────────────
 
 /** Plan coverage enforcement: 'off' | 'warn' | 'enforce'. */
 export const PLAN_COVERAGE_MODE =
-    (process.env.PLAN_COVERAGE_MODE ?? 'enforce') as 'off' | 'warn' | 'enforce';
+    envEnum('PLAN_COVERAGE_MODE', ['off', 'warn', 'enforce'] as const, 'enforce');
 
 /** Gap-repair attempts when the plan does not cover every story/task. */
 export const PLAN_COVERAGE_REPAIR_ATTEMPTS =
-    parseInt(process.env.PLAN_COVERAGE_REPAIR_ATTEMPTS ?? '2', 10);
+    envInt('PLAN_COVERAGE_REPAIR_ATTEMPTS', 2);
 
 /** Context char budget for the Team Leader (it now receives full acceptance criteria). */
 export const TEAM_LEADER_CONTEXT_MAX_CHARS =
-    parseInt(process.env.TEAM_LEADER_CONTEXT_MAX_CHARS ?? '48000', 10);
+    envInt('TEAM_LEADER_CONTEXT_MAX_CHARS', 48000);
 
 // ─── Architecture Contract (Sub-Plan 05) ────────────────────────────────────
 
-/** Enforce the Architect's repo contract: 'off' | 'warn' | 'enforce'. */
-export const REPO_CONTRACT_MODE =
-    (process.env.REPO_CONTRACT_MODE ?? 'enforce') as 'off' | 'warn' | 'enforce';
-
 /** Cap on declared modules (keeps the contract proportional). */
 export const REPO_CONTRACT_MAX_MODULES =
-    parseInt(process.env.REPO_CONTRACT_MAX_MODULES ?? '60', 10);
-
-/** Create typed interface stubs for every declared module during scaffolding. */
-export const CONTRACT_STUB_SCAFFOLD =
-    (process.env.CONTRACT_STUB_SCAFFOLD ?? 'true') === 'true';
+    envInt('REPO_CONTRACT_MAX_MODULES', 60);
 
 /** Char budget for the contract section injected into agent prompts. */
 export const CONTRACT_PROMPT_MAX_CHARS =
-    parseInt(process.env.CONTRACT_PROMPT_MAX_CHARS ?? '6000', 10);
+    envInt('CONTRACT_PROMPT_MAX_CHARS', 6000);
 
 // ─── PR Workflow / Work Preservation (Sub-Plan 06) ──────────────────────────
 
 /** Max failed worktrees retained under .worktrees-failed/ for salvage. */
 export const WORKTREE_SALVAGE_MAX =
-    parseInt(process.env.WORKTREE_SALVAGE_MAX ?? '10', 10);
+    envInt('WORKTREE_SALVAGE_MAX', 10);
 
 /** Export `git format-patch` bundles for every branch that fails to merge. */
 export const PR_SALVAGE_PATCHES =
-    (process.env.PR_SALVAGE_PATCHES ?? 'true') === 'true';
+    envBool('PR_SALVAGE_PATCHES', true);
 
 /** Dev-agent attempts at resolving a merge conflict before the branch is reported blocked. */
 export const MERGE_CONFLICT_FIX_ATTEMPTS =
-    parseInt(process.env.MERGE_CONFLICT_FIX_ATTEMPTS ?? '1', 10);
+    envInt('MERGE_CONFLICT_FIX_ATTEMPTS', 1);
 
 /** Max times a single assignment may be re-dispatched. */
 export const ASSIGNMENT_MAX_ATTEMPTS =
-    parseInt(process.env.ASSIGNMENT_MAX_ATTEMPTS ?? '3', 10);
+    envInt('ASSIGNMENT_MAX_ATTEMPTS', 3);
 
 /** Only the scaffold branch may modify shared root config files. */
 export const CONFIG_OWNERSHIP_SCAFFOLD_ONLY =
-    (process.env.CONFIG_OWNERSHIP_SCAFFOLD_ONLY ?? 'true') === 'true';
+    envBool('CONFIG_OWNERSHIP_SCAFFOLD_ONLY', true);
 
 // ─── Review & Merge Policy (Sub-Plan 07) ────────────────────────────────────
 
 /** Merge policy: 'strict' (evidence required) | 'permissive' | 'legacy' (pre-Plan-19). */
 export const REVIEW_MERGE_POLICY =
-    (process.env.REVIEW_MERGE_POLICY ?? 'strict') as 'strict' | 'permissive' | 'legacy';
+    envEnum('REVIEW_MERGE_POLICY', ['strict', 'permissive', 'legacy'] as const, 'strict');
 
 /** Genuine approvals required to merge (abstentions do not count). */
 export const REVIEW_QUORUM =
-    parseInt(process.env.REVIEW_QUORUM ?? '1', 10);
+    envInt('REVIEW_QUORUM', 1);
 
 /** Retries when every reviewer abstained (schema error / recursion limit / empty output). */
 export const REVIEW_ABSTAIN_RETRIES =
-    parseInt(process.env.REVIEW_ABSTAIN_RETRIES ?? '1', 10);
+    envInt('REVIEW_ABSTAIN_RETRIES', 1);
 
 /** Extra tool calls granted to an escalated developer. */
 export const ESCALATION_TOOL_CALL_BONUS =
-    parseInt(process.env.ESCALATION_TOOL_CALL_BONUS ?? '10', 10);
+    envInt('ESCALATION_TOOL_CALL_BONUS', 10);
 
 /** Convert unresolved major review comments into Bugs for the bugfix loop. */
 export const REVIEW_MAJORS_TO_BUGS =
-    (process.env.REVIEW_MAJORS_TO_BUGS ?? 'true') === 'true';
+    envBool('REVIEW_MAJORS_TO_BUGS', true);
 
 // ─── Strong Model PR Fixer (Sub-Plan 20) ────────────────────────────────────
 
@@ -868,7 +932,7 @@ export const STRONG_FIXER_MODEL =
 
 /** Enable/disable the strong fixer (default: true). */
 export const STRONG_FIXER_ENABLED =
-    (process.env.STRONG_FIXER_ENABLED ?? 'true') === 'true';
+    envBool('STRONG_FIXER_ENABLED', true);
 
 /** Turn ceiling for the strong fixer agent (default: 18).
  *
@@ -880,12 +944,12 @@ export const STRONG_FIXER_ENABLED =
  *  Plan 24 B2: reduced from 40 to 18 — the strong fixer rarely needs more than
  *  a dozen turns, and runaway fixers waste budget on branches that cannot close. */
 export const STRONG_FIXER_MAX_TOOL_CALLS =
-    parseInt(process.env.STRONG_FIXER_MAX_TOOL_CALLS ?? '18', 10);
+    envInt('STRONG_FIXER_MAX_TOOL_CALLS', 18);
 
 /** Input-token ceiling for the strong fixer agent (default: 250 000).
  *  Plan 24 B2: prevents runaway context growth in the fixer pass. */
 export const STRONG_FIXER_MAX_INPUT_TOKENS =
-    parseInt(process.env.STRONG_FIXER_MAX_INPUT_TOKENS ?? '250000', 10);
+    envInt('STRONG_FIXER_MAX_INPUT_TOKENS', 250000);
 
 /**
  * PR exhaustion strategy — controls what happens when max review iterations are reached:
@@ -894,13 +958,13 @@ export const STRONG_FIXER_MAX_INPUT_TOKENS =
  * - 'escalate-only': Keep existing escalation behaviour only, no strong fixer (backward-compatible).
  */
 export const PR_EXHAUSTION_STRATEGY =
-    (process.env.PR_EXHAUSTION_STRATEGY ?? 'escalate-then-fix') as 'escalate-then-fix' | 'fix-only' | 'escalate-only';
+    envEnum('PR_EXHAUSTION_STRATEGY', ['escalate-then-fix', 'fix-only', 'escalate-only'] as const, 'escalate-then-fix');
 
 // ─── Agent Budgets & Context (Sub-Plan 08) ──────────────────────────────────
 
 /** Max files listed in the injected workspace snapshot. */
 export const SNAPSHOT_MAX_FILES =
-    parseInt(process.env.SNAPSHOT_MAX_FILES ?? '400', 10);
+    envInt('SNAPSHOT_MAX_FILES', 400);
 
 /**
  * Write agent mission reports into the generated project repo (Plan 22, G4 revised).
@@ -913,22 +977,22 @@ export const SNAPSHOT_MAX_FILES =
  * and gitignore `docs/agents/` + `.agent/` in the product repo.
  */
 export const AGENT_ARTIFACTS_IN_REPO =
-    (process.env.AGENT_ARTIFACTS_IN_REPO ?? 'true') === 'true';
+    envBool('AGENT_ARTIFACTS_IN_REPO', true);
 
 /** Char budget for the injected workspace snapshot. */
 export const SNAPSHOT_MAX_CHARS =
-    parseInt(process.env.SNAPSHOT_MAX_CHARS ?? '8000', 10);
+    envInt('SNAPSHOT_MAX_CHARS', 8000);
 
 /** Extra read calls granted when an agent is making verified progress (writes). */
 export const LOOP_GUARD_PROGRESS_BONUS =
-    parseInt(process.env.LOOP_GUARD_PROGRESS_BONUS ?? '10', 10);
+    envInt('LOOP_GUARD_PROGRESS_BONUS', 10);
 
 /** Absolute per-invocation tool-call ceiling.
  *  Was 80 — raised to 140 in Plan 22 because the per-category and per-turn
  *  ceilings are now the binding constraints and 80 calls is only ~8 turns for a
  *  model that batches 9–11 tool calls per turn. */
 export const LOOP_GUARD_HARD_CEILING =
-    parseInt(process.env.LOOP_GUARD_HARD_CEILING ?? '140', 10);
+    envInt('LOOP_GUARD_HARD_CEILING', 140);
 
 /**
  * Per-rank read/write/shell/turn budgets for developer agents, as a JSON object
@@ -949,78 +1013,85 @@ export const TOOL_BUDGETS_JSON =
 
 /** Invocation-level retries for transient LLM/network failures. */
 export const AGENT_INVOKE_RETRIES =
-    parseInt(process.env.AGENT_INVOKE_RETRIES ?? '1', 10);
+    envInt('AGENT_INVOKE_RETRIES', 1);
 
 /** Reconcile agent-claimed fileChanges against the worktree and drop phantoms. */
 export const RECONCILE_FILE_CHANGES =
-    (process.env.RECONCILE_FILE_CHANGES ?? 'true') === 'true';
+    envBool('RECONCILE_FILE_CHANGES', true);
 
 // ─── QA Real Execution (Sub-Plan 09) ────────────────────────────────────────
 
 /** Enforce test-sufficiency rules (min counts, coverage floor, per-story coverage). */
 export const QA_ENFORCE_SUFFICIENCY =
-    (process.env.QA_ENFORCE_SUFFICIENCY ?? 'true') === 'true';
+    envBool('QA_ENFORCE_SUFFICIENCY', true);
 
 /** Minimum total non-trivial executed tests. 0 = derive as max(5, storyCount). */
 export const QA_MIN_TOTAL_TESTS =
-    parseInt(process.env.QA_MIN_TOTAL_TESTS ?? '0', 10);
+    envInt('QA_MIN_TOTAL_TESTS', 0);
 
 /** Minimum tagged passing tests per user story. */
 export const QA_MIN_TESTS_PER_STORY =
-    parseInt(process.env.QA_MIN_TESTS_PER_STORY ?? '1', 10);
+    envInt('QA_MIN_TESTS_PER_STORY', 1);
 
 /** Minimum line-coverage percentage. 0 = off. */
 export const QA_MIN_COVERAGE_PCT =
-    parseInt(process.env.QA_MIN_COVERAGE_PCT ?? '40', 10);
+    envInt('QA_MIN_COVERAGE_PCT', 40);
 
 /** Timeout (ms) for a single test-runner invocation. */
 export const QA_TEST_TIMEOUT_MS =
-    parseInt(process.env.QA_TEST_TIMEOUT_MS ?? '600000', 10);
+    envInt('QA_TEST_TIMEOUT_MS', 600000);
 
 /** Max qa-unit invocations per QA phase (one per story/module). */
 export const QA_MAX_INVOCATIONS =
-    parseInt(process.env.QA_MAX_INVOCATIONS ?? '12', 10);
+    envInt('QA_MAX_INVOCATIONS', 12);
 
 /** Route QA-authored tests through the PR workflow on a dedicated test branch. */
 export const QA_TESTS_VIA_PR =
-    (process.env.QA_TESTS_VIA_PR ?? 'true') === 'true';
+    envBool('QA_TESTS_VIA_PR', true);
 
 // ─── DevOps & E2E Hardening (Sub-Plan 11) ───────────────────────────────────
 
 /** Serve the built product locally for E2E when no Docker services are available. */
 export const E2E_ALLOW_LOCAL_SERVER =
-    (process.env.E2E_ALLOW_LOCAL_SERVER ?? 'true') === 'true';
+    envBool('E2E_ALLOW_LOCAL_SERVER', true);
 
 /** Make the E2E acceptance criterion required. */
 export const ACCEPT_REQUIRE_E2E =
-    (process.env.ACCEPT_REQUIRE_E2E ?? 'false') === 'true';
+    envBool('ACCEPT_REQUIRE_E2E', false);
 
 /** Playwright MCP startup budget (ms). */
 export const PLAYWRIGHT_MCP_STARTUP_TIMEOUT_MS =
-    parseInt(process.env.PLAYWRIGHT_MCP_STARTUP_TIMEOUT_MS ?? '60000', 10);
+    envInt('PLAYWRIGHT_MCP_STARTUP_TIMEOUT_MS', 60000);
 
 /** Connection retries for the Playwright MCP server. */
 export const PLAYWRIGHT_MCP_CONNECT_RETRIES =
-    parseInt(process.env.PLAYWRIGHT_MCP_CONNECT_RETRIES ?? '2', 10);
+    envInt('PLAYWRIGHT_MCP_CONNECT_RETRIES', 2);
 
 /** Run `npx playwright install chromium --with-deps` when browsers are missing. */
 export const PLAYWRIGHT_AUTO_INSTALL =
-    (process.env.PLAYWRIGHT_AUTO_INSTALL ?? 'true') === 'true';
+    envBool('PLAYWRIGHT_AUTO_INSTALL', true);
 
 /** Generate a deterministic Dockerfile/compose when the DevOps agent fails or produces none. */
 export const DEVOPS_FALLBACK_ENABLED =
-    (process.env.DEVOPS_FALLBACK_ENABLED ?? 'true') === 'true';
+    envBool('DEVOPS_FALLBACK_ENABLED', true);
 
 // ─── Continue Run (Plan 23) ─────────────────────────────────────────────────
 
 /** Include previous run's token usage in budget calculations when continuing. */
 export const CONTINUE_TOKEN_CARRY_FORWARD =
-    (process.env.CONTINUE_TOKEN_CARRY_FORWARD ?? 'true') === 'true';
+    envBool('CONTINUE_TOKEN_CARRY_FORWARD', true);
 
 /** Auto-fix git state issues (worktree cleanup, branch sync) before resuming. */
 export const CONTINUE_GIT_RECONCILE =
-    (process.env.CONTINUE_GIT_RECONCILE ?? 'true') === 'true';
+    envBool('CONTINUE_GIT_RECONCILE', true);
 
 /** Close open GitHub PRs from previous run that will be re-dispatched. */
 export const CONTINUE_CLOSE_STALE_PRS =
-    (process.env.CONTINUE_CLOSE_STALE_PRS ?? 'true') === 'true';
+    envBool('CONTINUE_CLOSE_STALE_PRS', true);
+
+// ─── Docker / NPM SSL ──────────────────────────────────────────────────────
+
+/** Allow generated Dockerfiles to include `npm config set strict-ssl false`.
+ *  Default false — only enable for environments with self-signed corporate proxies. */
+export const DOCKER_ALLOW_INSECURE_NPM =
+    envBool('DOCKER_ALLOW_INSECURE_NPM', false);

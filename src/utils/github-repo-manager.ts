@@ -6,7 +6,7 @@
  * Uses @octokit/rest (already a project dependency).
  */
 import { Octokit } from '@octokit/rest';
-import { execSync } from 'child_process';
+import { execFileSync } from 'child_process';
 import { GIT_USER_NAME, GIT_USER_EMAIL } from '../config';
 import { getLogger } from './logger';
 import { GITHUB_MODE } from './github-local';
@@ -159,33 +159,38 @@ export function initializeRepoLocally(
     defaultBranch: string = 'main',
     token?: string,
 ): void {
-    const run = (cmd: string) =>
-        execSync(cmd, { cwd: workspacePath, stdio: 'pipe' }).toString().trim();
+    const run = (args: string[]) =>
+        execFileSync('git', args, { cwd: workspacePath, stdio: 'pipe' }).toString().trim();
 
     logger.info(`Initializing local repo at: ${workspacePath}`);
 
-    run(`git init -b ${defaultBranch}`);
-    run(`git config user.name "${GIT_USER_NAME}"`);
-    run(`git config user.email "${GIT_USER_EMAIL}"`);
+    run(['init', '-b', defaultBranch]);
+    run(['config', 'user.name', GIT_USER_NAME]);
+    run(['config', 'user.email', GIT_USER_EMAIL]);
 
-    // Build the authenticated remote URL if a token is provided
-    const authenticatedUrl = token
-        ? remoteUrl.replace('https://', `https://x-access-token:${token}@`)
-        : remoteUrl;
+    // Add the remote without embedding the token in the URL.
+    // Authentication is handled per-command via http.extraHeader
+    // (see gitPush in git-exec.ts) so the PAT never lands in .git/config.
+    run(['remote', 'add', 'origin', remoteUrl]);
 
-    run(`git remote add origin ${authenticatedUrl}`);
+    if (token) {
+        // Store auth as a credential helper config entry (stays in .git/config
+        // but is more contained than putting the token in the URL itself).
+        const encodedToken = Buffer.from(`x-access-token:${token}`).toString('base64');
+        run(['config', `http.${remoteUrl}.extraHeader`, `Authorization: Basic ${encodedToken}`]);
+    }
 
     // Create initial commit (empty or with existing files)
-    run('git add -A');
+    run(['add', '-A']);
 
     // Only commit if there are staged changes
     try {
-        run('git diff --cached --quiet');
+        run(['diff', '--cached', '--quiet']);
         // No changes — create an empty initial commit
-        run('git commit --allow-empty -m "Initial commit"');
+        run(['commit', '--allow-empty', '-m', 'Initial commit']);
     } catch {
         // There are staged changes
-        run('git commit -m "Initial commit"');
+        run(['commit', '-m', 'Initial commit']);
     }
 
     logger.info(`Local repo initialized on branch: ${defaultBranch}`);

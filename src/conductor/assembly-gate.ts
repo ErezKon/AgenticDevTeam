@@ -12,7 +12,10 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { getLogger } from '../utils/logger';
-import type { Assignment, FileChange } from '../agents/_shared/base-schemas';
+import { walkDir as sharedWalkDir } from '../utils/fs-walk';
+import type { Assignment } from '../agents/_shared/base-schemas';
+import type { GateOutcome, GateFinding, GateStatus } from './gate-types';
+import { makeGateBug } from './bug-factory';
 
 const log = getLogger('[Assembly-Gate]', 208);
 
@@ -34,19 +37,12 @@ function findMissingAssets(workspacePath: string): string[] {
     const missing: string[] = [];
     const htmlFiles: string[] = [];
 
-    // Find all HTML files in the workspace
-    function walk(dir: string, depth = 0): void {
-        if (depth > 4) return;
-        try {
-            for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-                if (entry.name === 'node_modules' || entry.name === '.git' || entry.name === '.worktrees' || entry.name === 'dist' || entry.name === 'build') continue;
-                const fullPath = path.join(dir, entry.name);
-                if (entry.isDirectory()) walk(fullPath, depth + 1);
-                else if (entry.name.endsWith('.html')) htmlFiles.push(fullPath);
-            }
-        } catch { /* permission or deleted */ }
-    }
-    walk(workspacePath);
+    // Find all HTML files in the workspace (shared walker, maxDepth 4)
+    sharedWalkDir(workspacePath, workspacePath, (relPath) => {
+        if (relPath.endsWith('.html')) {
+            htmlFiles.push(path.join(workspacePath, relPath));
+        }
+    }, { maxDepth: 4 });
 
     // Parse HTML for referenced assets
     const assetPatterns = [
@@ -186,5 +182,63 @@ export function buildAssemblyAssignment(
         reviewerAgentIds: ['principal-backend'],
         taskType: 'chore' as const,
         moduleIds: [],
+    };
+}
+
+// ─── AssemblyGateResult → GateOutcome adapter (Sub-Plan 25-10) ──────────────
+
+/**
+ * Convert an AssemblyGateResult into a standard GateOutcome.
+ */
+export function assemblyGateOutcome(result: AssemblyGateResult): GateOutcome<AssemblyGateResult> {
+    const status: GateStatus = result.passed ? 'pass' : 'fail';
+
+    const findings: GateFinding[] = [];
+    if (result.missingAssets.length > 0) {
+        findings.push({
+            id: 'ASSEMBLY-MISSING-ASSETS',
+            severity: 'major',
+            detail: `${result.missingAssets.length} referenced asset(s) missing: ${result.missingAssets.slice(0, 5).join(', ')}`,
+        });
+    }
+    if (result.unwiredModules.length > 0) {
+        findings.push({
+            id: 'ASSEMBLY-UNWIRED',
+            severity: 'critical',
+            detail: `Entry point does not import product modules: ${result.unwiredModules.join(', ')}`,
+        });
+    }
+
+    const bugs = [];
+    if (result.missingAssets.length > 0) {
+        bugs.push(makeGateBug(
+            'ASSEMBLY-MISSING-ASSETS',
+            `${result.missingAssets.length} referenced asset(s) missing from disk`,
+            'major', 'assembly-gate',
+            `Check referenced assets in HTML: ${result.missingAssets.slice(0, 5).join(', ')}`,
+            'All referenced assets should exist on disk',
+            `${result.missingAssets.length} assets not found`,
+            'public/ or src/assets/ directory',
+        ));
+    }
+    if (result.unwiredModules.length > 0) {
+        bugs.push(makeGateBug(
+            'ASSEMBLY-UNWIRED',
+            'Entry point does not import product modules',
+            'critical', 'assembly-gate',
+            'Check the entry point (main.ts/index.ts) for module imports',
+            'Entry point should import all declared modules',
+            `Entry point has no imports: ${result.unwiredModules.join(', ')}`,
+            'src/main.ts or src/index.ts',
+        ));
+    }
+
+    return {
+        gate: 'assembly',
+        status,
+        findings,
+        detail: result,
+        markdown: result.summary,
+        bugs,
     };
 }

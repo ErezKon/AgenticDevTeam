@@ -53,7 +53,8 @@ describe('generateFallbackDeployment', () => {
         const df = fs.readFileSync(path.join(tempDir, 'Dockerfile'), 'utf-8');
         expect(df).toContain('nginx:alpine');
         expect(df).toContain('/dist');
-        expect(df).toContain('npm config set strict-ssl false');
+        // strict-ssl false is no longer injected by default (Plan 25-02, D3)
+        expect(df).not.toContain('npm config set strict-ssl false');
     });
 
     it('generates a Node server Dockerfile for a backend root', () => {
@@ -92,12 +93,29 @@ describe('generateFallbackDeployment', () => {
         expect(fs.existsSync(path.join(tempDir, 'docker-compose.yml'))).toBe(true);
     });
 
-    it('applies patchDockerfilesSsl (npm config set strict-ssl false)', () => {
+    it('applies patchDockerfilesSsl when DOCKER_ALLOW_INSECURE_NPM is set', () => {
+        // Enable insecure npm for this test
+        process.env.DOCKER_ALLOW_INSECURE_NPM = 'true';
+        // Clear the cached config module so the flag is re-read
+        jest.resetModules();
+        const { generateFallbackDeployment: genWithFlag } = require('../src/conductor/devops-fallback');
         const roots = [makeRoot({ dir: tempDir, relDir: '', stack: 'node' })];
-        const result = generateFallbackDeployment(tempDir, roots, null);
+        const result = genWithFlag(tempDir, roots, null);
         expect(result.files.length).toBeGreaterThan(0);
         const df = fs.readFileSync(path.join(tempDir, 'Dockerfile'), 'utf-8');
         expect(df).toContain('strict-ssl false');
+        delete process.env.DOCKER_ALLOW_INSECURE_NPM;
+    });
+
+    it('does NOT inject strict-ssl false by default', () => {
+        delete process.env.DOCKER_ALLOW_INSECURE_NPM;
+        jest.resetModules();
+        const { generateFallbackDeployment: genDefault } = require('../src/conductor/devops-fallback');
+        const roots = [makeRoot({ dir: tempDir, relDir: '', stack: 'node' })];
+        const result = genDefault(tempDir, roots, null);
+        expect(result.files.length).toBeGreaterThan(0);
+        const df = fs.readFileSync(path.join(tempDir, 'Dockerfile'), 'utf-8');
+        expect(df).not.toContain('strict-ssl false');
     });
 
     it('skips roots that already have a Dockerfile', () => {

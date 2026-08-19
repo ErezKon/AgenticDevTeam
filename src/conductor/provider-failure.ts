@@ -5,10 +5,6 @@
  * from transient/unknown errors (retryable per-branch failures).
  */
 
-import { getLogger } from '../utils/logger';
-
-const log = getLogger('[Provider-Failure]', 202);
-
 export type ProviderFailureKind =
     | 'billing'
     | 'auth'

@@ -12,9 +12,9 @@
  */
 import * as fs from 'fs';
 import * as path from 'path';
-import { execSync } from 'child_process';
 import { getLogger } from '../utils/logger';
 import { emitRunEvent } from '../utils/event-bus';
+import { mdTable } from '../utils/markdown-table';
 import {
     QUALITY_GATES_ENABLED,
     QUALITY_GATE_STEPS,
@@ -23,9 +23,13 @@ import {
     QUALITY_GATE_SCAN_DEPTH,
     QUALITY_GATE_MAX_ROOTS,
 } from '../config';
+import { PRUNE_DIRS as SHARED_PRUNE_DIRS } from '../utils/fs-walk';
+import { type AsyncExecFn, defaultExecAsync as sharedDefaultExecAsync, isToolAvailableAsync } from '../utils/shell-exec';
 import type { TestReport } from '../agents/_shared/schemas/testing.schema';
 import type { Bug } from '../agents/_shared/schemas/bug.schema';
+import { makeGateBug } from './bug-factory';
 import type { ProductVerifyReport } from './product-verify';
+import type { GateOutcome, GateFinding, GateStatus } from './gate-types';
 
 const log = getLogger('[QualityGates]', 220);
 
@@ -84,16 +88,12 @@ const STACK_MARKERS: [StackKind, string[]][] = [
     ['rust',    ['Cargo.toml']],
 ];
 
-/** Directories to prune when scanning for stack roots. */
-const PRUNE_DIRS = new Set([
-    'node_modules', '.git', '.worktrees', 'dist', 'build', '.next', 'out',
-    'coverage', '.venv', 'venv', 'vendor', 'target', '.conventions',
-]);
+// Prune set delegated to ../utils/fs-walk (SHARED_PRUNE_DIRS).
 
 /**
  * Check whether a directory contains markers for a given stack.
  */
-function dirHasStack(dir: string, entries: string[], stack: StackKind, markers: string[]): boolean {
+function dirHasStack(_dir: string, entries: string[], _stack: StackKind, markers: string[]): boolean {
     return markers.some(marker => {
         if (marker.startsWith('*')) {
             const ext = marker.slice(1);
@@ -142,7 +142,7 @@ export function detectStackRoots(workspacePath: string): StackRoot[] {
 
         // Recurse into subdirectories
         for (const entry of entries) {
-            if (PRUNE_DIRS.has(entry)) continue;
+            if (SHARED_PRUNE_DIRS.has(entry)) continue;
             const childPath = path.join(dir, entry);
             try {
                 if (fs.statSync(childPath).isDirectory()) {
@@ -300,10 +300,6 @@ export function resolveNodeStep(dir: string, step: GateStep): { command: string;
                 const hasConfig = fs.readdirSync(dir).some(f => f.startsWith(glob));
                 if (hasConfig) return { command: cmd, mode: 'fallback' };
             }
-            // If there's a tsconfig but no bundler, typecheck is the build
-            if (fs.existsSync(path.join(dir, 'tsconfig.json'))) {
-                return { command: '', mode: 'absent' };
-            }
             return { command: '', mode: 'absent' };
         }
 
@@ -350,33 +346,11 @@ const TOOL_EXECUTABLES: Record<StackKind, string> = {
 
 const REQUIRED_STEPS = new Set<GateStep>(['build', 'test']);
 
-// ─── Internal exec seam ────────────────────────────────────────────────────
+// ─── Internal async exec seam (delegates to shared shell-exec) ──────────────
 
-type ExecFn = (cmd: string, opts: { cwd: string; timeout: number }) => string;
-
-function defaultExec(cmd: string, opts: { cwd: string; timeout: number }): string {
-    return execSync(cmd + ' 2>&1', {
-        cwd: opts.cwd,
-        encoding: 'utf-8',
-        timeout: opts.timeout,
-        maxBuffer: 1024 * 1024 * 5,
-        env: { ...process.env, CI: 'true', NODE_ENV: 'test' },
-    });
-}
-
-// ─── Tool availability check ────────────────────────────────────────────────
-
-function isToolAvailable(tool: string, workspacePath: string, exec: ExecFn): boolean {
-    // For ./gradlew, check file existence instead of which
-    if (tool === './gradlew') {
-        return fs.existsSync(path.join(workspacePath, 'gradlew'));
-    }
-    try {
-        exec(`which ${tool}`, { cwd: workspacePath, timeout: 10_000 });
-        return true;
-    } catch {
-        return false;
-    }
+/** Quality-gates async wrapper: 5 MB buffer, CI + NODE_ENV=test env. */
+async function defaultExecAsync(cmd: string, opts: { cwd: string; timeout: number }): Promise<string> {
+    return sharedDefaultExecAsync(cmd, opts, 5 * 1024 * 1024, { CI: 'true', NODE_ENV: 'test' });
 }
 
 // ─── Python install command adjustment ──────────────────────────────────────
@@ -428,16 +402,16 @@ function shouldSkipInstall(stack: StackKind, dir: string): boolean {
  * Plan 19-01: multi-root detection, script resolver for node (no --if-present),
  * typecheck step, honest aggregation with inconclusive state.
  */
-export function runQualityGates(
+export async function runQualityGates(
     workspacePath: string,
     opts?: {
         steps?: GateStep[];
         timeoutMs?: number;
         installTimeoutMs?: number;
-        exec?: ExecFn;
+        exec?: AsyncExecFn;
         productVerify?: ProductVerifyReport;
     },
-): GateReport {
+): Promise<GateReport> {
     if (!QUALITY_GATES_ENABLED) {
         log.info('Quality gates disabled (QUALITY_GATES_ENABLED=false)');
         return { stacks: [], roots: [], results: [], passed: true, inconclusive: false };
@@ -453,7 +427,7 @@ export function runQualityGates(
     const steps = opts?.steps ?? QUALITY_GATE_STEPS;
     const timeoutMs = opts?.timeoutMs ?? QUALITY_GATE_TIMEOUT_MS;
     const installTimeoutMs = opts?.installTimeoutMs ?? timeoutMs;
-    const exec = opts?.exec ?? defaultExec;
+    const exec = opts?.exec ?? defaultExecAsync;
     const results: GateResult[] = [];
 
     log.info(`Quality gates: roots=${roots.length} stacks=${stacks.join(',')} steps=${steps.join(',')}`);
@@ -471,7 +445,7 @@ export function runQualityGates(
         const tool = TOOL_EXECUTABLES[stack];
 
         // Check if the tool is available
-        const toolAvailable = isToolAvailable(tool, dir, exec);
+        const toolAvailable = await isToolAvailableAsync(tool, dir, exec);
         if (!toolAvailable) {
             log.warn(`Toolchain for '${stack}' not found (${tool} not on PATH)`);
             for (const step of steps) {
@@ -580,7 +554,7 @@ export function runQualityGates(
             const stepTimeout = step === 'install' ? installTimeoutMs : timeoutMs;
             const start = Date.now();
             try {
-                const output = exec(command, { cwd: dir, timeout: stepTimeout });
+                const output = await exec(command, { cwd: dir, timeout: stepTimeout });
                 results.push({
                     step,
                     command,
@@ -625,7 +599,7 @@ export function runQualityGates(
         productVerify: opts?.productVerify,
     };
     log.info(`Quality gates ${passed ? 'PASSED' : 'FAILED'}: ${executed.length} executed, ${results.filter(r => !r.passed && !r.skipped).length} failed, inconclusive=${inconclusive}`);
-    emitRunEvent('gate:result', { passed, inconclusive, stacks, roots: roots.length, executed: executed.length, failed: results.filter(r => !r.passed && !r.skipped).length });
+    emitRunEvent('gate:result', { gate: 'quality-gates', passed, inconclusive, stacks, roots: roots.length, executed: executed.length, failed: results.filter(r => !r.passed && !r.skipped).length });
     return report;
 }
 
@@ -715,16 +689,16 @@ export function synthesiseGateBugs(report: GateReport): Bug[] {
 
         const dirSuffix = r.relDir ? ` [${r.relDir}]` : '';
         const severity = (r.step === 'build' || r.step === 'test' || r.step === 'typecheck') ? 'critical' : 'major';
-        bugs.push({
-            id: `GATE-${stackLabel}-${r.step}${r.relDir ? `-${r.relDir.replace(/\//g, '-')}` : ''}`,
-            title: `Quality gate failed: ${r.step} (${stackLabel})${dirSuffix}`,
-            severity: severity as 'critical' | 'major',
-            stepsToReproduce: `Run: ${r.command} in ${r.relDir || '.'}`,
-            expectedBehavior: `The ${r.step} step should pass`,
-            actualBehavior: r.output.slice(0, 500),
-            suspectedArea: `${stackLabel} ${r.step} configuration or source code`,
-            reportedBy: 'quality-gates',
-        });
+        bugs.push(makeGateBug(
+            `GATE-${stackLabel}-${r.step}${r.relDir ? `-${r.relDir.replace(/\//g, '-')}` : ''}`,
+            `Quality gate failed: ${r.step} (${stackLabel})${dirSuffix}`,
+            severity,
+            'quality-gates',
+            `Run: ${r.command} in ${r.relDir || '.'}`,
+            `The ${r.step} step should pass`,
+            r.output.slice(0, 500),
+            `${stackLabel} ${r.step} configuration or source code`,
+        ));
     }
 
     // Product verification failures
@@ -734,16 +708,16 @@ export function synthesiseGateBugs(report: GateReport): Bug[] {
         // Artifact check failures
         for (const ac of pv.artifacts) {
             if (!ac.passed) {
-                bugs.push({
-                    id: `PRODUCT-ARTIFACTS-${ac.root || 'root'}`,
-                    title: `Build produced no artifacts: ${ac.root || '.'}`,
-                    severity: 'critical',
-                    stepsToReproduce: `Run build in ${ac.root || '.'} and check for output in ${ac.expectedDirs.join(', ')}`,
-                    expectedBehavior: `Build should produce artifacts in ${ac.expectedDirs.join(' or ')}`,
-                    actualBehavior: ac.reason,
-                    suspectedArea: `build configuration in ${ac.root || '.'}`,
-                    reportedBy: 'product-verify',
-                });
+                bugs.push(makeGateBug(
+                    `PRODUCT-ARTIFACTS-${ac.root || 'root'}`,
+                    `Build produced no artifacts: ${ac.root || '.'}`,
+                    'critical',
+                    'product-verify',
+                    `Run build in ${ac.root || '.'} and check for output in ${ac.expectedDirs.join(', ')}`,
+                    `Build should produce artifacts in ${ac.expectedDirs.join(' or ')}`,
+                    ac.reason,
+                    `build configuration in ${ac.root || '.'}`,
+                ));
             }
         }
 
@@ -752,30 +726,30 @@ export function synthesiseGateBugs(report: GateReport): Bug[] {
             const issueList = pv.resolveIssues.slice(0, 10)
                 .map(i => `${i.file}:${i.line} → '${i.specifier}' (${i.reason})`)
                 .join('\n');
-            bugs.push({
-                id: 'PRODUCT-RESOLVE',
-                title: `${pv.resolveIssues.length} unresolved import(s)/reference(s)`,
-                severity: 'critical',
-                stepsToReproduce: 'Check import/require/src/href paths in source files',
-                expectedBehavior: 'All imports and references should resolve to existing files or packages',
-                actualBehavior: issueList,
-                suspectedArea: 'source file imports and asset references',
-                reportedBy: 'product-verify',
-            });
+            bugs.push(makeGateBug(
+                'PRODUCT-RESOLVE',
+                `${pv.resolveIssues.length} unresolved import(s)/reference(s)`,
+                'critical',
+                'product-verify',
+                'Check import/require/src/href paths in source files',
+                'All imports and references should resolve to existing files or packages',
+                issueList,
+                'source file imports and asset references',
+            ));
         }
 
         // Smoke test failure
         if (pv.smoke && !pv.smoke.passed) {
-            bugs.push({
-                id: 'PRODUCT-SMOKE',
-                title: 'Smoke test failed: app does not serve or render',
-                severity: 'critical',
-                stepsToReproduce: 'Build the app and serve it, then access the root URL',
-                expectedBehavior: 'App should serve and return meaningful content',
-                actualBehavior: pv.smoke.reason,
-                suspectedArea: 'build output, entry HTML, or referenced assets',
-                reportedBy: 'product-verify',
-            });
+            bugs.push(makeGateBug(
+                'PRODUCT-SMOKE',
+                'Smoke test failed: app does not serve or render',
+                'critical',
+                'product-verify',
+                'Build the app and serve it, then access the root URL',
+                'App should serve and return meaningful content',
+                pv.smoke.reason,
+                'build output, entry HTML, or referenced assets',
+            ));
         }
     }
 
@@ -800,8 +774,7 @@ export function gateReportToMarkdown(report: GateReport): string {
     } else {
         lines.push(':warning: **Some quality gates failed.**\n');
     }
-    lines.push('| Dir | Stack | Step | Mode | Status | Duration |');
-    lines.push('|-----|-------|------|------|--------|----------|');
+    const tableRows: (string | number)[][] = [];
     for (const r of report.results) {
         // Derive the stack from the roots
         let stackLabel = '—';
@@ -825,8 +798,9 @@ export function gateReportToMarkdown(report: GateReport): string {
         const status = r.skipped ? 'Skipped' : r.mode === 'absent' ? 'Absent' : r.passed ? 'Passed' : 'Failed';
         const dur = r.durationMs > 0 ? `${(r.durationMs / 1000).toFixed(1)}s` : '—';
         const dirLabel = r.relDir || '.';
-        lines.push(`| ${dirLabel} | ${stackLabel} | ${r.step} | ${r.mode} | ${icon} ${status} | ${dur} |`);
+        tableRows.push([dirLabel, stackLabel, r.step, r.mode, `${icon} ${status}`, dur]);
     }
+    lines.push(mdTable(['Dir', 'Stack', 'Step', 'Mode', 'Status', 'Duration'], tableRows));
 
     // Show failing outputs
     const failures = report.results.filter(r => !r.passed && !r.skipped && r.mode !== 'absent');
@@ -871,4 +845,38 @@ export function gateReportToMarkdown(report: GateReport): string {
     }
 
     return lines.join('\n');
+}
+
+// ─── GateReport → GateOutcome adapter (Sub-Plan 25-10) ──────────────────────
+
+/**
+ * Convert a GateReport into a standard GateOutcome for the unified gate interface.
+ */
+export function qualityGateOutcome(report: GateReport): GateOutcome<GateReport> {
+    let status: GateStatus;
+    if (report.passed && !report.inconclusive) {
+        status = 'pass';
+    } else if (report.inconclusive && report.passed) {
+        status = 'inconclusive';
+    } else {
+        status = 'fail';
+    }
+
+    const findings: GateFinding[] = report.results
+        .filter(r => !r.passed && !r.skipped && r.mode !== 'absent')
+        .map(r => ({
+            id: `GATE-${r.relDir || 'root'}-${r.step}`,
+            severity: (r.step === 'build' || r.step === 'test' || r.step === 'typecheck') ? 'critical' as const : 'major' as const,
+            detail: `${r.step} failed: ${r.output.slice(0, 200)}`,
+            file: r.relDir || undefined,
+        }));
+
+    return {
+        gate: 'quality-gates',
+        status,
+        findings,
+        detail: report,
+        markdown: gateReportToMarkdown(report),
+        bugs: synthesiseGateBugs(report),
+    };
 }

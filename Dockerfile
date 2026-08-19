@@ -18,9 +18,17 @@ RUN npm ci
 COPY tsconfig.json ./
 COPY src/ ./src/
 
+# Note: The dashboard is not included in this image (API-only).
+# To serve the dashboard, build it separately:
+#   cd dashboard && npm run build
+# Then copy dashboard/dist/dashboard/browser/ into the container,
+# or run the Express server locally with a pre-built dashboard.
+
 RUN mkdir -p /app/outputs /app/generated-projects
 
-ENV NODE_TLS_REJECT_UNAUTHORIZED=0
+# TLS: Use NODE_EXTRA_CA_CERTS for corporate CAs instead of disabling validation.
+# Set NODE_TLS_REJECT_UNAUTHORIZED=0 in docker-compose.yml env ONLY if absolutely required.
+# ENV NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt
 
 EXPOSE 3000
 

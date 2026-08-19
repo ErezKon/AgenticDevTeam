@@ -5,9 +5,9 @@
  * The report is the answer to "what happened?" that the post-mortem had to
  * reconstruct by hand from a 6,000-line log.
  */
-import * as fs from 'fs';
 import * as path from 'path';
 import { getLogger } from './logger';
+import { writeOutputFile } from './artifact-writer';
 import type { LedgerEntry } from './run-ledger';
 import { readLedger } from './run-ledger';
 
@@ -19,13 +19,8 @@ const log = getLogger('[LedgerReport]', 178);
 export function generateRunReport(outputPath: string, systemName: string): string {
     const entries = readLedger(outputPath);
     const md = renderRunReport(entries, systemName);
-    const reportPath = path.join(outputPath, 'run-report.md');
-    try {
-        fs.writeFileSync(reportPath, md, 'utf-8');
-    } catch (err: any) {
-        log.warn(`Failed to write run-report.md: ${err.message}`);
-    }
-    return reportPath;
+    writeOutputFile(outputPath, 'run-report.md', md);
+    return path.join(outputPath, 'run-report.md');
 }
 
 /** Render the run report markdown from an array of ledger entries. Exported for testing. */

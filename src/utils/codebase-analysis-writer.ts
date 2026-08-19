@@ -6,6 +6,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import type { CodebaseAnalysis } from '../agents/_shared/base-schemas';
 import { renderCodebaseAnalysis } from '../templates/codebase-analysis.template';
+import { writeOutputFile } from './artifact-writer';
 import { getLogger } from './logger';
 
 const log = getLogger('[AnalysisWriter]', 147);
@@ -32,10 +33,8 @@ export function writeCodebaseAnalysis(
     log.info(`Wrote analysis to project: ${projectFilePath}`);
 
     // Write to run output directory (snapshot)
-    fs.mkdirSync(outputPath, { recursive: true });
-    const outputFilePath = path.join(outputPath, ANALYSIS_FILENAME);
-    fs.writeFileSync(outputFilePath, markdown, 'utf-8');
-    log.info(`Wrote analysis snapshot to: ${outputFilePath}`);
+    writeOutputFile(outputPath, ANALYSIS_FILENAME, markdown);
+    log.info(`Wrote analysis snapshot to: ${path.join(outputPath, ANALYSIS_FILENAME)}`);
 }
 
 /**

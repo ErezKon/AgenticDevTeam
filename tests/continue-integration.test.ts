@@ -184,7 +184,6 @@ function createMockStoppedRun(outputDir: string, opts: {
         devopsPlan: null,
         runningContainers: [],
         pullRequests: withPullRequests ? [{ branchName: 'feature/login', status: 'merged', number: 1, title: 'feat: login', assignmentIds: ['A-001'] }] : [],
-        branchAssignments: [],
         approvals: [],
         pendingRerun: null,
         phaseFeedback: {},
@@ -192,7 +191,6 @@ function createMockStoppedRun(outputDir: string, opts: {
         artifacts: [],
         transcript: [],
         tokenUsage: [],
-        configBaseline: null,
         acceptance: null,
         latestGateReport: null,
         unrecoverable: null,
@@ -200,7 +198,6 @@ function createMockStoppedRun(outputDir: string, opts: {
         dispatchRounds: [],
         attemptedBugIds: [],
         bugAttempts: {},
-        outputIntegrity: [],
         planViolations: [],
         repoContract: null,
         completionEvidence: [],
@@ -432,7 +429,7 @@ describe('Continue Run Integration', () => {
 describe('Singleton Rehydration', () => {
     it('rehydrates all singletons', () => {
         const outputDir = path.join(tmpDir, 'rehydrate-test');
-        const { ledger, tokenRecords } = createMockStoppedRun(outputDir, {
+        const { ledger } = createMockStoppedRun(outputDir, {
             withTokenUsage: true,
         });
 

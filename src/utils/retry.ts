@@ -5,21 +5,10 @@
  * (ECONNRESET, socket hang up, Connection error, HTTP 5xx) in addition
  * to 429 rate-limit errors.  Only 4xx (other than 429) are non-retryable.
  */
+import { LLM_RETRY_ATTEMPTS, LLM_RETRY_INITIAL_MS, LLM_RETRY_MAX_MS } from '../config';
 import { getLogger } from './logger';
 
 const log = getLogger('[retry]', 226);
-
-/** Default max attempts — env-configurable via LLM_RETRY_ATTEMPTS. */
-const DEFAULT_RETRY_ATTEMPTS =
-    parseInt(process.env.LLM_RETRY_ATTEMPTS ?? '8', 10);
-
-/** Default initial backoff (ms) — env-configurable via LLM_RETRY_INITIAL_MS. */
-const DEFAULT_INITIAL_BACKOFF_MS =
-    parseInt(process.env.LLM_RETRY_INITIAL_MS ?? '8000', 10);
-
-/** Maximum computed delay cap (ms) — prevents 8s x 2^7 from exploding. */
-const MAX_DELAY_MS =
-    parseInt(process.env.LLM_RETRY_MAX_MS ?? '120000', 10);
 
 /** Transient error patterns that warrant a retry (network/stream failures). */
 const TRANSIENT_PATTERNS = [
@@ -75,8 +64,8 @@ export function isRetryableError(err: any): boolean {
 export async function retryWithBackoff<T>(
     fn: () => Promise<T>,
     label: string,
-    attempts: number = DEFAULT_RETRY_ATTEMPTS,
-    initialMs: number = DEFAULT_INITIAL_BACKOFF_MS,
+    attempts: number = LLM_RETRY_ATTEMPTS,
+    initialMs: number = LLM_RETRY_INITIAL_MS,
 ): Promise<T> {
     for (let attempt = 1; attempt <= attempts; attempt++) {
         try {
@@ -84,10 +73,10 @@ export async function retryWithBackoff<T>(
         } catch (err: any) {
             if (isRetryableError(err) && attempt < attempts) {
                 const isTransient = !isRateLimitError(err) && isTransientError(err);
-                const baseDelay = Math.min(initialMs * Math.pow(2, attempt - 1), MAX_DELAY_MS);
+                const baseDelay = Math.min(initialMs * Math.pow(2, attempt - 1), LLM_RETRY_MAX_MS);
                 // Add +/-30% random jitter to stagger concurrent retries
                 const jitter = baseDelay * (0.7 + Math.random() * 0.6);
-                const delay = Math.round(Math.min(jitter, MAX_DELAY_MS));
+                const delay = Math.round(Math.min(jitter, LLM_RETRY_MAX_MS));
                 log.warn(
                     `${label}: ${isTransient ? 'transient error' : 'rate-limited'} (attempt ${attempt}/${attempts}), ` +
                     `retrying in ${(delay / 1000).toFixed(1)}s... [${err?.message?.slice(0, 100) ?? 'unknown'}]`,

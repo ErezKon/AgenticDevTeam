@@ -125,25 +125,6 @@ export function deployConventionsToWorkspace(
 }
 
 /**
- * Copy ALL convention files to the workspace.
- *
- * Called once during the development phase setup so every agent has access
- * regardless of its specific language list.  Idempotent — safe to call
- * multiple times.
- */
-export function deployAllConventionsToWorkspace(workspacePath: string): void {
-    if (!fs.existsSync(CONVENTIONS_SOURCE_DIR)) {
-        logToolAction(`${TAG} Convention source directory not found: ${CONVENTIONS_SOURCE_DIR}`);
-        return;
-    }
-
-    const allFiles = fs.readdirSync(CONVENTIONS_SOURCE_DIR)
-        .filter((f) => f.endsWith('.md'));
-
-    deployConventionsToWorkspace(workspacePath, allFiles);
-}
-
-/**
  * Generate the prompt snippet that instructs an agent to read its convention
  * files before writing any code.
  *

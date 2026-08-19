@@ -11,9 +11,10 @@
  */
 import * as fs from 'fs';
 import * as path from 'path';
-import { execSync } from 'child_process';
+import { type AsyncExecFn, defaultExecAsync as sharedDefaultExecAsync, isToolAvailableAsync as isToolOnPathAsync } from '../utils/shell-exec';
 import * as crypto from 'crypto';
 import { getLogger } from '../utils/logger';
+import { mdTable } from '../utils/markdown-table';
 import { gitExec } from '../utils/git-exec';
 import { detectStacks, type StackKind } from './quality-gates';
 import {
@@ -23,8 +24,12 @@ import {
     LICENCE_DENYLIST,
 } from '../config';
 import type { Bug } from '../agents/_shared/schemas/bug.schema';
+import type { GateOutcome, GateFinding, GateStatus } from './gate-types';
+import { makeGateBug } from './bug-factory';
 
 const log = getLogger('[SecurityGates]', 196);
+
+// safeChildEnv imported from ../utils/shell-exec
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -41,6 +46,8 @@ export interface SecurityFinding {
 export interface SecurityReport {
     findings: SecurityFinding[];
     passed: boolean;
+    /** Errors from sub-gates that crashed (fail-closed: any error → passed=false). */
+    errors?: string[];
 }
 
 // ─── Secret Patterns ────────────────────────────────────────────────────────
@@ -123,6 +130,26 @@ function shouldSkipPath(relativePath: string): boolean {
     return false;
 }
 
+// ─── Filesystem walk fallback (when git is unavailable) ─────────────────────
+
+const WALK_PRUNE = new Set(['node_modules', '.git', '.worktrees', '.worktrees-failed', 'dist', 'build', 'coverage', '__pycache__']);
+
+/** Recursively walk the workspace and return relative file paths. */
+function walkFilesForSecretScan(root: string, dir: string): string[] {
+    const results: string[] = [];
+    let entries: fs.Dirent[];
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return results; }
+    for (const entry of entries) {
+        if (entry.isDirectory()) {
+            if (WALK_PRUNE.has(entry.name) || entry.name.startsWith('.')) continue;
+            results.push(...walkFilesForSecretScan(root, path.join(dir, entry.name)));
+        } else if (entry.isFile()) {
+            results.push(path.relative(root, path.join(dir, entry.name)));
+        }
+    }
+    return results;
+}
+
 // ─── Secret scanning ────────────────────────────────────────────────────────
 
 /**
@@ -135,15 +162,16 @@ function shouldSkipPath(relativePath: string): boolean {
 export function scanForSecrets(workspacePath: string): SecurityFinding[] {
     const findings: SecurityFinding[] = [];
 
-    // Get git-tracked files only
+    // Get git-tracked files; fall back to filesystem walk on git failure
+    // (Plan 25-04 §3: never silently skip the scan).
     const trackedOutput = gitExec(workspacePath, 'ls-files');
+    let trackedFiles: string[];
     if (!trackedOutput || trackedOutput.startsWith('Error:')) {
-        // Not a git repo or error — fall back to filesystem walk
-        log.warn('Could not list git-tracked files; skipping secret scan');
-        return [];
+        log.warn('Could not list git-tracked files; falling back to filesystem walk');
+        trackedFiles = walkFilesForSecretScan(workspacePath, workspacePath);
+    } else {
+        trackedFiles = trackedOutput.split('\n').filter(Boolean);
     }
-
-    const trackedFiles = trackedOutput.split('\n').filter(Boolean);
 
     for (const relativePath of trackedFiles) {
         if (shouldSkipPath(relativePath)) continue;
@@ -201,26 +229,11 @@ export function scanForSecrets(workspacePath: string): SecurityFinding[] {
 
 // ─── Dependency audit ───────────────────────────────────────────────────────
 
-/** Exec seam for testing. */
-type ExecFn = (cmd: string, opts: { cwd: string; timeout: number }) => string;
+// AsyncExecFn, defaultExecAsync, isToolOnPathAsync imported from ../utils/shell-exec
 
-function defaultExec(cmd: string, opts: { cwd: string; timeout: number }): string {
-    return execSync(cmd + ' 2>&1', {
-        cwd: opts.cwd,
-        encoding: 'utf-8',
-        timeout: opts.timeout,
-        maxBuffer: 1024 * 1024 * 10,
-        env: { ...process.env, CI: 'true' },
-    });
-}
-
-function isToolOnPath(tool: string, cwd: string, exec: ExecFn): boolean {
-    try {
-        exec(`which ${tool}`, { cwd, timeout: 10_000 });
-        return true;
-    } catch {
-        return false;
-    }
+/** Security-gates async wrapper: 10 MB buffer, CI env. */
+async function defaultExecAsync(cmd: string, opts: { cwd: string; timeout: number }): Promise<string> {
+    return sharedDefaultExecAsync(cmd, opts, 10 * 1024 * 1024, { CI: 'true' });
 }
 
 /** Audit commands by stack. All soft — missing tool => skip, never fail. */
@@ -276,13 +289,13 @@ function parseNpmAuditJson(jsonStr: string): SecurityFinding[] {
  * Per-stack dependency audit. Every command is optional; a missing tool
  * yields no findings.
  */
-export function auditDependencies(
+export async function auditDependencies(
     workspacePath: string,
-    opts?: { exec?: ExecFn },
-): SecurityFinding[] {
+    opts?: { exec?: AsyncExecFn },
+): Promise<SecurityFinding[]> {
     const findings: SecurityFinding[] = [];
     const stacks = detectStacks(workspacePath);
-    const exec = opts?.exec ?? defaultExec;
+    const exec = opts?.exec ?? defaultExecAsync;
 
     for (const stack of stacks) {
         const auditInfo = AUDIT_COMMANDS[stack];
@@ -292,13 +305,13 @@ export function auditDependencies(
         if (auditInfo.deepOnly && !SECURITY_DEEP_AUDIT) continue;
 
         // Check if the tool is on PATH
-        if (!isToolOnPath(auditInfo.tool, workspacePath, exec)) {
+        if (!await isToolOnPathAsync(auditInfo.tool, workspacePath, exec)) {
             log.info(`Audit tool '${auditInfo.tool}' not on PATH — skipping ${stack} audit`);
             continue;
         }
 
         try {
-            const output = exec(auditInfo.cmd, { cwd: workspacePath, timeout: 300_000 });
+            const output = await exec(auditInfo.cmd, { cwd: workspacePath, timeout: 300_000 });
 
             // Parse stack-specific output
             if (stack === 'node') {
@@ -420,16 +433,17 @@ export function checkLicences(workspacePath: string): SecurityFinding[] {
  * Returns findings and a pass/fail flag. With all flags at their defaults
  * the gate is report-only (does not block the pipeline).
  */
-export function runSecurityGates(
+export async function runSecurityGates(
     workspacePath: string,
-    opts?: { exec?: ExecFn },
-): SecurityReport {
+    opts?: { exec?: AsyncExecFn },
+): Promise<SecurityReport> {
     if (!SECURITY_GATES_ENABLED) {
         log.info('Security gates disabled (SECURITY_GATES_ENABLED=false)');
         return { findings: [], passed: true };
     }
 
     const findings: SecurityFinding[] = [];
+    const errors: string[] = [];
 
     // 1. Secret scan
     try {
@@ -441,12 +455,14 @@ export function runSecurityGates(
             log.info('Secret scan: clean');
         }
     } catch (err: any) {
-        log.warn(`Secret scan error (non-fatal): ${err.message}`);
+        // Plan 25-04 §4: record errors instead of silently swallowing
+        log.error(`Secret scan error: ${err.message}`);
+        errors.push(`Secret scan crashed: ${err.message}`);
     }
 
     // 2. Dependency audit
     try {
-        const auditFindings = auditDependencies(workspacePath, opts);
+        const auditFindings = await auditDependencies(workspacePath, opts);
         findings.push(...auditFindings);
         if (auditFindings.length > 0) {
             log.warn(`Dependency audit: ${auditFindings.length} finding(s)`);
@@ -454,7 +470,8 @@ export function runSecurityGates(
             log.info('Dependency audit: clean');
         }
     } catch (err: any) {
-        log.warn(`Dependency audit error (non-fatal): ${err.message}`);
+        log.error(`Dependency audit error: ${err.message}`);
+        errors.push(`Dependency audit crashed: ${err.message}`);
     }
 
     // 3. Licence check
@@ -467,14 +484,17 @@ export function runSecurityGates(
             log.info('Licence check: clean');
         }
     } catch (err: any) {
-        log.warn(`Licence check error (non-fatal): ${err.message}`);
+        log.error(`Licence check error: ${err.message}`);
+        errors.push(`Licence check crashed: ${err.message}`);
     }
 
-    // passed = no critical findings
-    const passed = !findings.some(f => f.severity === 'critical');
+    // Plan 25-04 §4: fail-closed — if any sub-gate crashed, the overall
+    // result is inconclusive/failed rather than silently passing.
+    const hasCritical = findings.some(f => f.severity === 'critical');
+    const passed = !hasCritical && errors.length === 0;
 
-    log.info(`Security gates ${passed ? 'PASSED' : 'FAILED'}: ${findings.length} total finding(s), ${findings.filter(f => f.severity === 'critical').length} critical`);
-    return { findings, passed };
+    log.info(`Security gates ${passed ? 'PASSED' : 'FAILED'}: ${findings.length} total finding(s), ${findings.filter(f => f.severity === 'critical').length} critical, ${errors.length} error(s)`);
+    return { findings, passed, errors };
 }
 
 // ─── SecurityReport -> Bug synthesis ────────────────────────────────────────
@@ -491,22 +511,22 @@ export function synthesiseSecurityBugs(report: SecurityReport): Bug[] {
 
     return report.findings
         .filter(f => f.severity === 'critical' || f.severity === 'major')
-        .map(f => ({
-            id: f.id,
-            title: `Security: ${f.detail.slice(0, 80)}`,
-            severity: f.severity as 'critical' | 'major',
-            stepsToReproduce: f.file
+        .map(f => makeGateBug(
+            f.id,
+            `Security: ${f.detail.slice(0, 80)}`,
+            f.severity,
+            'security-gates',
+            f.file
                 ? `Check ${f.file}${f.line ? `:${f.line}` : ''}`
                 : 'Run security scan',
-            expectedBehavior: f.kind === 'secret'
+            f.kind === 'secret'
                 ? 'No hard-coded credentials in tracked files'
                 : f.kind === 'licence'
                     ? 'All dependencies use approved licences'
                     : 'No known vulnerabilities in dependencies',
-            actualBehavior: f.detail,
-            suspectedArea: f.file ?? 'project dependencies',
-            reportedBy: 'security-gates',
-        }));
+            f.detail,
+            f.file ?? 'project dependencies',
+        ));
 }
 
 // ─── SecurityReport -> Markdown ─────────────────────────────────────────────
@@ -526,14 +546,47 @@ export function securityReportToMarkdown(report: SecurityReport): string {
         lines.push(':x: **Critical security findings detected.**\n');
     }
 
-    lines.push('| Kind | Severity | Location | Detail |');
-    lines.push('|------|----------|----------|--------|');
-    for (const f of report.findings) {
+    const headers = ['Kind', 'Severity', 'Location', 'Detail'];
+    const rows = report.findings.map(f => {
         const location = f.file
             ? `\`${f.file}\`${f.line ? `:${f.line}` : ''}`
             : '—';
-        lines.push(`| ${f.kind} | ${f.severity} | ${location} | ${f.detail.slice(0, 120)} |`);
-    }
+        return [f.kind, f.severity, location, f.detail.slice(0, 120)];
+    });
+    lines.push(mdTable(headers, rows));
 
     return lines.join('\n');
+}
+
+// ─── SecurityReport → GateOutcome adapter (Sub-Plan 25-10) ──────────────────
+
+/**
+ * Convert a SecurityReport into a standard GateOutcome for the unified gate interface.
+ */
+export function securityGateOutcome(report: SecurityReport): GateOutcome<SecurityReport> {
+    let status: GateStatus;
+    if (report.errors && report.errors.length > 0) {
+        status = report.passed ? 'inconclusive' : 'fail';
+    } else if (report.passed) {
+        status = report.findings.length === 0 ? 'pass' : 'pass';
+    } else {
+        status = 'fail';
+    }
+
+    const findings: GateFinding[] = report.findings.map(f => ({
+        id: f.id,
+        severity: f.severity,
+        detail: f.detail,
+        file: f.file,
+        line: f.line,
+    }));
+
+    return {
+        gate: 'security-gates',
+        status,
+        findings,
+        detail: report,
+        markdown: securityReportToMarkdown(report),
+        bugs: synthesiseSecurityBugs(report),
+    };
 }

@@ -8,7 +8,6 @@
 import { execSync } from 'child_process';
 import { getLogger } from '../../utils/logger';
 import {
-    PLAYWRIGHT_MCP_CMD, PLAYWRIGHT_MCP_ARGS,
     PLAYWRIGHT_MCP_STARTUP_TIMEOUT_MS,
     PLAYWRIGHT_MCP_CONNECT_RETRIES,
     PLAYWRIGHT_AUTO_INSTALL,

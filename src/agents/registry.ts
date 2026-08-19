@@ -64,7 +64,4 @@ export function getAgentEntry(id: string): AgentRegistryEntry | undefined {
     return AGENT_REGISTRY.find(a => a.id === id);
 }
 
-/** Get all agents in a category. */
-export function getAgentsByCategory(category: AgentRegistryEntry['category']): AgentRegistryEntry[] {
-    return AGENT_REGISTRY.filter(a => a.category === category);
-}
+

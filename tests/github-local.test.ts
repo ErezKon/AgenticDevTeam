@@ -86,14 +86,12 @@ function setupTestRepos(): { bareDir: string; workDir: string; cleanup: () => vo
 
 describe('createLocalGitHub', () => {
     let bareDir: string;
-    let workDir: string;
     let cleanup: () => void;
     let gh: OctokitLike;
 
     beforeAll(() => {
         const repos = setupTestRepos();
         bareDir = repos.bareDir;
-        workDir = repos.workDir;
         cleanup = repos.cleanup;
         gh = createLocalGitHub(bareDir);
     });

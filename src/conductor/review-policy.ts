@@ -14,7 +14,8 @@
 import type { ReviewOutput } from '../agents/developers/schemas/review-output.schema';
 import type { GateReport } from './quality-gates';
 import type { TamperFinding } from './gate-integrity';
-import type { DevAgentEntry } from '../agents/developers/registry';
+import type { Bug } from '../agents/_shared/schemas/bug.schema';
+import { makeGateBug } from './bug-factory';
 import { DEV_AGENTS, getDevAgent } from '../agents/developers/registry';
 
 // ─── Review Outcomes ────────────────────────────────────────────────────────
@@ -95,20 +96,12 @@ export interface MergeDecision {
     blockers: string[];
 }
 
-export interface LayoutViolation {
-    kind: string;
-    severity: 'critical' | 'major' | 'minor';
-    path: string;
-    detail: string;
-}
-
 export interface DecideMergeInput {
     approvals: number;
     blockingComments: { severity?: string; body?: string; filePath?: string }[];
     abstentions: number;
     gateReport: GateReport | null;
     integrityFindings: TamperFinding[];
-    layoutViolations: LayoutViolation[];
     filesChanged: number;
     iterationsUsed: number;
     policy: 'strict' | 'permissive' | 'legacy';
@@ -147,13 +140,7 @@ export function decideMerge(input: DecideMergeInput): MergeDecision {
         blockers.push(`${criticalTamper.length} critical integrity finding(s): ${criticalTamper.map(f => f.detail).join('; ').slice(0, 200)}`);
     }
 
-    // 4. Critical layout violations
-    const criticalLayout = input.layoutViolations.filter(v => v.severity === 'critical');
-    if (criticalLayout.length > 0) {
-        blockers.push(`${criticalLayout.length} critical layout violation(s): ${criticalLayout.map(v => v.detail).join('; ').slice(0, 200)}`);
-    }
-
-    // Blockers 1-4 are hard under both strict and permissive
+    // Blockers 1-3 are hard under both strict and permissive
     if (input.policy === 'permissive' && blockers.length === 0) {
         return { merge: true, reason: 'permissive policy — hard blockers clear', blockers: [] };
     }
@@ -262,30 +249,21 @@ export function selectEscalationCandidate(
 export function reviewCommentsToBugs(
     prNumber: number,
     comments: { filePath?: string; body?: string; severity?: string }[],
-): Array<{
-    id: string;
-    title: string;
-    severity: string;
-    stepsToReproduce: string;
-    expectedBehavior: string;
-    actualBehavior: string;
-    suspectedArea: string;
-    reportedBy: string;
-}> {
+): Bug[] {
     const majors = comments.filter(c => {
         const s = String(c.severity ?? '').toLowerCase();
         return s === 'major';
     });
-    return majors.map((c, i) => ({
-        id: `REVIEW-${prNumber}-${i}`,
-        title: `Unresolved review comment on ${c.filePath ?? 'unknown file'}`,
-        severity: 'major',
-        stepsToReproduce: `Review PR #${prNumber}, file ${c.filePath ?? 'unknown'}`,
-        expectedBehavior: c.body ?? 'Review comment should be addressed',
-        actualBehavior: 'Comment was not resolved before merge',
-        suspectedArea: c.filePath ?? 'unknown',
-        reportedBy: 'review-policy',
-    }));
+    return majors.map((c, i) => makeGateBug(
+        `REVIEW-${prNumber}-${i}`,
+        `Unresolved review comment on ${c.filePath ?? 'unknown file'}`,
+        'major',
+        'review-policy',
+        `Review PR #${prNumber}, file ${c.filePath ?? 'unknown'}`,
+        c.body ?? 'Review comment should be addressed',
+        'Comment was not resolved before merge',
+        c.filePath ?? 'unknown',
+    ));
 }
 
 /**
@@ -295,26 +273,17 @@ export function blockedPrBug(
     branchName: string,
     prNumber: number,
     blockers: string[],
-): {
-    id: string;
-    title: string;
-    severity: string;
-    stepsToReproduce: string;
-    expectedBehavior: string;
-    actualBehavior: string;
-    suspectedArea: string;
-    reportedBy: string;
-} {
-    return {
-        id: `PR-BLOCKED-${branchName}`,
-        title: `PR #${prNumber} blocked on ${branchName}`,
-        severity: 'critical',
-        stepsToReproduce: `Merge PR #${prNumber} on branch ${branchName}`,
-        expectedBehavior: 'PR should merge cleanly with all gates passing',
-        actualBehavior: `Blocked: ${blockers.join('; ')}`,
-        suspectedArea: branchName,
-        reportedBy: 'review-policy',
-    };
+): Bug {
+    return makeGateBug(
+        `PR-BLOCKED-${branchName}`,
+        `PR #${prNumber} blocked on ${branchName}`,
+        'critical',
+        'review-policy',
+        `Merge PR #${prNumber} on branch ${branchName}`,
+        'PR should merge cleanly with all gates passing',
+        `Blocked: ${blockers.join('; ')}`,
+        branchName,
+    );
 }
 
 // ─── Criteria-verdict enforcement ───────────────────────────────────────────

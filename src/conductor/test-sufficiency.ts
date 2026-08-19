@@ -4,10 +4,11 @@
  * Sub-Plan 09: prevents "0 tests found = pass" and ensures every story has
  * at least one tagged test.
  */
-import { getLogger } from '../utils/logger';
 import type { ExecutedTestReport } from './test-runner';
 import type { UserStory } from '../agents/_shared/schemas/user-story.schema';
 import type { Bug } from '../agents/_shared/schemas/bug.schema';
+import { makeGateBug } from './bug-factory';
+import type { GateOutcome, GateFinding, GateStatus } from './gate-types';
 import {
     QA_ENFORCE_SUFFICIENCY,
     QA_MIN_TOTAL_TESTS,
@@ -15,7 +16,6 @@ import {
     QA_MIN_COVERAGE_PCT,
 } from '../config';
 
-const log = getLogger('[TestSufficiency]', 205);
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -157,21 +157,21 @@ export function checkTestSufficiency(input: {
  * Convert sufficiency violations into Bugs with stable ids `QA-<kind>[-<storyId>]`.
  */
 export function sufficiencyViolationsToBugs(violations: SufficiencyViolation[]): Bug[] {
-    return violations.map(v => ({
-        id: v.storyId ? `QA-${v.kind}-${v.storyId}` : `QA-${v.kind}`,
-        title: `Test sufficiency: ${v.kind}${v.storyId ? ` (${v.storyId})` : ''}`,
-        severity: v.severity,
-        stepsToReproduce: v.detail,
-        expectedBehavior: getExpectedBehavior(v.kind),
-        actualBehavior: v.detail,
-        // Carry the real story id as structured data. It used to live only in
-        // `suspectedArea` prose, so triage copied the synthetic BUG id into
-        // `assignment.storyId` and developers lost their acceptance criteria
-        // (Plan 21, E5).
-        ...(v.storyId && { storyId: v.storyId }),
-        suspectedArea: v.storyId ? `Story ${v.storyId}` : 'Test suite',
-        reportedBy: 'test-sufficiency',
-    }));
+    // Carry the real story id as structured data. It used to live only in
+    // `suspectedArea` prose, so triage copied the synthetic BUG id into
+    // `assignment.storyId` and developers lost their acceptance criteria
+    // (Plan 21, E5).
+    return violations.map(v => makeGateBug(
+        v.storyId ? `QA-${v.kind}-${v.storyId}` : `QA-${v.kind}`,
+        `Test sufficiency: ${v.kind}${v.storyId ? ` (${v.storyId})` : ''}`,
+        v.severity,
+        'test-sufficiency',
+        v.detail,
+        getExpectedBehavior(v.kind),
+        v.detail,
+        v.storyId ? `Story ${v.storyId}` : 'Test suite',
+        v.storyId ? { storyId: v.storyId } : undefined,
+    ));
 }
 
 function getExpectedBehavior(kind: SufficiencyViolation['kind']): string {
@@ -186,32 +186,42 @@ function getExpectedBehavior(kind: SufficiencyViolation['kind']): string {
     }
 }
 
-// ─── Sufficiency report markdown ────────────────────────────────────────────
+// ─── SufficiencyViolation[] → GateOutcome adapter (Sub-Plan 25-10) ──────────
 
 /**
- * Render sufficiency violations as a markdown summary.
+ * Convert sufficiency violations into a standard GateOutcome.
  */
-export function sufficiencyToMarkdown(violations: SufficiencyViolation[]): string {
-    if (violations.length === 0) {
-        return ':white_check_mark: **Test sufficiency: all checks passed.**';
+export function sufficiencyGateOutcome(violations: SufficiencyViolation[]): GateOutcome<SufficiencyViolation[]> {
+    if (!QA_ENFORCE_SUFFICIENCY) {
+        return {
+            gate: 'test-sufficiency',
+            status: 'skipped',
+            findings: [],
+            detail: [],
+            markdown: 'Test sufficiency checks disabled (QA_ENFORCE_SUFFICIENCY=false).',
+            bugs: [],
+        };
     }
 
-    const lines: string[] = [':x: **Test sufficiency violations:**\n'];
-    const critical = violations.filter(v => v.severity === 'critical');
-    const major = violations.filter(v => v.severity === 'major');
+    const status: GateStatus = violations.length === 0 ? 'pass' : 'fail';
 
-    if (critical.length > 0) {
-        lines.push(`**Critical (${critical.length}):**`);
-        for (const v of critical) {
-            lines.push(`- \`${v.kind}\`: ${v.detail}`);
-        }
-    }
-    if (major.length > 0) {
-        lines.push(`\n**Major (${major.length}):**`);
-        for (const v of major) {
-            lines.push(`- \`${v.kind}\`: ${v.detail}`);
-        }
-    }
+    const findings: GateFinding[] = violations.map(v => ({
+        id: v.storyId ? `QA-${v.kind}-${v.storyId}` : `QA-${v.kind}`,
+        severity: v.severity,
+        detail: v.detail,
+    }));
 
-    return lines.join('\n');
+    const markdown = violations.length === 0
+        ? ':white_check_mark: Test sufficiency: all checks passed.'
+        : `:warning: Test sufficiency: ${violations.length} violation(s) — ${violations.filter(v => v.severity === 'critical').length} critical, ${violations.filter(v => v.severity === 'major').length} major.`;
+
+    return {
+        gate: 'test-sufficiency',
+        status,
+        findings,
+        detail: violations,
+        markdown,
+        bugs: sufficiencyViolationsToBugs(violations),
+    };
 }
+

@@ -387,7 +387,7 @@ The workflow supports two GitHub modes:
 | `GITHUB_OWNER` | Live only | Repository owner (org or user) |
 | `GITHUB_REPO` | Live only | Repository name |
 | `GIT_DEFAULT_BRANCH` | No | Default branch (default: `main`) |
-| `MAX_REVIEW_ITERATIONS` | No | Max review rounds (default: `5`) |
+| `MAX_REVIEW_ITERATIONS` | No | Max review rounds (default: `3`) |
 
 > **Note:** In `local` mode, intake can initialize a bare repo under the run outputs (e.g. `outputs/<run>/origin.git`) and use that as `origin`.
 
@@ -577,7 +577,7 @@ In a ReAct agent loop, every tool-call step re-sends the entire conversation his
 
 #### 1. Tool Result Capping
 
-Every tool result is truncated to `MAX_TOOL_RESULT_CHARS` (default: 6,000) using a head/tail split that preserves both the beginning and end of the output. Shell output uses a **tail-weighted split** (20% head, 80% tail) because build/test failures print at the end. Truncated results include a marker so agents know content was elided and can request specific regions via `read_file` with `offset`/`limit`.
+Every tool result is truncated to `MAX_TOOL_RESULT_CHARS` (default: 10,000) using a head/tail split that preserves both the beginning and end of the output. Shell output uses a **tail-weighted split** (20% head, 80% tail) because build/test failures print at the end. Truncated results include a marker so agents know content was elided and can request specific regions via `read_file` with `offset`/`limit`.
 
 #### 2. ReAct History Compaction (`wrapModelCall` middleware)
 
@@ -586,7 +586,7 @@ Before each LLM call, a `history-compaction` middleware compacts the message his
 - The **first message** (the task) and the **last N tool results** (default: 3) are always kept verbatim
 - Older tool results are replaced with one-line receipts: `[read_file src/App.tsx -> 4,210 chars, elided]`
 - Large `write_file`/`edit_file` arguments in older messages are elided (the file is already on disk)
-- A hard ceiling (`HISTORY_MAX_CHARS`, default: 40,000) drops the oldest stubbed messages if still over budget
+- A hard ceiling (`HISTORY_MAX_CHARS`, default: 60,000) drops the oldest stubbed messages if still over budget
 
 The compaction operates on a **copy** of the message history -- the durable `messages` state used by checkpointing, token extraction, and output parsing is untouched.
 
@@ -633,17 +633,16 @@ All compaction features default to **on**. To disable any feature, set its envir
 | Variable | Default | Effect of disabling |
 |----------|---------|-------------------|
 | `HISTORY_COMPACTION_ENABLED` | `true` | Disables the compaction middleware; full history replayed on every call |
-| `MAX_TOOL_RESULT_CHARS` | `6000` | Set higher to allow longer tool results |
+| `MAX_TOOL_RESULT_CHARS` | `10000` | Set higher to allow longer tool results |
 | `HISTORY_KEEP_RECENT_TOOL_RESULTS` | `4` | Increase to keep more recent results verbatim (lower bound) |
 | `HISTORY_KEEP_RECENT_TURNS` | `3` | Increase to keep more whole model turns verbatim |
 | `HISTORY_KEEP_RECENT_WRITE_ARGS` | `2` | Increase to keep more recent write arguments un-elided |
-| `HISTORY_MAX_CHARS` | `40000` | Raise the hard ceiling for compacted history |
+| `HISTORY_MAX_CHARS` | `60000` | Raise the hard ceiling for compacted history |
 | `CONVENTIONS_INLINE_DIGEST` | `true` | Revert to agents reading convention files via `read_file` |
 | `DEV_GIT_TOOLS_ENABLED` | `false` | Set `true` to restore git tools for dev agents |
 | `PERSONA_COMPACT` | `true` | Revert to the verbose ~7,000-char persona |
 | `AGENT_RESPAWN_ENABLED` | `true` | Revert to tool poisoning at the ceiling |
-| `AGENT_RESPAWN_MAX_GENERATIONS` | `2` | Max additional agent lifetimes per task |
-| `AGENT_RESPAWN_TOKEN_THRESHOLD` | `14000` | Token threshold that triggers respawn |
+| `AGENT_RESPAWN_MAX_GENERATIONS` | `4` | Max additional agent lifetimes per task |
 | `RESPONSE_SCHEMA_STRIP_ALL_DESCRIPTIONS` | `true` | Keep all JSON schema descriptions |
 
 ### Measurement
@@ -704,18 +703,25 @@ Provider errors during development dispatch are classified by severity. Fatal er
 ```
 AgenticDevTeam/
 ├── src/
-│   ├── cli.ts                              # Interactive CLI entry point
-│   ├── index.ts                            # Express REST + WebSocket server
+│   ├── cli.ts                              # CLI entry point (thin wrapper — delegates to cli/)
+│   ├── index.ts                            # Express REST + WebSocket server (testable — guarded listen())
 │   ├── config.ts                           # Environment-driven configuration
+│   │
+│   ├── cli/                                # CLI modules (Sub-Plan 25-09)
+│   │   ├── printers.ts                     # Display helpers (header, roster, artifacts, status)
+│   │   ├── prompts.ts                      # Readline wrapper, requirements gathering, repo target
+│   │   ├── hitl-loop.ts                    # Unified HITL decision loop
+│   │   └── menu.ts                         # Main menu + run-start functions
 │   │
 │   ├── conductor/                          # LangGraph orchestration
 │   │   ├── state.ts                        # ProjectState (Annotation + reducers)
-│   │   ├── nodes.ts                        # 10 phase node functions
+│   │   ├── nodes/                          # Phase node functions (13 nodes in focused modules)
 │   │   ├── graph.ts                        # StateGraph wiring + HITL interrupts
-│   │   ├── pr-workflow.ts                  # PR lifecycle orchestrator (branch → review → merge)
+│   │   ├── pr-workflow.ts                  # Backward-compatible re-export shim
+│   │   ├── pr/                             # PR workflow modules (14 focused files)
 │   │   ├── agent-respawn.ts                # Deterministic handoff summary for fresh-context respawn
 │   │   ├── provider-failure.ts             # Provider error classification + ProviderRecoveryFailedError
-│   │   └── run.ts                          # Autonomous & HITL run helpers
+│   │   └── run.ts                          # Autonomous & HITL run helpers + handleRunCrash + makeSession
 │   │
 │   ├── agents/
 │   │   ├── _shared/
@@ -746,9 +752,8 @@ AgenticDevTeam/
 │   │   ├── _shared/truncate.ts             # Head/tail tool-result truncation
 │   │   ├── fs/workspace-tools.ts           # Sandboxed read/write/edit/list/search (+offset/limit)
 │   │   ├── git/git-tools.ts               # Git CLI tools (branch, commit, push, diff)
-│   │   ├── git/github-tools.ts            # GitHub API tools (PR, review, merge)
 │   │   ├── shell/shell-tools.ts            # Command execution in workspace
-│   │   ├── diagram/diagram-tools.ts        # Mermaid diagram emission
+│   │   ├── diagram/diagram-tools.ts        # Mermaid label sanitization
 │   │   ├── requirements/parse-requirements.ts  # .md/.txt/.pdf/.docx parser
 │   │   └── mcp/playwright-mcp.ts           # Playwright MCP client
 │   │
@@ -758,13 +763,41 @@ AgenticDevTeam/
 │   ├── utils/
 │   │   ├── logger.ts                       # Per-agent colored console + file logger
 │   │   ├── log-colors.util.ts              # ANSI 256-color codes
-│   │   ├── log-capture.util.ts             # Stdout/stderr capture for log files
 │   │   ├── oauth-auth.util.ts              # OAuth2 client-credentials token cache
 │   │   ├── workspace.ts                    # Project workspace + output dir creation
+│   │   ├── coding-conventions.ts           # Convention file resolution + deployment
 │   │   ├── conventions-digest.ts           # Compact in-prompt conventions digest
+│   │   ├── run-context.ts                  # Per-run AsyncLocalStorage context (RunContext) for concurrent server safety
+│   │   ├── event-bus.ts                    # Typed event bus (14 event types); context-aware via RunContext
 │   │   ├── token-tracker.ts                # Per-invocation token tracking + efficiency metrics
-│   │   ├── token-report.ts                 # HTML token usage report (+ Invocation Efficiency table)
-│   │   └── codebase-analysis-writer.ts     # Write analysis markdown to project + outputs
+│   │   ├── token-callback.ts               # LangChain callback for token recording (two-tier provider lookup)
+│   │   ├── token-usage-extractor.ts        # Shared usage normalisation + per-invocation aggregation
+│   │   ├── token-report.ts                 # HTML + JSON token usage report (+ Invocation Efficiency table)
+│   │   ├── cost.ts                         # USD cost estimation per model
+│   │   ├── run-budget.ts                   # Run budget tracking (token/cost/wall-clock limits, 4 levels)
+│   │   ├── run-snapshot.ts                 # state.json + run-manifest.json writer + writePeriodicSnapshot()
+│   │   ├── run-ledger.ts                   # Append-only JSONL evidence ledger for post-mortem diagnostics
+│   │   ├── ledger-report.ts                # Produces outputs/<run>/run-report.md from ledger data
+│   │   ├── run-diagnosis.ts                # Automated failure-cause summary (run-diagnosis.md)
+│   │   ├── response-log.ts                 # Full-response dump per agent invocation (outputs/<run>/full-responses/)
+│   │   ├── structured-output.ts            # JSON extraction, repair, Zod validation, content-block handling
+│   │   ├── git-exec.ts                     # Centralized git command execution (execFileSync, shellSplit, assertValidRef)
+│   │   ├── github-local.ts                 # Local GitHub stand-in backed by bare git repo
+│   │   ├── github-repo-manager.ts          # GitHub repo creation + management
+│   │   ├── retry.ts                        # Retry-with-backoff for transient + rate-limit errors
+│   │   ├── llm-throttle.ts                 # Process-wide LLM rate-limit protection + provider recovery
+│   │   ├── llm-cassette.ts                 # Record/replay VCR for deterministic offline testing
+│   │   ├── traceability.ts                 # Requirements traceability matrix
+│   │   ├── codebase-analysis-writer.ts     # Write analysis markdown to project + outputs
+│   │   ├── repo-contract-writer.ts         # Write, read, and render .agent/repo-contract.json + Markdown
+│   │   ├── fs-walk.ts                      # Shared filesystem walker (walkDir, collectFiles, isTestFile)
+│   │   ├── source-graph.ts                 # Import extraction, graph building, transitive reachability
+│   │   ├── markdown-table.ts               # Shared mdTable() + mdSection() with pipe-escaping
+│   │   ├── shell-exec.ts                   # Shared ExecFn, safeChildEnv, defaultExec, isToolAvailable
+│   │   ├── branch-naming.ts                # Canonical slugify, systemBranch, featureBranch, isSystemBranch
+│   │   ├── artifact-writer.ts              # writeOutputFile + appendOutputLine for output-dir artifacts
+│   │   ├── workspace-index.ts              # buildWorkspaceIndex() — pre-built file index passed to all gates
+│   │   └── crash-handlers.ts               # flushTokenReportOnExit + installProcessHandlers (shared)
 │   │
 │   ├── templates/
 │   │   └── codebase-analysis.template.ts   # Markdown renderer for CodebaseAnalysis
@@ -790,7 +823,18 @@ AgenticDevTeam/
 │   ├── proxy.conf.json                     # Dev proxy → backend :3000
 │   └── package.json
 │
+├── tests/                                   # Jest test suite
+│   ├── setup.ts                            # Polyfill crypto, load env
+│   ├── setup-env-guard.ts                  # Env snapshot/restore per test
+│   ├── helpers/                            # Shared test utilities
+│   │   ├── state-factory.ts               # makeState(overrides?) fixture
+│   │   ├── tmp.ts                         # Temp dir lifecycle helpers
+│   │   └── git.ts                         # Isolated git test helpers
+│   └── *.test.ts                           # 80+ test files
+│
+├── .github/workflows/ci.yml               # CI: typecheck + unit tests + dashboard build
 ├── package.json                            # Backend dependencies & scripts
+├── jest.config.js                          # Jest configuration
 ├── tsconfig.json                           # TypeScript config
 ├── Dockerfile                              # Orchestrator container
 ├── docker-compose.yml                      # Orchestrator + Playwright MCP
@@ -903,10 +947,16 @@ Starts the orchestrator and Playwright MCP server in containers.
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `GET` | `/api/agents` | List all 20 agents with metadata |
+| `GET` | `/api/events` | Recent run events (ring-buffer backfill; `?limit=N`, default 100) |
+| `GET` | `/api/runs` | List all active HITL sessions |
 | `POST` | `/api/run` | Start a new run (body: see below) |
-| `GET` | `/api/run/:id` | Get current state of a run |
+| `GET` | `/api/run/:id` | Get current state of a run (redacted) |
+| `POST` | `/api/run/:id/approve` | Approve/deny/enhance a HITL phase (body: `{ decision, feedback? }`) |
+| `GET` | `/api/run/:id/artifact/:agentId` | Get a single artifact with content |
+| `GET` | `/api/run/:id/artifacts` | List all artifacts with content |
 | `GET` | `/api/run/:id/prs` | List all pull requests for a run |
-| `POST` | `/api/run/:id/approve` | Approve/deny a HITL phase (body: `{ approved, feedback? }`) |
+| `GET` | `/api/runs/stoppable` | List runs that can be continued (Plan 23) |
+| `POST` | `/api/run/continue` | Continue a stopped run (body: `{ outputPath, mode?, threadId? }`) |
 
 #### `POST /api/run` Body
 
@@ -933,15 +983,42 @@ Starts the orchestrator and Playwright MCP server in containers.
 
 ### WebSocket Events
 
-Connect to `ws://localhost:3000/ws` for real-time updates:
+Connect to `ws://localhost:3000/ws` for real-time updates. Events are grouped by prefix:
 
-| Event | Payload | When |
-|-------|---------|------|
-| `run:started` | `{ systemName, mode, threadId? }` | Run begins |
-| `run:phase-complete` | `{ threadId, phase }` | A phase finishes |
-| `run:complete` | `{ systemName, state }` | Run finishes successfully |
-| `run:error` | `{ systemName, error }` | Run fails |
-| `agent:respawn` | `{ agentId, generation, files }` | A dev agent is respawned with a fresh context |
+| Event | Payload (key fields) | When |
+|-------|---------------------|------|
+| **Run lifecycle** | | |
+| `run:started` | `systemName, mode, threadId?` | Run begins |
+| `run:phase-complete` | `threadId, phase, decision` | A HITL phase decision is processed |
+| `run:complete` | `systemName, state, status, blockers` | Run finishes |
+| `run:error` | `systemName, error` | Run fails |
+| `run:budget-stop` | `reason, phase` | Run halted due to budget |
+| **Phase** | | |
+| `phase:start` | `phase` | A pipeline phase begins |
+| `phase:end` | `phase, nextPhase?` | A pipeline phase completes |
+| **Agent** | | |
+| `agent:start` | `agentId, phase, model` | An agent invocation begins |
+| `agent:end` | `agentId, phase, tokens, duration` | An agent invocation completes |
+| `agent:respawn` | `agentId, generation, files` | A dev agent is respawned with fresh context |
+| **PR workflow** | | |
+| `pr:opened` | `prNumber, title, branch` | A PR is created |
+| `pr:merged` | `prNumber, branch` | A PR is merged |
+| `pr:blocked` | `prNumber, blockers` | A PR cannot be merged |
+| `pr:reviewed` | `prNumber, reviewerId, status` | A reviewer completes a review |
+| `pr:conflict` | `branch, baseBranch` | Merge conflict detected |
+| `pr:strong-fixer` | `prNumber, model, branch` | Strong fixer pass started |
+| `pr:salvage` | `branch, salvageDir, reason` | Branch salvaged to worktree |
+| **Gates** | | |
+| `gate:result` | `gate, passed, ...` | A quality/assembly/product gate finishes |
+| `acceptance:result` | `status, blockers` | Acceptance gate result |
+| **HITL** | | |
+| `hitl:waiting` | `threadId, phase, systemName` | Dashboard should prompt user for decision |
+| **Observability** | | |
+| `tokens:update` | `totalTokens, totalCalls` | Token usage counter update |
+| `transcript` | `agentId, phase, message` | Agent transcript message |
+| `traceability:update` | `stories, coverage` | Test traceability updated |
+| `e2e:status` | `status, mode?` | E2E test result |
+| `branch:pushed` | `branchName, commit` | A branch was pushed |
 
 ---
 
@@ -949,9 +1026,13 @@ Connect to `ws://localhost:3000/ws` for real-time updates:
 
 A modern dark-themed Angular 19 standalone app with:
 
-- **Dashboard page** — agent roster grid with color-coded tags + live WebSocket event feed
-- **New Run page** — form to start autonomous or HITL runs
-- **Real-time updates** — WebSocket connection auto-reconnects
+- **Dashboard page** — agent roster grid, active runs, live WebSocket event feed with history backfill
+- **New Run page** — form to start autonomous or HITL runs (greenfield or maintain)
+- **Run Session page** — phase timeline stepper, HITL approve/deny/enhance controls, agent mission report viewer (markdown), code changes & PR list, tabbed state viewer (architecture, tech stack, epics, stories, tasks, assignments, DB design, test reports, bugs, DevOps, raw JSON), acceptance status badge, transcript log, and live events
+- **Real-time updates** — WebSocket connection with exponential backoff reconnect and visible "Disconnected" indicator
+- **Shared components** — `<app-event-log>`, `<app-file-changes-table>`, `<app-pr-badge>` eliminate duplication
+
+> **Note:** The Docker image serves only the API. To include the dashboard, either build it separately (`cd dashboard && npm run build`) and let the Express server serve the static files, or run `npm start` locally with a pre-built dashboard.
 
 ### Development
 
@@ -979,14 +1060,14 @@ npm run build
 | `LLM_BASE_URL` | — | OpenAI-compatible API base URL |
 | `LLM_MODEL` | `gpt-oss-120b` | Global fallback model identifier |
 | `ARCHITECT_MODEL` | `gpt-oss-120b` | Architect agent model (system design) |
-| `PRODUCT_MANAGER_MODEL` | `llama-3-3-70b-instruct` | Product Manager agent model (PRDs, user stories, acceptance criteria) |
-| `DBA_MODEL` | `llama-3-3-70b-instruct` | DBA agent model (schema design, migrations, query optimization) |
-| `TEAM_LEADER_MODEL` | `gemma-3-27b-it` | Team Leader agent model (task breakdown, assignments, bug triage) |
-| `DEVOPS_MODEL` | `mistral-small-3-1-24b-instruct-2503` | DevOps agent model (CI/CD, Docker, infra-as-code) |
+| `PRODUCT_MANAGER_MODEL` | `claude-sonnet-5` | Product Manager agent model (PRDs, user stories, acceptance criteria) |
+| `DBA_MODEL` | `gpt-oss-120b` | DBA agent model (schema design, migrations, query optimization) |
+| `TEAM_LEADER_MODEL` | `claude-sonnet-5` | Team Leader agent model (task breakdown, assignments, bug triage) |
+| `DEVOPS_MODEL` | `gpt-oss-120b` | DevOps agent model (CI/CD, Docker, infra-as-code) |
 | `CODEBASE_ANALYZER_MODEL` | `gpt-oss-120b` | Codebase Analyzer agent model (existing-project analysis) |
-| `PRINCIPAL_DEV_MODEL` | `llama-3-3-70b-instruct` | Principal developer agents model (core frameworks, complex features) |
-| `SENIOR_DEV_MODEL` | `mistral-small-3-1-24b-instruct-2503` | Senior developer agents model (feature modules, refactoring) |
-| `JUNIOR_DEV_MODEL` | `llama-3-2-3b-instruct` | Junior developer agents model (boilerplate, utilities, minor fixes) |
+| `PRINCIPAL_DEV_MODEL` | `gpt-oss-120b` | Principal developer agents model (core frameworks, complex features) |
+| `SENIOR_DEV_MODEL` | `gpt-oss-120b` | Senior developer agents model (feature modules, refactoring) |
+| `JUNIOR_DEV_MODEL` | `gpt-oss-20b` | Junior developer agents model (boilerplate, utilities, minor fixes) |
 | `QA_MODEL` | `gpt-oss-20b` | QA agents model (test plans, unit/integration/E2E tests) |
 | **Multi-Provider LLM (Plan 20)** | | |
 | `OPENAI_API_KEY` | — | API key for OpenAI models. When set, used directly instead of OAuth. Falls back to OAuth if empty |
@@ -1002,7 +1083,7 @@ npm run build
 | **Strong Model PR Fixer (Plan 20)** | | |
 | `STRONG_FIXER_MODEL` | — | Model for the strong fixer agent (e.g. `claude-opus-4-20250514`). Empty uses `PRINCIPAL_DEV_MODEL` |
 | `STRONG_FIXER_ENABLED` | `true` | Enable/disable the strong model PR fixer |
-| `STRONG_FIXER_MAX_TOOL_CALLS` | `40` | **Model-turn** ceiling for the strong fixer agent (Plan 22 changed the unit from tool calls to turns) |
+| `STRONG_FIXER_MAX_TOOL_CALLS` | `18` | **Model-turn** ceiling for the strong fixer agent (Plan 22 changed the unit from tool calls to turns) |
 | `PR_EXHAUSTION_STRATEGY` | `escalate-then-fix` | PR exhaustion strategy: `escalate-then-fix`, `fix-only`, or `escalate-only` |
 | `OAUTH_TOKEN_URL` | — | OAuth2 token endpoint URL |
 | `OAUTH_CLIENT_ID` | — | OAuth2 client ID |
@@ -1013,13 +1094,13 @@ npm run build
 | `CASSETTE_MAX_MB` | `25` | Warn when a cassette exceeds this size (MB) |
 | `RUN_MODE` | `human` | Default run mode: `autonomous` or `human` |
 | `MAX_BUGFIX_ITERATIONS` | `3` | Max QA → bugfix → dev cycles |
-| `MAX_CONCURRENT_DEVS` | `3` | Max parallel developer agents |
+| `MAX_CONCURRENT_DEVS` | `2` | Max parallel developer agents |
 | `GENERATED_PROJECTS_DIR` | `./generated-projects` | Where generated codebases are written |
 | `OUTPUTS_DIR` | `./outputs` | Where run logs and artifacts are saved |
 | `DOCKER_HOST` | — | Docker daemon URL (default: local socket) |
 | `SHELL_ALLOW_HOST` | `false` | Allow the Shell tool to execute commands on the host (default: blocked) |
-| `SHELL_DEFAULT_TIMEOUT_S` | `120` | Default shell command timeout (seconds) |
-| `SHELL_MAX_TIMEOUT_S` | `600` | Maximum shell command timeout (seconds) |
+| `SHELL_DEFAULT_TIMEOUT_S` | `60` | Default shell command timeout (seconds) |
+| `SHELL_MAX_TIMEOUT_S` | `900` | Maximum shell command timeout (seconds) |
 | `PLAYWRIGHT_MCP_CMD` | `npx` | Playwright MCP server command |
 | `PLAYWRIGHT_MCP_ARGS` | `@playwright/mcp@latest` | Playwright MCP server arguments |
 | `GITHUB_MODE` | `live` | GitHub mode: `live` (Octokit + PAT) or `local` (offline bare-repo stand-in) |
@@ -1027,20 +1108,20 @@ npm run build
 | `GITHUB_OWNER` | — | GitHub repository owner (org or user) |
 | `GITHUB_REPO` | — | GitHub repository name |
 | `GIT_DEFAULT_BRANCH` | `main` | Default branch name for merging PRs |
-| `MAX_REVIEW_ITERATIONS` | `5` | Max PR review rounds before escalation |
+| `MAX_REVIEW_ITERATIONS` | `3` | Max PR review rounds before escalation |
 | `GITHUB_PROJECT_TOKEN` | — | Separate PAT for project-specific repos (falls back to `GITHUB_TOKEN`) |
 | `GITHUB_PROJECT_OWNER` | — | Owner for project-specific repos (falls back to `GITHUB_OWNER`) |
 | `DASHBOARD_PORT` | `3000` | HTTP/WS server port |
-| `MAX_TOOL_RESULT_CHARS` | `6000` | Max characters any single tool result may contribute to agent history |
+| `MAX_TOOL_RESULT_CHARS` | `10000` | Max characters any single tool result may contribute to agent history |
 | `HISTORY_COMPACTION_ENABLED` | `true` | Enable middleware-based ReAct history compaction |
 | `SANITIZE_STREAM_BLOCKS` | `true` | Strip streaming residue (`*_delta` blocks, id-less `tool_use` blocks) from AIMessage content before every LLM call |
 | `GIT_NETWORK_TIMEOUT_MS` | `120000` | Timeout for git subcommands that hit the network (`fetch`/`push`/`pull`/`clone`/`ls-remote`); local subcommands stay at 30 s |
-| `HISTORY_MAX_CHARS` | `40000` | Hard character ceiling for compacted ReAct history |
+| `HISTORY_MAX_CHARS` | `60000` | Hard character ceiling for compacted ReAct history |
 | `CONVENTIONS_INLINE_DIGEST` | `true` | Inject conventions digest instead of read_file instructions |
 | `DEV_GIT_TOOLS_ENABLED` | `false` | Give dev agents git tools (PR workflow handles git) |
 | `PERSONA_COMPACT` | `true` | Use compact ~2,500-char developer persona |
 | `AGENT_RESPAWN_ENABLED` | `true` | Fresh-context respawn instead of tool poisoning |
-| `AGENT_RESPAWN_MAX_GENERATIONS` | `2` | Max respawn generations per dev task |
+| `AGENT_RESPAWN_MAX_GENERATIONS` | `4` | Max respawn generations per dev task |
 | `RESPONSE_SCHEMA_STRIP_ALL_DESCRIPTIONS` | `true` | Strip all JSON schema descriptions |
 
 See [`.env.example`](.env.example) for the full template.
@@ -1049,18 +1130,17 @@ See [`.env.example`](.env.example) for the full template.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MAX_TOOL_RESULT_CHARS` | `6000` | Max characters any single tool result may contribute to agent history |
+| `MAX_TOOL_RESULT_CHARS` | `10000` | Max characters any single tool result may contribute to agent history |
 | `HISTORY_KEEP_RECENT_TOOL_RESULTS` | `4` | Number of most-recent tool results kept verbatim in ReAct history (lower bound only) |
 | `HISTORY_KEEP_RECENT_TURNS` | `3` | Number of most-recent **model turns** whose tool results are kept verbatim. Primary recent-window control — counting individual results preserved only one turn when a model batches 8–11 calls (Plan 22) |
 | `HISTORY_KEEP_RECENT_WRITE_ARGS` | `2` | Number of most-recent write turns whose tool-call arguments are never elided (Plan 22) |
 | `HISTORY_COMPACTION_ENABLED` | `true` | Enable the middleware that compacts ReAct history before each LLM call |
-| `HISTORY_MAX_CHARS` | `40000` | Hard character ceiling for the assembled ReAct history passed to the LLM |
+| `HISTORY_MAX_CHARS` | `60000` | Hard character ceiling for the assembled ReAct history passed to the LLM |
 | `CONVENTIONS_INLINE_DIGEST` | `true` | Inject a distilled conventions digest instead of agents reading convention files |
 | `DEV_GIT_TOOLS_ENABLED` | `false` | Give developer agents git tools (the PR workflow already commits/pushes) |
 | `PERSONA_COMPACT` | `true` | Use the short persona variant (~2,500 chars vs ~7,000) for developer agents |
 | `AGENT_RESPAWN_ENABLED` | `true` | Respawn a dev agent with summarised handoff instead of poisoning tools at the ceiling |
-| `AGENT_RESPAWN_MAX_GENERATIONS` | `2` | Max respawn generations per logical dev task |
-| `AGENT_RESPAWN_TOKEN_THRESHOLD` | `14000` | Input-token threshold that triggers a respawn |
+| `AGENT_RESPAWN_MAX_GENERATIONS` | `4` | Max respawn generations per logical dev task |
 | `RESPONSE_SCHEMA_STRIP_ALL_DESCRIPTIONS` | `true` | Strip ALL descriptions from injected JSON Schema for maximum token savings |
 | **Tool Budgets (Plan 22)** | | |
 | `TOOL_BUDGETS_JSON` | — | Per-rank read/write/shell/**turn** budgets, merged over the built-in defaults (principal 60/30/14/28, senior 50/25/12/24, junior 40/20/12/20). A turn costs 1 regardless of how many tools the model calls in parallel |
@@ -1087,9 +1167,7 @@ See [`.env.example`](.env.example) for the full template.
 | `REJECT_TRIVIAL_TESTS` | `true` | Reject tests whose subject is not reachable from an entry point (Playwright/Cypress specs are exempt from the import-graph rules — Plan 22) |
 | `GATE_INTEGRITY_DELETE_TRIVIAL_TESTS` | `false` | Delete flagged trivial tests. Default off: only unambiguous findings are `critical`, and every deleted body is archived to `outputs/<run>/deleted-tests/` (Plan 22) |
 | **Architecture Contract (Plan 19 Sub-Plan 05)** | | |
-| `REPO_CONTRACT_MODE` | `enforce` | Enforce the Architect's repo contract: `off` / `warn` / `enforce` |
 | `REPO_CONTRACT_MAX_MODULES` | `60` | Cap on declared modules in the contract |
-| `CONTRACT_STUB_SCAFFOLD` | `true` | Create typed interface stubs for every declared module during scaffolding |
 | `CONTRACT_PROMPT_MAX_CHARS` | `6000` | Char budget for the contract section injected into agent prompts |
 | **PR Workflow / Work Preservation (Plan 19 Sub-Plan 06)** | | |
 | `WORKTREE_SALVAGE_MAX` | `10` | Max failed worktrees retained under `.worktrees-failed/` for salvage |

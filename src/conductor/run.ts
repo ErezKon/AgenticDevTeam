@@ -10,6 +10,7 @@ import { writeStateSnapshot, writeRunManifest } from '../utils/run-snapshot';
 import { appendLedger } from '../utils/run-ledger';
 import { collectRunState, reconstructState, reconcileGitState } from './continue';
 import { rehydrateSingletons } from './continue/singleton-rehydration';
+import { RunContext, runWithContext } from '../utils/run-context';
 import type { RepoTarget, PhaseName } from '../agents/_shared/base-schemas';
 import type { ProjectStateType } from './state';
 
@@ -32,56 +33,37 @@ export interface RunOptions {
     repoTarget?: RepoTarget;
 }
 
+// ─── Crash handling ─────────────────────────────────────────────────────────
+
 /**
- * Start an autonomous run — the full pipeline executes start-to-finish.
- * Returns the final ProjectState snapshot.
+ * Best-effort crash snapshot — saves state and token report when a run fails.
+ *
+ * Extracted to eliminate the 7-copy crash-snapshot block that was duplicated
+ * across runAutonomous, runHumanInTheLoop (initial + 3 resume branches),
+ * and continueRun (autonomous + HITL initial).
  */
-export async function runAutonomous(opts: RunOptions): Promise<ProjectStateType> {
-    log.info(`Starting autonomous run for "${opts.systemName}"...`);
-
-    const conductor = createConductor({ mode: 'autonomous' });
-    const threadId = `run-${opts.systemName}-${Date.now()}`;
-
-    const input: Partial<ProjectStateType> = {
-        input: {
-            systemName: opts.systemName,
-            requirementsText: opts.requirementsText ?? '',
-            requirementsDocPath: opts.requirementsDocPath,
-            mode: 'autonomous',
-            runType: opts.runType ?? 'greenfield',
-            existingProjectPath: opts.existingProjectPath,
-            repoTarget: opts.repoTarget,
-        },
-    };
+export async function handleRunCrash(
+    conductor: ReturnType<typeof createConductor>,
+    config: { configurable: { thread_id: string } },
+    err: any,
+    crashLog: { error: (msg: string) => void },
+    context: string,
+): Promise<never> {
+    tokenTracker.setRunStatus('failed');
+    try { refreshTokenReport(); } catch { /* best-effort */ }
 
     try {
-        const finalState = await conductor.invoke(input, {
-            configurable: { thread_id: threadId },
-        });
+        const snapshot = await conductor.getState(config);
+        const crashState = snapshot?.values as ProjectStateType | undefined;
+        if (crashState?.outputPath) {
+            writeStateSnapshot(crashState.outputPath, crashState);
+            writeRunManifest(crashState.outputPath, crashState, 'crashed');
+        }
+    } catch { /* best-effort */ }
 
-        log.info('Autonomous run complete.');
-        return finalState as ProjectStateType;
-    } catch (err: any) {
-        // Mark the run as failed and flush the token report with whatever
-        // data was collected before the crash — ensures the report exists.
-        tokenTracker.setRunStatus('failed');
-        try { refreshTokenReport(); } catch { /* best-effort */ }
-
-        // Best-effort crash snapshot — outputPath may not exist yet if
-        // the crash happened before intakeNode completed.
-        try {
-            const snapshot = await conductor.getState({ configurable: { thread_id: threadId } });
-            const crashState = snapshot?.values as ProjectStateType | undefined;
-            if (crashState?.outputPath) {
-                writeStateSnapshot(crashState.outputPath, crashState);
-                writeRunManifest(crashState.outputPath, crashState, 'crashed');
-            }
-        } catch { /* best-effort */ }
-
-        log.error(`Autonomous run failed: ${err?.message ?? err}`);
-        if (err?.stack) log.error(err.stack);
-        throw err;
-    }
+    crashLog.error(`${context}: ${err?.message ?? err}`);
+    if (err?.stack) crashLog.error(err.stack);
+    throw err;
 }
 
 // ─── HITL decision type ─────────────────────────────────────────────────────
@@ -113,47 +95,23 @@ export interface RunSession {
     resume: (decision: HitlDecision | boolean, feedback?: string) => Promise<ProjectStateType | null>;
 }
 
-export async function runHumanInTheLoop(opts: RunOptions): Promise<RunSession> {
-    log.info(`Starting HITL run for "${opts.systemName}"...`);
+// ─── Session factory ────────────────────────────────────────────────────────
 
-    const conductor = createConductor({ mode: 'human' });
-    const threadId = `run-${opts.systemName}-${Date.now()}`;
-
-    const input: Partial<ProjectStateType> = {
-        input: {
-            systemName: opts.systemName,
-            requirementsText: opts.requirementsText ?? '',
-            requirementsDocPath: opts.requirementsDocPath,
-            mode: 'human',
-            runType: opts.runType ?? 'greenfield',
-            existingProjectPath: opts.existingProjectPath,
-            repoTarget: opts.repoTarget,
-        },
-    };
-
-    // Start — will pause at the first interrupt point
-    try {
-        await conductor.invoke(input, {
-            configurable: { thread_id: threadId },
-        });
-    } catch (err: any) {
-        tokenTracker.setRunStatus('failed');
-        try { refreshTokenReport(); } catch { /* best-effort */ }
-        try {
-            const snapshot = await conductor.getState({ configurable: { thread_id: threadId } });
-            const crashState = snapshot?.values as ProjectStateType | undefined;
-            if (crashState?.outputPath) {
-                writeStateSnapshot(crashState.outputPath, crashState);
-                writeRunManifest(crashState.outputPath, crashState, 'crashed');
-            }
-        } catch { /* best-effort */ }
-        log.error(`HITL run failed during initial invoke: ${err?.message ?? err}`);
-        if (err?.stack) log.error(err.stack);
-        throw err;
-    }
+/**
+ * Build a RunSession around a conductor + threadId.
+ *
+ * Extracted to eliminate the duplicated getState/resume closures that were
+ * copy-pasted between runHumanInTheLoop() and continueRun() HITL mode.
+ */
+function makeSession(
+    conductor: ReturnType<typeof createConductor>,
+    threadId: string,
+    sessionLog: { info: (msg: string) => void; warn: (msg: string) => void; error: (msg: string) => void },
+): RunSession {
+    const config = { configurable: { thread_id: threadId } };
 
     async function getState(): Promise<ProjectStateType> {
-        const snapshot = await conductor.getState({ configurable: { thread_id: threadId } });
+        const snapshot = await conductor.getState(config);
         return snapshot.values as ProjectStateType;
     }
 
@@ -168,14 +126,12 @@ export async function runHumanInTheLoop(opts: RunOptions): Promise<RunSession> {
 
         const state = await getState();
 
-        const config = { configurable: { thread_id: threadId } };
-
         // ── Enhance ─────────────────────────────────────────────────────
         if (decision === 'enhance') {
             if (!feedback || feedback.trim() === '') {
                 throw new Error('Enhance requires non-empty feedback — an enhance with no feedback is an infinite loop.');
             }
-            log.info(`Phase "${state.phase}" enhance requested with feedback.`);
+            sessionLog.info(`Phase "${state.phase}" enhance requested with feedback.`);
             const approval = {
                 phase: state.phase,
                 decision: 'enhance' as const,
@@ -183,9 +139,6 @@ export async function runHumanInTheLoop(opts: RunOptions): Promise<RunSession> {
                 timestamp: new Date().toISOString(),
             };
             try {
-                // Merge state updates into the checkpoint, then resume from
-                // the interrupt — invoke(null) continues from the checkpoint
-                // instead of re-starting from __start__.
                 await conductor.updateState(config, {
                     approvals: [approval],
                     pendingRerun: state.phase as PhaseName,
@@ -194,24 +147,13 @@ export async function runHumanInTheLoop(opts: RunOptions): Promise<RunSession> {
                 const result = await conductor.invoke(null, config);
                 return result as ProjectStateType;
             } catch (err: any) {
-                tokenTracker.setRunStatus('failed');
-                try { refreshTokenReport(); } catch { /* best-effort */ }
-                try {
-                    const crashState = await getState();
-                    if (crashState?.outputPath) {
-                        writeStateSnapshot(crashState.outputPath, crashState);
-                        writeRunManifest(crashState.outputPath, crashState, 'crashed');
-                    }
-                } catch { /* best-effort */ }
-                log.error(`HITL enhance failed: ${err?.message ?? err}`);
-                if (err?.stack) log.error(err.stack);
-                throw err;
+                return handleRunCrash(conductor, config, err, sessionLog, 'HITL enhance failed');
             }
         }
 
         // ── Deny ────────────────────────────────────────────────────────
         if (decision === 'deny') {
-            log.warn(`Phase "${state.phase}" denied by user. Feedback: ${feedback ?? 'none'}`);
+            sessionLog.warn(`Phase "${state.phase}" denied by user. Feedback: ${feedback ?? 'none'}`);
             tokenTracker.setRunStatus('cancelled');
             const approval = {
                 phase: state.phase,
@@ -227,23 +169,12 @@ export async function runHumanInTheLoop(opts: RunOptions): Promise<RunSession> {
                 const result = await conductor.invoke(null, config);
                 return result as ProjectStateType;
             } catch (err: any) {
-                tokenTracker.setRunStatus('failed');
-                try { refreshTokenReport(); } catch { /* best-effort */ }
-                try {
-                    const crashState = await getState();
-                    if (crashState?.outputPath) {
-                        writeStateSnapshot(crashState.outputPath, crashState);
-                        writeRunManifest(crashState.outputPath, crashState, 'crashed');
-                    }
-                } catch { /* best-effort */ }
-                log.error(`HITL deny failed: ${err?.message ?? err}`);
-                if (err?.stack) log.error(err.stack);
-                throw err;
+                return handleRunCrash(conductor, config, err, sessionLog, 'HITL deny failed');
             }
         }
 
         // ── Approve ─────────────────────────────────────────────────────
-        log.info(`Phase "${state.phase}" approved. Resuming...`);
+        sessionLog.info(`Phase "${state.phase}" approved. Resuming...`);
 
         const approval = {
             phase: state.phase,
@@ -257,130 +188,87 @@ export async function runHumanInTheLoop(opts: RunOptions): Promise<RunSession> {
             const result = await conductor.invoke(null, config);
             return result as ProjectStateType;
         } catch (err: any) {
-            tokenTracker.setRunStatus('failed');
-            try { refreshTokenReport(); } catch { /* best-effort */ }
-            try {
-                const crashState = await getState();
-                if (crashState?.outputPath) {
-                    writeStateSnapshot(crashState.outputPath, crashState);
-                    writeRunManifest(crashState.outputPath, crashState, 'crashed');
-                }
-            } catch { /* best-effort */ }
-            log.error(`HITL resume failed: ${err?.message ?? err}`);
-            if (err?.stack) log.error(err.stack);
-            throw err;
+            return handleRunCrash(conductor, config, err, sessionLog, 'HITL resume failed');
         }
     }
 
     return { threadId, conductor, getState, resume };
 }
 
-// ─── Resume a crashed / interrupted run ─────────────────────────────────────
+// ─── Autonomous run ─────────────────────────────────────────────────────────
 
 /**
- * Resume a run from a saved checkpoint.
- *
- * With `CHECKPOINT_PERSIST=true`, a crashed or interrupted run's checkpoint
- * is persisted to `<outputPath>/checkpoints.json`. This function rebuilds the
- * conductor with the file checkpointer pointing at `outputPath` and resumes
- * from the last completed phase.
+ * Start an autonomous run — the full pipeline executes start-to-finish.
+ * Returns the final ProjectState snapshot.
  */
-export async function resumeRun(
-    threadId: string,
-    outputPath: string,
-    opts?: { mode?: 'autonomous' | 'human' },
-): Promise<RunSession | ProjectStateType> {
-    const { FileCheckpointer } = await import('./file-checkpointer');
-    const checkpointer = new FileCheckpointer(outputPath);
+export async function runAutonomous(opts: RunOptions): Promise<ProjectStateType> {
+    const threadId = `run-${opts.systemName}-${Date.now()}`;
+    const ctx = new RunContext(threadId);
 
-    const resolvedMode = opts?.mode ?? 'human';
-    const conductor = createConductor({
-        mode: resolvedMode,
-        checkpointer,
-        outputPath,
-    });
+    return runWithContext(ctx, async () => {
+        log.info(`Starting autonomous run for "${opts.systemName}"...`);
 
-    log.info(`Resuming run "${threadId}" from ${outputPath}...`);
-
-    if (resolvedMode === 'autonomous') {
-        try {
-            const result = await conductor.invoke(null, {
-                configurable: { thread_id: threadId },
-            });
-            log.info('Resumed autonomous run complete.');
-            return result as ProjectStateType;
-        } catch (err: any) {
-            tokenTracker.setRunStatus('failed');
-            try { refreshTokenReport(); } catch { /* best-effort */ }
-            log.error(`Resumed autonomous run failed: ${err?.message ?? err}`);
-            throw err;
-        }
-    }
-
-    // HITL resume — return a session
-    async function getState(): Promise<ProjectStateType> {
-        const snapshot = await conductor.getState({ configurable: { thread_id: threadId } });
-        return snapshot.values as ProjectStateType;
-    }
-
-    async function resume(decisionOrBool: HitlDecision | boolean, feedback?: string): Promise<ProjectStateType | null> {
-        let decision: HitlDecision;
-        if (typeof decisionOrBool === 'boolean') {
-            decision = decisionOrBool ? 'approve' : 'deny';
-        } else {
-            decision = decisionOrBool;
-        }
-
-        const state = await getState();
+        const conductor = createConductor({ mode: 'autonomous' });
         const config = { configurable: { thread_id: threadId } };
 
-        if (decision === 'enhance') {
-            if (!feedback || feedback.trim() === '') {
-                throw new Error('Enhance requires non-empty feedback.');
-            }
-            const approval = {
-                phase: state.phase,
-                decision: 'enhance' as const,
-                feedback,
-                timestamp: new Date().toISOString(),
-            };
-            await conductor.updateState(config, {
-                approvals: [approval],
-                pendingRerun: state.phase as PhaseName,
-                phaseFeedback: { [state.phase]: [feedback] },
-            });
-            const result = await conductor.invoke(null, config);
-            return result as ProjectStateType;
-        }
-
-        if (decision === 'deny') {
-            tokenTracker.setRunStatus('cancelled');
-            const approval = {
-                phase: state.phase,
-                decision: 'deny' as const,
-                feedback,
-                timestamp: new Date().toISOString(),
-            };
-            await conductor.updateState(config, {
-                approvals: [approval],
-                cancelled: true,
-            });
-            const result = await conductor.invoke(null, config);
-            return result as ProjectStateType;
-        }
-
-        const approval = {
-            phase: state.phase,
-            decision: 'approve' as const,
-            feedback,
-            timestamp: new Date().toISOString(),
+        const input: Partial<ProjectStateType> = {
+            input: {
+                systemName: opts.systemName,
+                requirementsText: opts.requirementsText ?? '',
+                requirementsDocPath: opts.requirementsDocPath,
+                mode: 'autonomous',
+                runType: opts.runType ?? 'greenfield',
+                existingProjectPath: opts.existingProjectPath,
+                repoTarget: opts.repoTarget,
+            },
         };
-        await conductor.updateState(config, { approvals: [approval] });
-        const result = await conductor.invoke(null, config);
-        return result as ProjectStateType;
-    }
 
-    return { threadId, conductor, getState, resume };
+        try {
+            const finalState = await conductor.invoke(input, config);
+
+            log.info('Autonomous run complete.');
+            return finalState as ProjectStateType;
+        } catch (err: any) {
+            // Mark the run as failed and flush the token report with whatever
+            // data was collected before the crash — ensures the report exists.
+            return handleRunCrash(conductor, config, err, log, 'Autonomous run failed');
+        }
+    });
+}
+
+// ─── Human-in-the-loop run ──────────────────────────────────────────────────
+
+export async function runHumanInTheLoop(opts: RunOptions): Promise<RunSession> {
+    const threadId = `run-${opts.systemName}-${Date.now()}`;
+    const ctx = new RunContext(threadId);
+
+    return runWithContext(ctx, async () => {
+        log.info(`Starting HITL run for "${opts.systemName}"...`);
+
+        const conductor = createConductor({ mode: 'human' });
+        const config = { configurable: { thread_id: threadId } };
+
+        const input: Partial<ProjectStateType> = {
+            input: {
+                systemName: opts.systemName,
+                requirementsText: opts.requirementsText ?? '',
+                requirementsDocPath: opts.requirementsDocPath,
+                mode: 'human',
+                runType: opts.runType ?? 'greenfield',
+                existingProjectPath: opts.existingProjectPath,
+                repoTarget: opts.repoTarget,
+            },
+        };
+
+        // Start — will pause at the first interrupt point
+        try {
+            await conductor.invoke(input, config);
+        } catch (err: any) {
+            return handleRunCrash(conductor, config, err, log, 'HITL run failed during initial invoke');
+        }
+
+        return makeSession(conductor, threadId, log);
+    });
 }
 
 // ─── Continue a stopped run (Plan 23, Sub-Plan 04) ──────────────────────────
@@ -410,185 +298,102 @@ export interface ContinueRunOptions {
 export async function continueRun(
     opts: ContinueRunOptions,
 ): Promise<RunSession | ProjectStateType> {
-    const continueLog = getLogger('[ContinueRun]', 177);
-    continueLog.info(`Continuing run from: ${opts.outputPath}`);
+    const threadId = opts.threadId ?? `continue-${Date.now()}`;
+    const ctx = new RunContext(threadId);
 
-    // ── 1. Collect artifacts ─────────────────────────────────────────────
-    const collected = collectRunState(opts.outputPath);
+    return runWithContext(ctx, async () => {
+        const continueLog = getLogger('[ContinueRun]', 177);
+        continueLog.info(`Continuing run from: ${opts.outputPath}`);
 
-    if (!collected.workspaceExists) {
-        throw new Error(
-            `Cannot continue run — workspace directory not found: "${collected.workspacePath || '(unknown)'}". ` +
-            `The generated project must exist on disk to continue.`,
-        );
-    }
+        // ── 1. Collect artifacts ─────────────────────────────────────────────
+        const collected = collectRunState(opts.outputPath);
 
-    // ── 2. Reconstruct state ─────────────────────────────────────────────
-    const { state: reconstructedState, resumePhase, confidence, warnings } = reconstructState(collected);
-
-    continueLog.info(`Reconstruction confidence: ${confidence}`);
-    continueLog.info(`Resume phase: ${resumePhase}`);
-    if (warnings.length > 0) {
-        for (const w of warnings) continueLog.warn(`  Warning: ${w}`);
-    }
-
-    if (confidence === 'minimal') {
-        continueLog.warn(
-            'Only minimal state reconstruction was possible. ' +
-            'The continued run may repeat significant work.',
-        );
-    }
-
-    // ── 3. Rehydrate singletons ──────────────────────────────────────────
-    // These are normally initialised by intakeNode, which will be skipped
-    // during continuation (its idempotency guard detects existing paths).
-    rehydrateSingletons(collected, reconstructedState);
-
-    // ── 3b. Git state reconciliation ─────────────────────────────────────
-    // Verify and fix workspace git state before resuming. This cleans up
-    // stale worktrees, lock files, and branches from the previous run.
-    if (collected.workspaceIsGitRepo) {
-        const reconciliation = reconcileGitState(collected, reconstructedState);
-        if (reconciliation.warnings.length > 0) {
-            for (const w of reconciliation.warnings) continueLog.warn(`  Git: ${w}`);
-        }
-        if (!reconciliation.ok) {
-            continueLog.warn(
-                'Git reconciliation completed with issues. The continued run may encounter git errors.',
+        if (!collected.workspaceExists) {
+            throw new Error(
+                `Cannot continue run — workspace directory not found: "${collected.workspacePath || '(unknown)'}". ` +
+                `The generated project must exist on disk to continue.`,
             );
         }
-    }
 
-    // ── 4. Build the graph and invoke ────────────────────────────────────
-    const resolvedMode = opts.mode ?? 'autonomous';
-    const conductor = createConductor({
-        mode: resolvedMode,
-        outputPath: collected.outputPath,
-    });
-    const threadId = opts.threadId ?? `continue-${Date.now()}`;
-    const config = { configurable: { thread_id: threadId } };
+        // ── 2. Reconstruct state ─────────────────────────────────────────────
+        const { state: reconstructedState, resumePhase, confidence, warnings } = reconstructState(collected);
 
-    // Inject the continuation flags into the state.
-    // Plan 25: clear cancelled and _stopReason from the previous run — the user
-    // is explicitly continuing, so budget/provider stops should not carry over.
-    const initialState: Partial<ProjectStateType> = {
-        ...reconstructedState as Partial<ProjectStateType>,
-        _isContinuation: true,
-        _resumePhase: resumePhase,
-        cancelled: false,
-        _stopReason: null,
-    };
-
-    // Append a ledger entry marking the continuation
-    appendLedger({
-        kind: 'phase',
-        phase: resumePhase,
-        event: 'start',
-    });
-
-    if (resolvedMode === 'autonomous') {
-        try {
-            const finalState = await conductor.invoke(initialState, config);
-            continueLog.info('Continued autonomous run complete.');
-            return finalState as ProjectStateType;
-        } catch (err: any) {
-            tokenTracker.setRunStatus('failed');
-            try { refreshTokenReport(); } catch { /* best-effort */ }
-            try {
-                const snapshot = await conductor.getState(config);
-                const crashState = snapshot?.values as ProjectStateType | undefined;
-                if (crashState?.outputPath) {
-                    writeStateSnapshot(crashState.outputPath, crashState);
-                    writeRunManifest(crashState.outputPath, crashState, 'crashed');
-                }
-            } catch { /* best-effort */ }
-            continueLog.error(`Continued autonomous run failed: ${err?.message ?? err}`);
-            if (err?.stack) continueLog.error(err.stack);
-            throw err;
+        continueLog.info(`Reconstruction confidence: ${confidence}`);
+        continueLog.info(`Resume phase: ${resumePhase}`);
+        if (warnings.length > 0) {
+            for (const w of warnings) continueLog.warn(`  Warning: ${w}`);
         }
-    }
 
-    // ── HITL mode: return a session ──────────────────────────────────────
-    try {
-        await conductor.invoke(initialState, config);
-    } catch (err: any) {
-        tokenTracker.setRunStatus('failed');
-        try { refreshTokenReport(); } catch { /* best-effort */ }
-        try {
-            const snapshot = await conductor.getState(config);
-            const crashState = snapshot?.values as ProjectStateType | undefined;
-            if (crashState?.outputPath) {
-                writeStateSnapshot(crashState.outputPath, crashState);
-                writeRunManifest(crashState.outputPath, crashState, 'crashed');
+        if (confidence === 'minimal') {
+            continueLog.warn(
+                'Only minimal state reconstruction was possible. ' +
+                'The continued run may repeat significant work.',
+            );
+        }
+
+        // ── 3. Rehydrate singletons ──────────────────────────────────────────
+        // These are normally initialised by intakeNode, which will be skipped
+        // during continuation (its idempotency guard detects existing paths).
+        rehydrateSingletons(collected, reconstructedState);
+
+        // ── 3b. Git state reconciliation ─────────────────────────────────────
+        // Verify and fix workspace git state before resuming. This cleans up
+        // stale worktrees, lock files, and branches from the previous run.
+        if (collected.workspaceIsGitRepo) {
+            const reconciliation = reconcileGitState(collected, reconstructedState);
+            if (reconciliation.warnings.length > 0) {
+                for (const w of reconciliation.warnings) continueLog.warn(`  Git: ${w}`);
             }
-        } catch { /* best-effort */ }
-        continueLog.error(`Continued HITL run failed during initial invoke: ${err?.message ?? err}`);
-        if (err?.stack) continueLog.error(err.stack);
-        throw err;
-    }
-
-    async function getState(): Promise<ProjectStateType> {
-        const snapshot = await conductor.getState(config);
-        return snapshot.values as ProjectStateType;
-    }
-
-    async function resume(decisionOrBool: HitlDecision | boolean, feedback?: string): Promise<ProjectStateType | null> {
-        let decision: HitlDecision;
-        if (typeof decisionOrBool === 'boolean') {
-            decision = decisionOrBool ? 'approve' : 'deny';
-        } else {
-            decision = decisionOrBool;
-        }
-
-        const state = await getState();
-
-        if (decision === 'enhance') {
-            if (!feedback || feedback.trim() === '') {
-                throw new Error('Enhance requires non-empty feedback.');
+            if (!reconciliation.ok) {
+                continueLog.warn(
+                    'Git reconciliation completed with issues. The continued run may encounter git errors.',
+                );
             }
-            const approval = {
-                phase: state.phase,
-                decision: 'enhance' as const,
-                feedback,
-                timestamp: new Date().toISOString(),
-            };
-            await conductor.updateState(config, {
-                approvals: [approval],
-                pendingRerun: state.phase as PhaseName,
-                phaseFeedback: { [state.phase]: [feedback] },
-            });
-            const result = await conductor.invoke(null, config);
-            return result as ProjectStateType;
         }
 
-        if (decision === 'deny') {
-            tokenTracker.setRunStatus('cancelled');
-            const approval = {
-                phase: state.phase,
-                decision: 'deny' as const,
-                feedback,
-                timestamp: new Date().toISOString(),
-            };
-            await conductor.updateState(config, {
-                approvals: [approval],
-                cancelled: true,
-            });
-            const result = await conductor.invoke(null, config);
-            return result as ProjectStateType;
-        }
+        // ── 4. Build the graph and invoke ────────────────────────────────────
+        const resolvedMode = opts.mode ?? 'autonomous';
+        const conductor = createConductor({
+            mode: resolvedMode,
+            outputPath: collected.outputPath,
+        });
+        const config = { configurable: { thread_id: threadId } };
 
-        const approval = {
-            phase: state.phase,
-            decision: 'approve' as const,
-            feedback,
-            timestamp: new Date().toISOString(),
+        // Inject the continuation flags into the state.
+        // Plan 25: clear cancelled and _stopReason from the previous run — the user
+        // is explicitly continuing, so budget/provider stops should not carry over.
+        const initialState: Partial<ProjectStateType> = {
+            ...reconstructedState as Partial<ProjectStateType>,
+            _isContinuation: true,
+            _resumePhase: resumePhase,
+            cancelled: false,
+            _stopReason: null,
         };
-        await conductor.updateState(config, { approvals: [approval] });
-        const result = await conductor.invoke(null, config);
-        return result as ProjectStateType;
-    }
 
-    return { threadId, conductor, getState, resume };
+        // Append a ledger entry marking the continuation
+        appendLedger({
+            kind: 'phase',
+            phase: resumePhase,
+            event: 'start',
+        });
+
+        if (resolvedMode === 'autonomous') {
+            try {
+                const finalState = await conductor.invoke(initialState, config);
+                continueLog.info('Continued autonomous run complete.');
+                return finalState as ProjectStateType;
+            } catch (err: any) {
+                return handleRunCrash(conductor, config, err, continueLog, 'Continued autonomous run failed');
+            }
+        }
+
+        // ── HITL mode: return a session ──────────────────────────────────────
+        try {
+            await conductor.invoke(initialState, config);
+        } catch (err: any) {
+            return handleRunCrash(conductor, config, err, continueLog, 'Continued HITL run failed during initial invoke');
+        }
+
+        return makeSession(conductor, threadId, continueLog);
+    });
 }
-
-

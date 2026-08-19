@@ -45,28 +45,38 @@ export interface CumulativeCompactionStats {
 
 // ─── Global stats accumulator ───────────────────────────────────────────────
 
+import { getRunContext, type CompactionStatsAccumulator } from '../../utils/run-context';
+
 let _cumulative = { invocations: 0, totalOriginal: 0, totalCompacted: 0, toolStubs: 0, writeStubs: 0 };
+
+/** Get the active stats accumulator — per-run scoped or module default. */
+function _activeStats(): CompactionStatsAccumulator {
+    const ctx = getRunContext();
+    return ctx?.compactionStats ?? _cumulative;
+}
 
 /** Record a compaction invocation's stats into the global accumulator. */
 export function recordCompaction(stats: CompactionStats): void {
-    _cumulative.invocations++;
-    _cumulative.totalOriginal += stats.originalChars;
-    _cumulative.totalCompacted += stats.compactedChars;
-    _cumulative.toolStubs += stats.toolResultsStubbed;
-    _cumulative.writeStubs += stats.writeArgsStubbed;
+    const cum = _activeStats();
+    cum.invocations++;
+    cum.totalOriginal += stats.originalChars;
+    cum.totalCompacted += stats.compactedChars;
+    cum.toolStubs += stats.toolResultsStubbed;
+    cum.writeStubs += stats.writeArgsStubbed;
 }
 
 /** Get the cumulative compaction stats for the current run. */
 export function getCumulativeCompactionStats(): CumulativeCompactionStats {
-    const saved = _cumulative.totalOriginal - _cumulative.totalCompacted;
+    const cum = _activeStats();
+    const saved = cum.totalOriginal - cum.totalCompacted;
     return {
-        invocations: _cumulative.invocations,
-        totalOriginalChars: _cumulative.totalOriginal,
-        totalCompactedChars: _cumulative.totalCompacted,
-        totalToolResultsStubbed: _cumulative.toolStubs,
-        totalWriteArgsStubbed: _cumulative.writeStubs,
+        invocations: cum.invocations,
+        totalOriginalChars: cum.totalOriginal,
+        totalCompactedChars: cum.totalCompacted,
+        totalToolResultsStubbed: cum.toolStubs,
+        totalWriteArgsStubbed: cum.writeStubs,
         savedChars: saved,
-        savedPct: _cumulative.totalOriginal > 0 ? Math.round((saved / _cumulative.totalOriginal) * 100) : 0,
+        savedPct: cum.totalOriginal > 0 ? Math.round((saved / cum.totalOriginal) * 100) : 0,
     };
 }
 
@@ -85,6 +95,12 @@ export function _resetCompactionStats(): void {
 
 let _compactionMemo: Map<string, string> = new Map();
 let _memoThreadId: string = '';
+
+/** Get the active compaction memo — per-run scoped or module default. */
+function _activeMemo(): Map<string, string> {
+    const ctx = getRunContext();
+    return ctx?.compactionMemo ?? _compactionMemo;
+}
 
 /** Clear the memoisation cache (exposed for testing). */
 export function _resetCompactionMemo(): void {
@@ -132,16 +148,17 @@ function elisionMarker(chars: number, what: string): string {
  * Anthropic cache prefix stays byte-stable across turns.
  */
 function elideBigArgs(args: Record<string, unknown>, memoKey: string): Record<string, unknown> {
+    const memo = _activeMemo();
     const result: Record<string, unknown> = {};
     for (const [key, value] of Object.entries(args)) {
         if (typeof value === 'string' && value.length > ELIDE_ARG_THRESHOLD) {
             const argMemoKey = `${memoKey}::arg::${key}`;
-            const cached = _compactionMemo.get(argMemoKey);
+            const cached = memo.get(argMemoKey);
             if (cached !== undefined) {
                 result[key] = cached;
             } else {
                 const marker = elisionMarker(value.length, `the "${key}" argument`);
-                _compactionMemo.set(argMemoKey, marker);
+                memo.set(argMemoKey, marker);
                 result[key] = marker;
             }
         } else {
@@ -160,7 +177,8 @@ function elideBigArgs(args: Record<string, unknown>, memoKey: string): Record<st
  * stable as the recent window slides.
  */
 function stubToolContent(m: ToolMessage, memoKey: string): string {
-    const cached = _compactionMemo.get(memoKey);
+    const memo = _activeMemo();
+    const cached = memo.get(memoKey);
     if (cached !== undefined) return cached;
 
     const contentLen = typeof m.content === 'string'
@@ -168,7 +186,7 @@ function stubToolContent(m: ToolMessage, memoKey: string): string {
         : JSON.stringify(m.content).length;
     const name = m.name ?? 'unknown_tool';
     const stub = elisionMarker(contentLen, `the ${name} result`);
-    _compactionMemo.set(memoKey, stub);
+    memo.set(memoKey, stub);
     return stub;
 }
 
@@ -332,12 +350,15 @@ export function compactHistory(
     const keepRecentWriteArgs = opts?.keepRecentWriteArgs ?? HISTORY_KEEP_RECENT_WRITE_ARGS;
     const maxChars = opts?.maxChars ?? HISTORY_MAX_CHARS;
 
-    // Plan 24, C1: clear the memoisation cache when the thread changes so
-    // different invocations do not share stale elision markers.
+    // Plan 24, C1 / Sub-Plan 25-14: per-run memo when inside a RunContext
+    // eliminates the single-slot thread race. Module-level fallback retains
+    // the original clear-on-thread-change behavior for CLI mode.
     const threadId = opts?.threadId ?? '';
-    if (threadId && threadId !== _memoThreadId) {
-        _compactionMemo.clear();
-        _memoThreadId = threadId;
+    if (!getRunContext()) {
+        if (threadId && threadId !== _memoThreadId) {
+            _compactionMemo.clear();
+            _memoThreadId = threadId;
+        }
     }
 
     const originalChars = messages.reduce((sum, m) => sum + messageChars(m), 0);
@@ -582,7 +603,6 @@ function identifyDroppableGroups(
         if (isAIMessage(m) && m.tool_calls?.length) {
             const group = [i];
             // Collect the following ToolMessages that match
-            const expectedIds = new Set(m.tool_calls.map(tc => tc.id));
             let j = i + 1;
             while (j < recentStart && isToolMessage(messages[j])) {
                 group.push(j);

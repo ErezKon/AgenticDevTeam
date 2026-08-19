@@ -10,9 +10,6 @@ process.env.LLM_CASSETTE_MODE = 'off';
 process.env.CASSETTE_NAME = '';
 process.env.LLM_CASSETTE_ON_MISS = 'strict';
 
-import * as fs from 'fs';
-import * as path from 'path';
-import * as os from 'os';
 import {
     buildCassetteKey,
     redactHeaders,
@@ -22,7 +19,6 @@ import {
     _resetCassette,
     _loadFromContent,
     cassetteFetch,
-    LLM_CASSETTE_MODE,
 } from '../src/utils/llm-cassette';
 
 // Mock logger to avoid console noise

@@ -11,14 +11,13 @@ import * as path from 'path';
 import * as os from 'os';
 import {
     detectStacks,
-    detectStackRoots,
     GATE_COMMANDS,
     runQualityGates,
     gateReportToTestReport,
     synthesiseGateBugs,
     gateReportToMarkdown,
 } from '../src/conductor/quality-gates';
-import type { StackKind, GateStep, GateReport, GateResult, StackRoot } from '../src/conductor/quality-gates';
+import type { StackKind, GateReport, GateResult } from '../src/conductor/quality-gates';
 
 // Mock logger
 jest.mock('../src/utils/logger', () => ({
@@ -188,33 +187,33 @@ describe('runQualityGates', () => {
     beforeEach(() => { tempDir = makeTempDir(); });
     afterEach(() => { cleanupDir(tempDir); });
 
-    it('runs steps in order and produces results', () => {
+    it('runs steps in order and produces results', async () => {
         fs.writeFileSync(path.join(tempDir, 'package.json'), JSON.stringify({
             scripts: { build: 'tsc', lint: 'eslint', test: 'jest' },
         }));
         const callOrder: string[] = [];
-        const fakeExec = (cmd: string, _opts: { cwd: string; timeout: number }): string => {
+        const fakeExec = async (cmd: string, _opts: { cwd: string; timeout: number }): Promise<string> => {
             if (cmd.startsWith('which ')) return '/usr/bin/npm';
             callOrder.push(cmd);
             return 'ok';
         };
 
-        const report = runQualityGates(tempDir, { exec: fakeExec });
+        const report = await runQualityGates(tempDir, { exec: fakeExec });
         expect(report.stacks).toEqual(['node']);
         expect(report.roots.length).toBeGreaterThanOrEqual(1);
     });
 
-    it('a failing build still runs test but yields passed: false', () => {
+    it('a failing build still runs test but yields passed: false', async () => {
         fs.writeFileSync(path.join(tempDir, 'package.json'), JSON.stringify({
             scripts: { build: 'tsc', test: 'jest' },
         }));
-        const fakeExec = (cmd: string, _opts: { cwd: string; timeout: number }): string => {
+        const fakeExec = async (cmd: string, _opts: { cwd: string; timeout: number }): Promise<string> => {
             if (cmd.startsWith('which ')) return '/usr/bin/npm';
             if (cmd === 'npm run build') throw new Error('build failed');
             return 'ok';
         };
 
-        const report = runQualityGates(tempDir, { exec: fakeExec });
+        const report = await runQualityGates(tempDir, { exec: fakeExec });
         expect(report.passed).toBe(false);
 
         const buildResult = report.results.find(r => r.step === 'build');
@@ -226,57 +225,57 @@ describe('runQualityGates', () => {
         expect(testResult).toBeDefined();
     });
 
-    it('missing tool yields skipped (strict=false in this test)', () => {
+    it('missing tool yields skipped (strict=false in this test)', async () => {
         fs.writeFileSync(path.join(tempDir, 'go.mod'), 'module example.com/foo');
-        const fakeExec = (cmd: string, _opts: { cwd: string; timeout: number }): string => {
+        const fakeExec = async (cmd: string, _opts: { cwd: string; timeout: number }): Promise<string> => {
             if (cmd.startsWith('which ')) throw new Error('not found');
             return 'ok';
         };
 
-        const report = runQualityGates(tempDir, { exec: fakeExec });
+        const report = await runQualityGates(tempDir, { exec: fakeExec });
         // All results should be skipped
         for (const r of report.results) {
             expect(r.skipped).toBe(true);
         }
     });
 
-    it('returns empty report when no stacks detected', () => {
+    it('returns empty report when no stacks detected', async () => {
         fs.writeFileSync(path.join(tempDir, 'README.md'), '# Hi');
-        const report = runQualityGates(tempDir);
+        const report = await runQualityGates(tempDir);
         expect(report.stacks).toEqual([]);
         expect(report.results).toEqual([]);
     });
 
-    it('handles polyglot repo (node + go)', () => {
+    it('handles polyglot repo (node + go)', async () => {
         fs.writeFileSync(path.join(tempDir, 'package.json'), JSON.stringify({
             scripts: { build: 'tsc', test: 'jest' },
         }));
         fs.writeFileSync(path.join(tempDir, 'go.mod'), 'module example.com/foo');
         const executedCommands: string[] = [];
-        const fakeExec = (cmd: string, _opts: { cwd: string; timeout: number }): string => {
+        const fakeExec = async (cmd: string, _opts: { cwd: string; timeout: number }): Promise<string> => {
             if (cmd.startsWith('which ')) return '/usr/bin/tool';
             executedCommands.push(cmd);
             return 'ok';
         };
 
-        const report = runQualityGates(tempDir, { exec: fakeExec });
+        const report = await runQualityGates(tempDir, { exec: fakeExec });
         expect(report.stacks).toContain('node');
         expect(report.stacks).toContain('go');
         // Should have results from both stacks
         expect(report.results.length).toBeGreaterThan(0);
     });
 
-    it('truncates output to 2000 chars', () => {
+    it('truncates output to 2000 chars', async () => {
         fs.writeFileSync(path.join(tempDir, 'package.json'), JSON.stringify({
             scripts: { build: 'tsc', test: 'jest' },
         }));
         const longOutput = 'x'.repeat(5000);
-        const fakeExec = (cmd: string, _opts: { cwd: string; timeout: number }): string => {
+        const fakeExec = async (cmd: string, _opts: { cwd: string; timeout: number }): Promise<string> => {
             if (cmd.startsWith('which ')) return '/usr/bin/npm';
             return longOutput;
         };
 
-        const report = runQualityGates(tempDir, { exec: fakeExec });
+        const report = await runQualityGates(tempDir, { exec: fakeExec });
         for (const r of report.results.filter(r => !r.skipped && r.mode !== 'absent')) {
             expect(r.output.length).toBeLessThanOrEqual(2000);
         }

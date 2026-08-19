@@ -22,7 +22,6 @@ import {
     NO_OP_SCRIPT_RE,
     PROTECTED_CONFIG_GLOBS,
     type ConfigBaseline,
-    type TamperFinding,
 } from '../src/conductor/gate-integrity';
 import { createWorkspaceTools } from '../src/tools/fs/workspace-tools';
 import { isDeniedCommand } from '../src/tools/shell/shell-tools';

@@ -3,6 +3,7 @@
  * human-readable codebase-analysis.md file.
  */
 import type { CodebaseAnalysis } from '../agents/_shared/base-schemas';
+import { mdTable } from '../utils/markdown-table';
 
 /**
  * Render a CodebaseAnalysis object into a structured Markdown string.
@@ -42,11 +43,10 @@ export function renderCodebaseAnalysis(analysis: CodebaseAnalysis): string {
         }
         sections.push('');
         if (mod.files.length > 0) {
-            sections.push(`| File | Type | Language | Summary |`);
-            sections.push(`|------|------|----------|---------|`);
-            for (const f of mod.files) {
-                sections.push(`| \`${f.path}\` | ${f.type} | ${f.language} | ${f.summary} |`);
-            }
+            sections.push(mdTable(
+                ['File', 'Type', 'Language', 'Summary'],
+                mod.files.map(f => [`\`${f.path}\``, f.type, f.language, f.summary]),
+            ));
             sections.push('');
         }
     }

@@ -5,7 +5,6 @@
  */
 import Dockerode from 'dockerode';
 import * as path from 'path';
-import * as fs from 'fs';
 import { DOCKER_HOST } from '../config';
 import { getLogger } from '../utils/logger';
 
@@ -67,7 +66,7 @@ export async function buildImage(
             const chunks: string[] = [];
             docker.modem.followProgress(
                 stream,
-                (err: any, output: any) => {
+                (err: any, _output: any) => {
                     if (err) reject(err);
                     else resolve(chunks.join(''));
                 },

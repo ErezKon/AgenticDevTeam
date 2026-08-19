@@ -1,10 +1,13 @@
-import { Component, OnInit, OnDestroy, ElementRef, ViewChild } from '@angular/core';
+import { Component, OnInit, OnDestroy, ElementRef, ViewChild, ChangeDetectionStrategy, ChangeDetectorRef } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { ActivatedRoute, RouterLink } from '@angular/router';
 import { Subscription } from 'rxjs';
 import { ApiService, WsMessage } from '../../services/api.service';
 import { MarkdownViewerComponent } from '../../components/markdown-viewer/markdown-viewer.component';
+import { EventLogComponent } from '../../components/event-log/event-log.component';
+import { FileChangesTableComponent } from '../../components/file-changes-table/file-changes-table.component';
+import { PrBadgeComponent } from '../../components/pr-badge/pr-badge.component';
 
 interface PhaseStep {
   id: string;
@@ -29,9 +32,10 @@ const PIPELINE_PHASES: PhaseStep[] = [
 @Component({
   selector: 'app-run-session',
   standalone: true,
-  imports: [CommonModule, FormsModule, RouterLink, MarkdownViewerComponent],
+  imports: [CommonModule, FormsModule, RouterLink, MarkdownViewerComponent, EventLogComponent, FileChangesTableComponent, PrBadgeComponent],
   templateUrl: './run-session.component.html',
   styleUrls: ['./run-session.component.scss'],
+  changeDetection: ChangeDetectionStrategy.OnPush,
 })
 export class RunSessionComponent implements OnInit, OnDestroy {
   @ViewChild('transcriptContainer') transcriptContainer?: ElementRef;
@@ -56,9 +60,15 @@ export class RunSessionComponent implements OnInit, OnDestroy {
   budgetLevel = 'ok';
   budgetUtilisation = 0;
 
+  // Precomputed fields (Plan 25-11: avoid getter recalculation on every CD cycle)
+  visiblePhases: PhaseStep[] = [];
+  transcriptMessages: any[] = [];
+  recentEvents: WsMessage[] = [];
+  prettyState = '';
+
   private sub?: Subscription;
 
-  constructor(private api: ApiService, private route: ActivatedRoute) {}
+  constructor(private api: ApiService, private route: ActivatedRoute, private cdr: ChangeDetectorRef) {}
 
   ngOnInit() {
     this.threadId = this.route.snapshot.paramMap.get('id') ?? '';
@@ -77,12 +87,14 @@ export class RunSessionComponent implements OnInit, OnDestroy {
 
       this.events.push(msg);
       if (this.events.length > 200) this.events.splice(0, this.events.length - 200);
+      this.recomputeRecentEvents();
 
       if (msg.event === 'hitl:waiting' || msg.event === 'run:phase-complete') {
         this.refreshState();
       }
       if (msg.event === 'phase:start' && data.phase) {
         this.phase = data.phase;
+        this.recomputeVisiblePhases();
       }
       if (msg.event === 'tokens:update') {
         this.totalTokens = data.totalTokens ?? this.totalTokens;
@@ -93,6 +105,7 @@ export class RunSessionComponent implements OnInit, OnDestroy {
         this.budgetUtilisation = data.utilisation ?? 0;
       }
 
+      this.cdr.markForCheck();
       this.scrollTranscript();
     });
   }
@@ -115,14 +128,21 @@ export class RunSessionComponent implements OnInit, OnDestroy {
           );
         }
 
+        // Recompute precomputed fields (Plan 25-11)
+        this.recomputeVisiblePhases();
+        this.recomputeTranscript();
+        this.prettyState = this.formatJson(res);
+
         // Auto-select the best tab for the current phase
         this.autoSelectTab();
 
         // Load artifacts with content
         this.loadArtifacts();
+        this.cdr.markForCheck();
       },
       error: (err) => {
         this.error = err?.error?.error ?? err.message ?? 'Failed to load run state';
+        this.cdr.markForCheck();
       },
     });
   }
@@ -135,6 +155,7 @@ export class RunSessionComponent implements OnInit, OnDestroy {
         if (artifacts.length > 0) {
           this.currentArtifact = artifacts[artifacts.length - 1];
         }
+        this.cdr.markForCheck();
       },
       error: () => { /* artifacts may not exist yet */ },
     });
@@ -195,9 +216,10 @@ export class RunSessionComponent implements OnInit, OnDestroy {
 
   // ── Pipeline timeline helpers ──────────────────────────────────────────
 
-  get visiblePhases(): PhaseStep[] {
+  /** Recompute visible phases when state or phase changes (Plan 25-11). */
+  private recomputeVisiblePhases(): void {
     const isGreenfield = this.state?.input?.runType === 'greenfield';
-    return PIPELINE_PHASES.filter(p => !(p.maintainOnly && isGreenfield));
+    this.visiblePhases = PIPELINE_PHASES.filter(p => !(p.maintainOnly && isGreenfield));
   }
 
   phaseStatus(step: PhaseStep): 'completed' | 'current' | 'pending' {
@@ -255,8 +277,14 @@ export class RunSessionComponent implements OnInit, OnDestroy {
 
   // ── Transcript helpers ─────────────────────────────────────────────────
 
-  get transcriptMessages(): any[] {
-    return (this.state?.transcript ?? []).slice(-20);
+  /** Recompute transcript messages when state changes (Plan 25-11). */
+  private recomputeTranscript(): void {
+    this.transcriptMessages = (this.state?.transcript ?? []).slice(-20);
+  }
+
+  /** Recompute recent events slice (Plan 25-11). */
+  private recomputeRecentEvents(): void {
+    this.recentEvents = this.events.slice().reverse().slice(0, 50);
   }
 
   private scrollTranscript() {
@@ -268,8 +296,33 @@ export class RunSessionComponent implements OnInit, OnDestroy {
 
   // ── Formatting helpers ─────────────────────────────────────────────────
 
+  /** Format JSON once and cache in prettyState (Plan 25-11). */
+  private formatJson(obj: any): string {
+    try { return JSON.stringify(obj, null, 2); } catch { return String(obj); }
+  }
+
+  /** Kept for one-off template usage where precompute isn't practical. */
   prettyJson(obj: any): string {
     try { return JSON.stringify(obj, null, 2); } catch { return String(obj); }
+  }
+
+  // ── trackBy functions (Plan 25-11) ─────────────────────────────────────
+  trackByPhase(_i: number, step: PhaseStep): string { return step.id; }
+  trackByTab(_i: number, tab: { id: string }): string { return tab.id; }
+  trackByIndex(i: number): number { return i; }
+  trackByFilePath(_i: number, item: any): string { return item.filePath ?? _i; }
+  trackByEvent(_i: number, msg: WsMessage): string | number { return msg.timestamp ?? _i; }
+  trackById(_i: number, item: any): string { return item.id ?? _i; }
+
+  acceptanceStatusClass(): string {
+    const status = this.state?.acceptance?.status;
+    switch (status) {
+      case 'accepted': return 'status-ok';
+      case 'partial': return 'status-partial';
+      case 'inconclusive': return 'status-inconclusive';
+      case 'failed': return 'status-failed';
+      default: return '';
+    }
   }
 
   budgetLevelClass(): string {
@@ -281,15 +334,4 @@ export class RunSessionComponent implements OnInit, OnDestroy {
     }
   }
 
-  eventBadgeClass(eventType: string): string {
-    if (eventType.startsWith('phase:')) return 'badge-purple';
-    if (eventType.startsWith('agent:')) return 'badge-blue';
-    if (eventType.startsWith('pr:')) return 'badge-green';
-    if (eventType.startsWith('gate:')) return 'badge-yellow';
-    if (eventType.startsWith('budget:')) return 'badge-red';
-    if (eventType.startsWith('tokens:')) return 'badge-cyan';
-    if (eventType.startsWith('hitl:')) return 'badge-purple';
-    if (eventType.startsWith('run:')) return 'badge-green';
-    return 'badge-blue';
-  }
 }

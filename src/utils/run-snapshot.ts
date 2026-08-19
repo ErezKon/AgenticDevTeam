@@ -7,6 +7,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { getLogger } from './logger';
+import { writeOutputFile } from './artifact-writer';
 import { tokenTracker } from './token-tracker';
 import { getBudgetStatus } from './run-budget';
 import { getRecentEvents, type RunEvent } from './event-bus';
@@ -43,19 +44,49 @@ export function redactState(state: any): any {
  * Returns the path written, or null on failure.
  */
 export function writeStateSnapshot(outputPath: string, state: any): string | null {
-    try {
-        const dest = path.join(outputPath, 'state.json');
-        const redacted = redactState(state);
-        fs.writeFileSync(dest, JSON.stringify(redacted, null, 2), 'utf-8');
+    const redacted = redactState(state);
+    const dest = writeOutputFile(outputPath, 'state.json', JSON.stringify(redacted, null, 2));
+    if (dest) {
         log.info(`State snapshot written: ${dest}`);
-        return dest;
-    } catch (err: any) {
-        log.warn(`Failed to write state snapshot: ${err?.message ?? err}`);
-        return null;
     }
+    return dest;
 }
 
 // ─── Periodic phase snapshot (Plan 25) ──────────────────────────────────────
+
+/**
+ * Minimum interval between full state snapshots (Plan 25-11).
+ * Prevents excessive serialization when multiple phases fire in quick succession.
+ */
+const SNAPSHOT_MIN_INTERVAL_MS = 30_000; // 30 seconds
+
+import { getRunContext, type RunSnapshotState } from './run-context';
+
+/** Timestamp of the last successfully written snapshot. */
+let _lastSnapshotWrittenAt = 0;
+
+/** Pending debounced snapshot timer (Plan 25-11). */
+let _snapshotTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** Get active snapshot debounce state — per-run scoped or module default. */
+function _activeSnapshot(): { lastWrittenAt: number; setLastWrittenAt: (t: number) => void; timer: ReturnType<typeof setTimeout> | null; setTimer: (t: ReturnType<typeof setTimeout> | null) => void } {
+    const ctx = getRunContext();
+    if (ctx) {
+        const s = ctx.snapshot as RunSnapshotState;
+        return {
+            get lastWrittenAt() { return s.lastSnapshotWrittenAt; },
+            setLastWrittenAt(t: number) { s.lastSnapshotWrittenAt = t; },
+            get timer() { return s.snapshotTimer; },
+            setTimer(t: ReturnType<typeof setTimeout> | null) { s.snapshotTimer = t; },
+        };
+    }
+    return {
+        get lastWrittenAt() { return _lastSnapshotWrittenAt; },
+        setLastWrittenAt(t: number) { _lastSnapshotWrittenAt = t; },
+        get timer() { return _snapshotTimer; },
+        setTimer(t: ReturnType<typeof setTimeout> | null) { _snapshotTimer = t; },
+    };
+}
 
 /**
  * Write a state snapshot at the start of a phase — captures the full
@@ -64,6 +95,10 @@ export function writeStateSnapshot(outputPath: string, state: any): string | nul
  *
  * Also writes a lightweight `latest-phase.json` marker so the continue-run
  * state collector can quickly determine the last completed phase.
+ *
+ * Plan 25-11: debounced — skips the expensive full-state serialization if
+ * the last write was less than SNAPSHOT_MIN_INTERVAL_MS ago. The lightweight
+ * latest-phase.json marker is always written immediately.
  */
 export function writePeriodicSnapshot(
     outputPath: string | undefined,
@@ -71,19 +106,32 @@ export function writePeriodicSnapshot(
     currentPhase: string,
 ): void {
     if (!outputPath) return;
-    try {
-        // Write the full state snapshot (overwrites previous)
+
+    // Always write the lightweight marker immediately
+    const marker = {
+        phase: currentPhase,
+        timestamp: new Date().toISOString(),
+        reason: 'periodic',
+    };
+    writeOutputFile(outputPath, 'latest-phase.json', JSON.stringify(marker, null, 2));
+
+    // Debounce the expensive full state snapshot (Plan 25-11)
+    const snap = _activeSnapshot();
+    const now = Date.now();
+    const elapsed = now - snap.lastWrittenAt;
+    if (elapsed >= SNAPSHOT_MIN_INTERVAL_MS) {
+        // Enough time has passed — write immediately
         writeStateSnapshot(outputPath, state);
-        // Write a lightweight marker with the phase and timestamp
-        const marker = {
-            phase: currentPhase,
-            timestamp: new Date().toISOString(),
-            reason: 'periodic',
-        };
-        const markerPath = path.join(outputPath, 'latest-phase.json');
-        fs.writeFileSync(markerPath, JSON.stringify(marker, null, 2), 'utf-8');
-    } catch (err: any) {
-        log.warn(`Periodic snapshot failed (non-fatal): ${err?.message ?? err}`);
+        snap.setLastWrittenAt(now);
+        if (snap.timer) { clearTimeout(snap.timer); snap.setTimer(null); }
+    } else if (!snap.timer) {
+        // Schedule a deferred write so data is not lost
+        const delay = SNAPSHOT_MIN_INTERVAL_MS - elapsed;
+        snap.setTimer(setTimeout(() => {
+            snap.setTimer(null);
+            writeStateSnapshot(outputPath, state);
+            snap.setLastWrittenAt(Date.now());
+        }, delay));
     }
 }
 
@@ -443,9 +491,10 @@ export function writeRunManifest(
             });
         }
 
-        const dest = path.join(outputPath, 'run-manifest.json');
-        fs.writeFileSync(dest, JSON.stringify(manifest, null, 2), 'utf-8');
-        log.info(`Run manifest written: ${dest}`);
+        const dest = writeOutputFile(outputPath, 'run-manifest.json', JSON.stringify(manifest, null, 2));
+        if (dest) {
+            log.info(`Run manifest written: ${dest}`);
+        }
         return dest;
     } catch (err: any) {
         log.warn(`Failed to write run manifest: ${err?.message ?? err}`);

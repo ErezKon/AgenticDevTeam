@@ -28,10 +28,10 @@ jest.mock('@octokit/rest', () => ({
     })),
 }));
 
-const mockExecSync = jest.fn().mockReturnValue(Buffer.from(''));
+const mockExecFileSync = jest.fn().mockReturnValue(Buffer.from(''));
 
 jest.mock('child_process', () => ({
-    execSync: (...args: any[]) => mockExecSync(...args),
+    execFileSync: (...args: any[]) => mockExecFileSync(...args),
 }));
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -39,8 +39,8 @@ jest.mock('child_process', () => ({
 beforeEach(() => {
     jest.clearAllMocks();
     // Default: git diff --cached --quiet throws (meaning there are staged changes)
-    mockExecSync.mockImplementation((cmd: string) => {
-        if (typeof cmd === 'string' && cmd.includes('diff --cached --quiet')) {
+    mockExecFileSync.mockImplementation((_bin: string, args: string[]) => {
+        if (Array.isArray(args) && args.includes('--quiet')) {
             throw new Error('changes exist');
         }
         return Buffer.from('');
@@ -180,44 +180,64 @@ describe('initializeRepoLocally', () => {
             'my-token',
         );
 
-        const calls = mockExecSync.mock.calls.map(
-            (c: any[]) => c[0],
+        // execFileSync is called as ('git', argsArray, opts)
+        const calls = mockExecFileSync.mock.calls.map(
+            (c: any[]) => c[1], // args array
         );
 
         expect(calls).toEqual(expect.arrayContaining([
-            'git init -b main',
-            expect.stringContaining('git config user.name'),
-            expect.stringContaining('git config user.email'),
-            expect.stringContaining('git remote add origin https://x-access-token:my-token@github.com/owner/repo.git'),
-            'git add -A',
-            expect.stringContaining('git diff --cached --quiet'),
-            'git commit -m "Initial commit"',
+            ['init', '-b', 'main'],
+            expect.arrayContaining(['config', 'user.name']),
+            expect.arrayContaining(['config', 'user.email']),
+            ['remote', 'add', 'origin', 'https://github.com/owner/repo.git'],
+            ['add', '-A'],
+            ['diff', '--cached', '--quiet'],
+            ['commit', '-m', 'Initial commit'],
         ]));
 
+        // Token should NOT be in the remote URL — it's set via http.extraHeader config
+        const remoteAddCall = mockExecFileSync.mock.calls.find(
+            (c: any[]) => Array.isArray(c[1]) && c[1].includes('remote'),
+        );
+        const remoteArgs = remoteAddCall?.[1] ?? [];
+        expect(remoteArgs.join(' ')).not.toContain('x-access-token');
+
+        // Verify http.extraHeader config was set for the token
+        const configCall = mockExecFileSync.mock.calls.find(
+            (c: any[]) => Array.isArray(c[1]) && c[1].some((a: string) => a.includes('extraHeader')),
+        );
+        expect(configCall).toBeTruthy();
+
         // Verify CWD is correct for all calls
-        for (const call of mockExecSync.mock.calls) {
-            expect(call[1]).toEqual(expect.objectContaining({ cwd: '/tmp/test-workspace' }));
+        for (const call of mockExecFileSync.mock.calls) {
+            expect(call[2]).toEqual(expect.objectContaining({ cwd: '/tmp/test-workspace' }));
         }
     });
 
     it('creates empty commit when no staged changes', () => {
         // Override: diff --cached --quiet succeeds (no changes)
-        mockExecSync.mockImplementation((cmd: string) => {
+        mockExecFileSync.mockImplementation(() => {
             return Buffer.from('');
         });
 
         initializeRepoLocally('/tmp/empty', 'https://github.com/o/r.git');
 
-        const calls = mockExecSync.mock.calls.map((c: any[]) => c[0]);
-        expect(calls).toContain('git commit --allow-empty -m "Initial commit"');
+        const calls = mockExecFileSync.mock.calls.map((c: any[]) => c[1]);
+        expect(calls).toContainEqual(['commit', '--allow-empty', '-m', 'Initial commit']);
     });
 
     it('uses remote URL without token when token is not provided', () => {
         initializeRepoLocally('/tmp/ws', 'https://github.com/o/r.git', 'main');
 
-        const remoteCall = mockExecSync.mock.calls.find(
-            (c: any[]) => typeof c[0] === 'string' && c[0].includes('remote add'),
+        const remoteCall = mockExecFileSync.mock.calls.find(
+            (c: any[]) => Array.isArray(c[1]) && c[1].includes('remote'),
         );
-        expect(remoteCall?.[0]).toBe('git remote add origin https://github.com/o/r.git');
+        expect(remoteCall?.[1]).toEqual(['remote', 'add', 'origin', 'https://github.com/o/r.git']);
+
+        // No extraHeader config call should exist without a token
+        const configCalls = mockExecFileSync.mock.calls.filter(
+            (c: any[]) => Array.isArray(c[1]) && c[1].some((a: string) => typeof a === 'string' && a.includes('extraHeader')),
+        );
+        expect(configCalls).toHaveLength(0);
     });
 });

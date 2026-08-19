@@ -233,7 +233,11 @@ export function resolveWorkspacePath(workspaceRoot: string, relativePath: string
         }
     }
     const resolved = path.resolve(workspaceRoot, sanitized);
-    if (!resolved.startsWith(path.resolve(workspaceRoot))) {
+    const root = path.resolve(workspaceRoot);
+    // Use path.relative instead of prefix check — prefix check is vulnerable:
+    // "/gen/app" accepts "/gen/app-evil/x" because "app-evil" starts with "app".
+    const rel = path.relative(root, resolved);
+    if (rel.startsWith('..') || path.isAbsolute(rel)) {
         throw new Error(`Path escape detected: ${relativePath} resolves outside workspace`);
     }
     return resolved;

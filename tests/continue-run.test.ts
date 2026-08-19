@@ -53,7 +53,6 @@ import {
 
 import {
     reconstructState,
-    type ReconstructedState,
 } from '../src/conductor/continue/state-reconstructor';
 
 import { readLedger } from '../src/utils/run-ledger';
@@ -108,7 +107,6 @@ function makeStateSnapshot(overrides: Record<string, any> = {}): Record<string, 
         devopsPlan: null,
         runningContainers: [],
         pullRequests: [],
-        branchAssignments: [],
         approvals: [],
         pendingRerun: null,
         phaseFeedback: {},
@@ -116,7 +114,6 @@ function makeStateSnapshot(overrides: Record<string, any> = {}): Record<string, 
         artifacts: [],
         transcript: [],
         tokenUsage: [],
-        configBaseline: null,
         acceptance: null,
         latestGateReport: null,
         unrecoverable: null,
@@ -124,7 +121,6 @@ function makeStateSnapshot(overrides: Record<string, any> = {}): Record<string, 
         dispatchRounds: [],
         attemptedBugIds: [],
         bugAttempts: {},
-        outputIntegrity: [],
         planViolations: [],
         repoContract: null,
         completionEvidence: [],
@@ -809,118 +805,33 @@ describe('Phase Resolver', () => {
         };
     }
 
-    it('resumes from architect when only intake completed', () => {
-        const collected = makeCollected(
-            { phase: 'architect' },
-            ['intake'],
-        );
+    // Linear phase progression — each row: [resumePhase, stateOverrides, completedPhases]
+    const PIPELINE_PHASES = ['intake', 'architect', 'product-manager', 'dba', 'team-leader', 'development', 'qa', 'bugfix-triage'];
 
-        const result = reconstructState(collected);
-        expect(result.resumePhase).toBe('architect');
-    });
-
-    it('resumes from product-manager when architect completed', () => {
-        const collected = makeCollected(
-            {
-                phase: 'product-manager',
-                architecture: { style: 'monolith', components: [] },
-                epics: [{ id: 'E1', title: 'E1' }],
-            },
-            ['intake', 'architect'],
-        );
-
-        const result = reconstructState(collected);
-        expect(result.resumePhase).toBe('product-manager');
-    });
-
-    it('resumes from dba when product-manager completed', () => {
-        const collected = makeCollected(
-            {
-                phase: 'dba',
-                architecture: { style: 'monolith', components: [] },
-                epics: [{ id: 'E1' }],
-                userStories: [{ id: 'US-001' }],
-                tasks: [{ id: 'T-001' }],
-            },
-            ['intake', 'architect', 'product-manager'],
-        );
-
-        const result = reconstructState(collected);
-        expect(result.resumePhase).toBe('dba');
-    });
-
-    it('resumes from team-leader when dba completed', () => {
-        const collected = makeCollected(
-            {
-                phase: 'team-leader',
-                architecture: { style: 'monolith', components: [] },
-                epics: [{ id: 'E1' }],
-                userStories: [{ id: 'US-001' }],
-                tasks: [{ id: 'T-001' }],
-                dbDesign: { entities: [] },
-            },
-            ['intake', 'architect', 'product-manager', 'dba'],
-        );
-
-        const result = reconstructState(collected);
-        expect(result.resumePhase).toBe('team-leader');
-    });
-
-    it('resumes from development when team-leader completed', () => {
-        const collected = makeCollected(
-            {
-                phase: 'development',
-                architecture: { style: 'monolith', components: [] },
-                epics: [{ id: 'E1' }],
-                userStories: [{ id: 'US-001' }],
-                tasks: [{ id: 'T-001' }],
-                assignments: [{ id: 'A-001', devAgentId: 'junior-react' }],
-            },
-            ['intake', 'architect', 'product-manager', 'dba', 'team-leader'],
-        );
-
-        const result = reconstructState(collected);
-        expect(result.resumePhase).toBe('development');
-    });
-
-    it('resumes from qa when development completed', () => {
-        const collected = makeCollected(
-            {
-                phase: 'qa',
-                architecture: { style: 'monolith', components: [] },
-                epics: [{ id: 'E1' }],
-                userStories: [{ id: 'US-001' }],
-                tasks: [{ id: 'T-001' }],
-                assignments: [{ id: 'A-001' }],
-                fileChanges: [{ path: 'src/app.ts', action: 'create' }],
-                pullRequests: [{ branchName: 'feature/a', status: 'merged' }],
-            },
-            ['intake', 'architect', 'product-manager', 'dba', 'team-leader', 'development'],
-        );
-
-        const result = reconstructState(collected);
-        expect(result.resumePhase).toBe('qa');
-    });
-
-    it('resumes from devops when qa completed', () => {
-        const collected = makeCollected(
-            {
-                phase: 'devops',
-                architecture: { style: 'monolith', components: [] },
-                epics: [{ id: 'E1' }],
-                userStories: [{ id: 'US-001' }],
-                tasks: [{ id: 'T-001' }],
-                assignments: [{ id: 'A-001' }],
-                fileChanges: [{ path: 'src/app.ts', action: 'create' }],
-                pullRequests: [{ branchName: 'feature/a', status: 'merged' }],
-                testReports: [{ type: 'unit', status: 'pass' }],
-            },
-            ['intake', 'architect', 'product-manager', 'dba', 'team-leader', 'development', 'qa', 'bugfix-triage'],
-        );
-
-        const result = reconstructState(collected);
-        expect(result.resumePhase).toBe('devops');
-    });
+    it.each([
+        ['architect',        {},                                                                                                                                   ['intake']],
+        ['product-manager',  { architecture: { style: 'monolith', components: [] }, epics: [{ id: 'E1', title: 'E1' }] },                                         ['intake', 'architect']],
+        ['dba',              { architecture: { style: 'monolith', components: [] }, epics: [{ id: 'E1' }], userStories: [{ id: 'US-001' }], tasks: [{ id: 'T-001' }] },
+                                                                                                                                                                   ['intake', 'architect', 'product-manager']],
+        ['team-leader',      { architecture: { style: 'monolith', components: [] }, epics: [{ id: 'E1' }], userStories: [{ id: 'US-001' }], tasks: [{ id: 'T-001' }], dbDesign: { entities: [] } },
+                                                                                                                                                                   ['intake', 'architect', 'product-manager', 'dba']],
+        ['development',      { architecture: { style: 'monolith', components: [] }, epics: [{ id: 'E1' }], userStories: [{ id: 'US-001' }], tasks: [{ id: 'T-001' }], assignments: [{ id: 'A-001', devAgentId: 'junior-react' }] },
+                                                                                                                                                                   ['intake', 'architect', 'product-manager', 'dba', 'team-leader']],
+        ['qa',               { architecture: { style: 'monolith', components: [] }, epics: [{ id: 'E1' }], userStories: [{ id: 'US-001' }], tasks: [{ id: 'T-001' }], assignments: [{ id: 'A-001' }], fileChanges: [{ path: 'src/app.ts', action: 'create' }], pullRequests: [{ branchName: 'feature/a', status: 'merged' }] },
+                                                                                                                                                                   ['intake', 'architect', 'product-manager', 'dba', 'team-leader', 'development']],
+        ['devops',           { architecture: { style: 'monolith', components: [] }, epics: [{ id: 'E1' }], userStories: [{ id: 'US-001' }], tasks: [{ id: 'T-001' }], assignments: [{ id: 'A-001' }], fileChanges: [{ path: 'src/app.ts', action: 'create' }], pullRequests: [{ branchName: 'feature/a', status: 'merged' }], testReports: [{ type: 'unit', status: 'pass' }] },
+                                                                                                                                                                   PIPELINE_PHASES],
+    ] as [string, Record<string, any>, string[]][])(
+        'resumes from %s after completing %j',
+        (expectedPhase, stateOverrides, completedPhases) => {
+            const collected = makeCollected(
+                { phase: expectedPhase, ...stateOverrides },
+                completedPhases,
+            );
+            const result = reconstructState(collected);
+            expect(result.resumePhase).toBe(expectedPhase);
+        },
+    );
 
     it('handles partial development — counts pending assignments', () => {
         const collected = makeCollected(

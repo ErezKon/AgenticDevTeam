@@ -14,7 +14,6 @@ function makeInput(overrides: Partial<DecideMergeInput> = {}): DecideMergeInput 
         abstentions: 0,
         gateReport: { passed: true, results: [], roots: [], inconclusive: false } as any,
         integrityFindings: [],
-        layoutViolations: [],
         filesChanged: 5,
         iterationsUsed: 3,
         policy: 'strict',
@@ -49,16 +48,6 @@ describe('decideMerge', () => {
         }));
         expect(result.merge).toBe(false);
         expect(result.blockers.some(b => b.includes('integrity'))).toBe(true);
-    });
-
-    it('blocks merge on critical layout violations', () => {
-        const result = decideMerge(makeInput({
-            layoutViolations: [
-                { kind: 'unknown-root', severity: 'critical', path: 'src/App.tsx', detail: 'file outside declared roots' },
-            ],
-        }));
-        expect(result.merge).toBe(false);
-        expect(result.blockers.some(b => b.includes('layout'))).toBe(true);
     });
 
     it('blocks merge when filesChanged === 0 (empty PR)', () => {

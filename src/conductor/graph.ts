@@ -56,21 +56,29 @@ export interface ConductorOptions {
 // ─── Conditional edges ──────────────────────────────────────────────────────
 
 /**
- * Filter test reports to the current bugfix iteration. Uses the whole
- * array when no iteration tracking exists (backward-compat).
+ * Filter test reports to the current bugfix iteration so stale failures
+ * from previous iterations do not force unnecessary bugfix looping.
+ *
+ * Plan 25-04 §5: filter by iterationIndex (matching afterE2eRouter).
  */
 function currentIterationFailures(state: ProjectStateType): Array<{ status: string }> {
+    const currentIteration = state.iteration?.bugfix ?? 0;
+
     // The latestGateReport (replace reducer) is always current.
-    // For test reports (append reducer), we consider all since there's no
-    // iterationIndex yet — the latestGateReport is the authoritative signal.
     if (state.latestGateReport) {
         const gr = state.latestGateReport;
         if (!gr.passed) return [{ status: 'fail' }];
-        // Also check non-gate test reports
-        const recentFails = (state.testReports ?? []).filter(r => r.status === 'fail');
+        // Also check non-gate test reports — filter to current iteration
+        const recentFails = (state.testReports ?? []).filter(r =>
+            r.status === 'fail'
+            && (r.iterationIndex === undefined || r.iterationIndex === currentIteration),
+        );
         return recentFails;
     }
-    return (state.testReports ?? []).filter(r => r.status === 'fail');
+    return (state.testReports ?? []).filter(r =>
+        r.status === 'fail'
+        && (r.iterationIndex === undefined || r.iterationIndex === currentIteration),
+    );
 }
 
 export function afterQaRouter(state: ProjectStateType): string {
@@ -123,11 +131,6 @@ export function afterAcceptanceRouter(state: ProjectStateType): string {
     return 'finalize';
 }
 
-function afterBugfixRouter(state: ProjectStateType): string {
-    // After bugfix triage reassigns work, go back to development
-    return 'development';
-}
-
 export function afterIntakeRouter(state: ProjectStateType): string {
     if (state.input.runType === 'maintain') {
         return 'codebase-analyzer';
@@ -152,20 +155,6 @@ function rerunRouter(phase: PhaseName, next: string) {
         return next;
     };
 }
-
-/**
- * Map of each HITL phase to its "normal" next destination.
- * Used by rerunRouter to decide where to go when not re-running.
- */
-const PHASE_NEXT: Partial<Record<PhaseName, string>> = {
-    'codebase-analyzer': 'architect',
-    'architect': 'product-manager',
-    'product-manager': 'dba',
-    'dba': 'team-leader',
-    'team-leader': 'development',
-    'development': 'qa',
-    // qa, devops, e2e have their own conditional routers so they are not here
-};
 
 // ─── Graph builder ──────────────────────────────────────────────────────────
 

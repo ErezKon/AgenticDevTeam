@@ -25,14 +25,12 @@ import type {
     TranscriptMessage,
     CodebaseAnalysis,
     PullRequest,
-    BranchAssignment,
     TokenCallRecord,
     GitContext,
 } from '../agents/_shared/base-schemas';
 import type { RepoContract } from '../agents/_shared/schemas/repo-contract.schema';
 // TechDecision is already imported above via base-schemas — mergeByLayerReducer uses it.
-import type { ConfigBaseline } from './gate-integrity';
-import type { AcceptanceReport, DispatchRound } from './acceptance-gate';
+import type { AcceptanceReport, DispatchRound } from './gate-types';
 import type { GateReport } from './quality-gates';
 import type { CompletionEvidence } from './assignment-policy';
 
@@ -44,7 +42,7 @@ function appendReducer<T>(existing: T[], incoming: T[]): T[] {
 }
 
 /** Replace reducer (last-write wins). */
-function replaceReducer<T>(existing: T, incoming: T): T {
+function replaceReducer<T>(_existing: T, incoming: T): T {
     return incoming;
 }
 
@@ -208,11 +206,6 @@ export const ProjectState = Annotation.Root({
         reducer: appendReducer,
         default: () => [],
     }),
-    branchAssignments: Annotation<BranchAssignment[]>({
-        reducer: appendReducer,
-        default: () => [],
-    }),
-
     // ── Orchestration metadata ───────────────────────────────────────────
     phase: Annotation<PhaseName>({
         reducer: replaceReducer,
@@ -273,12 +266,6 @@ export const ProjectState = Annotation.Root({
         default: () => [],
     }),
 
-    // ── Config baseline (gate integrity, Sub-Plan 02) ────────────────────
-    configBaseline: Annotation<ConfigBaseline | null>({
-        reducer: replaceReducer,
-        default: () => null,
-    }),
-
     // ── Acceptance gate (Sub-Plan 03) ────────────────────────────────────
 
     /** Latest acceptance gate result (replace reducer — always the freshest). */
@@ -324,12 +311,6 @@ export const ProjectState = Annotation.Root({
     }),
 
     // ── Planning integrity (Sub-Plan 04) ─────────────────────────────────
-
-    /** Output integrity issues from agent invocations (truncation, lossy repair, invalid schema). */
-    outputIntegrity: Annotation<Array<{ agent: string; phase: PhaseName; issue: 'truncated' | 'repair-lossy' | 'schema-invalid'; detail: string }>>({
-        reducer: appendReducer,
-        default: () => [],
-    }),
 
     /** Planning coverage violations detected between PM and TL phases. */
     planViolations: Annotation<Array<{ kind: string; severity: string; id: string; detail: string }>>({

@@ -1,5 +1,4 @@
 import { z } from 'zod';
-import type { TamperFinding } from '../../../conductor/gate-integrity';
 
 // ─── PR Review Comments ─────────────────────────────────────────────────────
 

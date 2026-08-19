@@ -7,11 +7,11 @@
  *
  * Also saves the raw token-usage data as JSON alongside the HTML.
  */
-import * as fs from 'fs';
 import * as path from 'path';
 import { getLogger } from './logger';
+import { writeOutputFile } from './artifact-writer';
 import { MODEL_PRICING } from '../config';
-import type { TokenCallRecord, RunUsageSummary, RunStatus, InvocationEfficiencyRow } from './token-tracker';
+import type { TokenCallRecord, RunUsageSummary, RunStatus } from './token-tracker';
 import { tokenTracker } from './token-tracker';
 import { getCumulativeCompactionStats } from '../agents/_shared/history-compactor';
 import { getTruncationStats } from '../tools/_shared/truncate';
@@ -675,18 +675,15 @@ export function generateTokenReport(
 ): { jsonPath: string; htmlPath: string } {
     const summary = tokenTracker.getRunSummary();
 
-    // Ensure output directory exists
-    fs.mkdirSync(outputPath, { recursive: true });
-
     // Save raw JSON
     const jsonPath = path.join(outputPath, 'token-usage.json');
-    fs.writeFileSync(jsonPath, JSON.stringify(records, null, 2), 'utf-8');
+    writeOutputFile(outputPath, 'token-usage.json', JSON.stringify(records, null, 2));
     log.info(`Saved raw token data: ${jsonPath} (${records.length} records)`);
 
     // Generate and save HTML report
     const html = generateHtml(summary, records, systemName, runStatus);
     const htmlPath = path.join(outputPath, 'token-usage-report.html');
-    fs.writeFileSync(htmlPath, html, 'utf-8');
+    writeOutputFile(outputPath, 'token-usage-report.html', html);
     log.info(`Saved HTML report: ${htmlPath} (${html.length} chars)`);
 
     return { jsonPath, htmlPath };

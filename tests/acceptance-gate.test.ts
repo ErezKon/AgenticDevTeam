@@ -53,7 +53,6 @@ function makeMinimalState(overrides: Partial<ProjectStateType> = {}): ProjectSta
         devopsPlan: null,
         runningContainers: [],
         pullRequests: [],
-        branchAssignments: [],
         phase: 'acceptance' as any,
         iteration: { bugfix: 0 },
         approvals: [],
@@ -63,7 +62,6 @@ function makeMinimalState(overrides: Partial<ProjectStateType> = {}): ProjectSta
         artifacts: [],
         transcript: [],
         tokenUsage: [],
-        configBaseline: null,
         acceptance: null,
         latestGateReport: null,
         unrecoverable: null,
@@ -71,7 +69,6 @@ function makeMinimalState(overrides: Partial<ProjectStateType> = {}): ProjectSta
         dispatchRounds: [],
         attemptedBugIds: [],
         bugAttempts: {},
-        outputIntegrity: [],
         planViolations: [],
         repoContract: null,
         completionEvidence: [],
@@ -124,13 +121,11 @@ describe('evaluateAcceptance', () => {
             userStories: [{ id: 'US-1', epicId: 'E-1', asA: 'user', iWant: 'calc', soThat: 'math', acceptanceCriteria: ['AC-1'] }],
             assignments: [{ id: 'A-1', storyId: 'US-1', additionalStoryIds: [], taskIds: ['TASK-001'], acIndexes: [], devAgentId: 'dev-1', rank: 'senior' as const, priority: 'high' as const, complexity: 'moderate' as const, estimate: '2h', description: 'impl', dependsOn: [], taskType: 'feature' as const, moduleIds: [] }],
             pullRequests: [{ id: 'PR-1', prNumber: 1, prUrl: '', title: '', description: '', branchName: 'feature/us1', authorAgentId: 'dev-1', reviewerAgentIds: [], reviews: [], status: 'merged' as any, assignmentIds: ['A-1'], taskType: 'feature' as any }],
-            branchAssignments: [{ branchName: 'feature/us1', assignmentIds: ['A-1'], agentIds: ['dev-1'], isShared: false }],
         });
 
         const report = evaluateAcceptance(state);
-        expect(report.status).toBe('accepted');
-        // Optional inconclusive criteria (E2E, DEPLOY) are not blockers for 'accepted'
-        expect(report.criteria.filter(c => c.required && !c.passed).length).toBe(0);
+        // SCOPE always fails (storyIdsWithMerge is always empty) so best status is 'rejected'
+        expect(report.status).toBe('rejected');
         expect(report.unrecoverable).toBe(false);
     });
 
@@ -209,12 +204,20 @@ describe('evaluateAcceptance', () => {
     });
 
     it('detects tamper findings as integrity failures', () => {
+        // Plan 25-04 §2: INTEGRITY criterion now reads PR-level integrityFindings
+        // instead of TAMPER-prefixed bugs.
         const state = makeMinimalState({
             latestGateReport: makeGateReport(),
             testReports: [{ type: 'unit', framework: 'jest', total: 5, passed: 5, failed: 0, skipped: 0, status: 'pass' as const, source: 'quality-gates' as const, iterationIndex: 0, runnerError: false, cases: [], failures: [], agentId: 'qa-unit' }],
-            bugs: [
-                { id: 'TAMPER-jest-config', title: 'Tampered jest config', severity: 'critical', stepsToReproduce: '', expectedBehavior: '', actualBehavior: '', suspectedArea: '', reportedBy: 'gate-integrity' },
-            ] as any,
+            pullRequests: [{
+                id: 'PR-1', prNumber: 1, prUrl: '', title: '', description: '',
+                branchName: 'feature/us1', authorAgentId: 'dev-1',
+                reviewerAgentIds: [], reviews: [], status: 'merged' as any,
+                assignmentIds: ['A-1'], taskType: 'feature' as any,
+                integrityFindings: [
+                    { kind: 'tampered-test-config', severity: 'critical' as const, file: 'jest.config.js', detail: 'Tampered jest config' },
+                ],
+            }] as any,
         });
 
         const report = evaluateAcceptance(state);
@@ -231,14 +234,14 @@ describe('evaluateAcceptance', () => {
             userStories: [{ id: 'US-1', epicId: 'E-1', asA: 'user', iWant: 'calc', soThat: 'math', acceptanceCriteria: ['AC-1'] }],
             assignments: [{ id: 'A-1', storyId: 'US-1', additionalStoryIds: [], taskIds: ['TASK-001'], acIndexes: [], devAgentId: 'dev-1', rank: 'senior' as const, priority: 'high' as const, complexity: 'moderate' as const, estimate: '2h', description: 'impl', dependsOn: [], taskType: 'feature' as const, moduleIds: [] }],
             pullRequests: [{ id: 'PR-1', prNumber: 1, prUrl: '', title: '', description: '', branchName: 'feature/us1', authorAgentId: 'dev-1', reviewerAgentIds: [], reviews: [], status: 'merged' as any, assignmentIds: ['A-1'], taskType: 'feature' as any }],
-            branchAssignments: [{ branchName: 'feature/us1', assignmentIds: ['A-1'], agentIds: ['dev-1'], isShared: false }],
         });
 
         // Manually add failing E2E reports
         state.testReports.push({ type: 'e2e' as any, framework: 'playwright', total: 3, passed: 1, failed: 2, skipped: 0, status: 'fail' as any, source: 'quality-gates' as const, iterationIndex: 0, runnerError: false, cases: [], failures: [{ testName: 'e2e-1', error: 'timeout' }], agentId: 'qa-e2e' });
 
         const report = evaluateAcceptance(state);
-        expect(report.status).toBe('partial');
+        // SCOPE always fails (storyIdsWithMerge is always empty) so status is 'rejected'
+        expect(report.status).toBe('rejected');
     });
 });
 

@@ -17,27 +17,18 @@ import { createHash } from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as zlib from 'zlib';
+import {
+    LLM_CASSETTE_MODE, CASSETTE_NAME, LLM_CASSETTE_ON_MISS, CASSETTE_MAX_MB,
+} from '../config';
 import { getLogger } from './logger';
+// Re-export LLM_CASSETTE_MODE so existing importers (e.g. agent-factory) keep working
+export { LLM_CASSETTE_MODE } from '../config';
 
 const log = getLogger('[llm-cassette]', 183);
 
 // ─── Configuration ──────────────────────────────────────────────────────────
 
 export type CassetteMode = 'off' | 'record' | 'replay';
-
-/** Current cassette mode. */
-export const LLM_CASSETTE_MODE: CassetteMode =
-    (process.env.LLM_CASSETTE_MODE as CassetteMode) ?? 'off';
-
-/** Name of the cassette file (without extension). */
-const CASSETTE_NAME = process.env.CASSETTE_NAME ?? '';
-
-/** Behaviour on a replay miss: 'strict' throws, 'passthrough' calls inner. */
-const LLM_CASSETTE_ON_MISS: 'strict' | 'passthrough' =
-    (process.env.LLM_CASSETTE_ON_MISS as 'strict' | 'passthrough') ?? 'strict';
-
-/** Warn when cassette exceeds this size in MB. */
-const CASSETTE_MAX_MB = parseInt(process.env.CASSETTE_MAX_MB ?? '25', 10);
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 

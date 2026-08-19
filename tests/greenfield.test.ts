@@ -7,7 +7,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { runAutonomous } from '../src/conductor/run';
-import { discoverSpecs, findGeneratedProject } from './utils';
+import { discoverSpecs } from './utils';
 
 const SPECS_NEW_DIR = path.resolve(__dirname, '..', 'specs', 'new');
 const specs = discoverSpecs(SPECS_NEW_DIR);

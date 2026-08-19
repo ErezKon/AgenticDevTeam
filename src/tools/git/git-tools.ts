@@ -7,12 +7,12 @@
  */
 import { tool } from '@langchain/core/tools';
 import { z } from 'zod';
-import { execSync } from 'child_process';
 import { LogColors, color256 } from '../../utils/log-colors.util';
 import { logToolAction } from '../../utils/logger';
-import { GIT_DEFAULT_BRANCH, GITHUB_TOKEN, GITHUB_OWNER, GITHUB_REPO, GIT_USER_NAME, GIT_USER_EMAIL } from '../../config';
+import { GIT_DEFAULT_BRANCH } from '../../config';
 import type { GitContext } from '../../agents/_shared/base-schemas';
 import { truncateToolResult } from '../_shared/truncate';
+import { gitExec, gitPush as sharedGitPush } from '../../utils/git-exec';
 
 const TAG_COLOR = 202;
 const TAG = `${color256(TAG_COLOR)}[git]${LogColors.RESET}`;
@@ -46,28 +46,11 @@ const MAX_DIFF_RESPONSE_CHARS = 25_000;
 
 /**
  * Run a git command in the workspace and return stdout.
- * Throws on non-zero exit (caught by the tool wrapper).
+ * Delegates to the shared gitExec helper (which uses execFileSync,
+ * preventing shell injection via user-controlled arguments).
  */
 function git(workspaceRoot: string, args: string): string {
-    try {
-        const result = execSync(`git ${args}`, {
-            cwd: workspaceRoot,
-            encoding: 'utf-8',
-            timeout: 30_000,
-            maxBuffer: 1024 * 1024 * 5,
-            env: {
-                ...process.env,
-                GIT_TERMINAL_PROMPT: '0', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null',
-                GIT_AUTHOR_NAME: GIT_USER_NAME, GIT_AUTHOR_EMAIL: GIT_USER_EMAIL,
-                GIT_COMMITTER_NAME: GIT_USER_NAME, GIT_COMMITTER_EMAIL: GIT_USER_EMAIL,
-            },
-        });
-        return result.trim();
-    } catch (err: any) {
-        const stderr = err.stderr?.toString() ?? '';
-        const stdout = err.stdout?.toString() ?? '';
-        return `Error (exit ${err.status ?? 1}):\n${stderr}\n${stdout}`.trim();
-    }
+    return gitExec(workspaceRoot, args);
 }
 
 /**
@@ -172,11 +155,9 @@ export function createGitTools(
         async ({ branchName }) => {
             const branch = branchName ?? git(workspaceRoot, 'rev-parse --abbrev-ref HEAD');
             logToolAction(`${TAG} push ${branch}`);
-            const token = gitContext?.token ?? GITHUB_TOKEN;
-            const owner = gitContext?.owner ?? GITHUB_OWNER;
-            const repo = gitContext?.repo ?? GITHUB_REPO;
-            const authUrl = `https://x-access-token:${token}@github.com/${owner}/${repo}.git`;
-            const result = git(workspaceRoot, `push ${authUrl} HEAD:refs/heads/${branch}`);
+            // Use the shared gitPush which authenticates via http.extraHeader
+            // (never embeds the token in a URL visible to the LLM).
+            const result = sharedGitPush(workspaceRoot, branch, gitContext);
             return result || `Pushed branch '${branch}' to origin`;
         },
         {

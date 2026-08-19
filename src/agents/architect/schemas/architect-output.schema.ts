@@ -8,5 +8,3 @@ export const ArchitectOutputSchema = z.object({
     epics: z.array(EpicSchema).describe('High-level epics derived from the requirements'),
     repoContract: RepoContractSchema.describe('Machine-checkable repo layout and module contract'),
 });
-
-export type ArchitectOutput = z.infer<typeof ArchitectOutputSchema>;

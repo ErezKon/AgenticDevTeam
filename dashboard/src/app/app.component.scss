@@ -36,6 +36,22 @@
   }
 }
 
+.ws-disconnected {
+  font-size: 0.75rem;
+  font-weight: 700;
+  color: #f44336;
+  text-transform: uppercase;
+  padding: 0.15rem 0.5rem;
+  border: 1px solid #f44336;
+  border-radius: 4px;
+  animation: blink 2s ease-in-out infinite;
+}
+
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
 .main-content {
   padding: 2rem;
   max-width: 1400px;

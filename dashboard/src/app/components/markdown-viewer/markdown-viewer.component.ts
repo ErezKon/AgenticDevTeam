@@ -1,7 +1,8 @@
-import { Component, Input, OnChanges, SimpleChanges, ElementRef, ViewChild, AfterViewChecked } from '@angular/core';
+import { Component, Input, OnChanges, SimpleChanges, ElementRef, ViewChild, AfterViewChecked, ChangeDetectionStrategy, ViewEncapsulation } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { DomSanitizer, SafeHtml } from '@angular/platform-browser';
 import { marked } from 'marked';
+import DOMPurify from 'dompurify';
 
 @Component({
   selector: 'app-markdown-viewer',
@@ -9,6 +10,8 @@ import { marked } from 'marked';
   imports: [CommonModule],
   templateUrl: './markdown-viewer.component.html',
   styleUrls: ['./markdown-viewer.component.scss'],
+  changeDetection: ChangeDetectionStrategy.OnPush,
+  encapsulation: ViewEncapsulation.None,
 })
 export class MarkdownViewerComponent implements OnChanges, AfterViewChecked {
   @Input() content = '';
@@ -41,7 +44,8 @@ export class MarkdownViewerComponent implements OnChanges, AfterViewChecked {
 
     try {
       const rawHtml = marked.parse(this.content, { async: false }) as string;
-      this.renderedHtml = this.sanitizer.bypassSecurityTrustHtml(rawHtml);
+      const cleanHtml = DOMPurify.sanitize(rawHtml, { ADD_TAGS: ['code'], ADD_ATTR: ['class'] });
+      this.renderedHtml = this.sanitizer.bypassSecurityTrustHtml(cleanHtml);
       this.pendingMermaid = true;
     } catch {
       this.renderedHtml = this.sanitizer.bypassSecurityTrustHtml(

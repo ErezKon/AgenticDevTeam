@@ -1,6 +1,6 @@
 import { Injectable } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
-import { Observable, Subject } from 'rxjs';
+import { Observable, Subject, BehaviorSubject } from 'rxjs';
 
 export interface AgentEntry {
   id: string;
@@ -49,6 +49,12 @@ export interface RunEvent {
 export class ApiService {
   private ws: WebSocket | null = null;
   private wsMessages$ = new Subject<WsMessage>();
+  private wsConnected$ = new BehaviorSubject<boolean>(false);
+  private reconnectAttempt = 0;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** Observable that emits `true` when the WebSocket is connected, `false` when disconnected. */
+  get connected$(): Observable<boolean> { return this.wsConnected$.asObservable(); }
 
   constructor(private http: HttpClient) {}
 
@@ -76,21 +82,24 @@ export class ApiService {
     return this.http.get<any[]>('/api/runs');
   }
 
-  getArtifact(runId: string, agentId: string): Observable<any> {
-    return this.http.get(`/api/run/${runId}/artifact/${agentId}`);
-  }
-
   getArtifacts(runId: string): Observable<any[]> {
     return this.http.get<any[]>(`/api/run/${runId}/artifacts`);
   }
 
   connectWebSocket(): Observable<WsMessage> {
-    if (this.ws) return this.wsMessages$.asObservable();
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) return this.wsMessages$.asObservable();
+
+    // Clear any pending reconnect timer
+    if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
 
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${protocol}//${window.location.host}/ws`;
 
     this.ws = new WebSocket(wsUrl);
+    this.ws.onopen = () => {
+      this.reconnectAttempt = 0;
+      this.wsConnected$.next(true);
+    };
     this.ws.onmessage = (event) => {
       try {
         const msg = JSON.parse(event.data) as WsMessage;
@@ -99,7 +108,14 @@ export class ApiService {
     };
     this.ws.onclose = () => {
       this.ws = null;
-      setTimeout(() => this.connectWebSocket(), 3000);
+      this.wsConnected$.next(false);
+      // Exponential backoff: 1s, 2s, 4s, 8s, 16s, max 30s
+      const delay = Math.min(1000 * Math.pow(2, this.reconnectAttempt), 30_000);
+      this.reconnectAttempt++;
+      this.reconnectTimer = setTimeout(() => this.connectWebSocket(), delay);
+    };
+    this.ws.onerror = () => {
+      // onclose will fire after onerror, which handles reconnection
     };
 
     return this.wsMessages$.asObservable();

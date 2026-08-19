@@ -8,14 +8,15 @@
  * 4. Budget utilisation
  * 5. Top warning/error patterns from events
  */
-import * as fs from 'fs';
 import * as path from 'path';
 import { getLogger } from './logger';
+import { writeOutputFile } from './artifact-writer';
 import { estimateCost } from './cost';
 import type { RunUsageSummary } from './token-tracker';
 import { tokenTracker } from './token-tracker';
 import type { BudgetStatus } from './run-budget';
 import type { RunEvent } from './event-bus';
+import { mdTable } from './markdown-table';
 
 const log = getLogger('[RunDiagnosis]', 178);
 
@@ -57,26 +58,27 @@ export function generateRunDiagnosis(
     // ── 1. Per-agent cost table ─────────────────────────────────────────
     lines.push('## Per-Agent Cost');
     lines.push('');
-    lines.push('| Agent | Model | Calls | Input | Output | USD | Share% |');
-    lines.push('|-------|-------|------:|------:|-------:|----:|-------:|');
 
     const totalCost = tokenSummary.byAgent.reduce(
         (sum, a) => sum + estimateCost(a.model, a.inputTokens, a.outputTokens), 0,
     );
 
-    for (const a of tokenSummary.byAgent) {
+    const costRows: (string | number)[][] = tokenSummary.byAgent.map(a => {
         const cost = estimateCost(a.model, a.inputTokens, a.outputTokens);
         const share = pct(cost, totalCost);
-        lines.push(
-            `| ${a.agentId} | ${a.model} | ${a.callCount} | ` +
-            `${a.inputTokens.toLocaleString()} | ${a.outputTokens.toLocaleString()} | ` +
-            `${usd(cost)} | ${share}% |`,
-        );
-    }
-    lines.push(`| **Total** | | **${tokenSummary.totalCalls}** | ` +
-        `**${tokenSummary.totalInputTokens.toLocaleString()}** | ` +
-        `**${tokenSummary.totalOutputTokens.toLocaleString()}** | ` +
-        `**${usd(totalCost)}** | 100.0% |`);
+        return [a.agentId, a.model, a.callCount, a.inputTokens.toLocaleString(), a.outputTokens.toLocaleString(), usd(cost), `${share}%`];
+    });
+    costRows.push([
+        '**Total**', '', `**${tokenSummary.totalCalls}**`,
+        `**${tokenSummary.totalInputTokens.toLocaleString()}**`,
+        `**${tokenSummary.totalOutputTokens.toLocaleString()}**`,
+        `**${usd(totalCost)}**`, '100.0%',
+    ]);
+    lines.push(mdTable(
+        ['Agent', 'Model', 'Calls', 'Input', 'Output', 'USD', 'Share%'],
+        costRows,
+        ['left', 'left', 'right', 'right', 'right', 'right', 'right'],
+    ));
     lines.push('');
 
     // ── 2. Per-invocation outliers ──────────────────────────────────────
@@ -97,9 +99,7 @@ export function generateRunDiagnosis(
         );
 
         if (outliers.length > 0) {
-            lines.push('| Agent | Invocations | Avg Calls/Inv | Avg Input/Call | Growth | Reason |');
-            lines.push('|-------|------------:|--------------:|---------------:|-------:|--------|');
-            for (const r of outliers) {
+            const outlierRows: (string | number)[][] = outliers.map(r => {
                 const reasons: string[] = [];
                 if (r.avgCallsPerInvocation >= medianCalls * 2) {
                     reasons.push(`calls ${r.avgCallsPerInvocation.toFixed(1)} vs median ${medianCalls.toFixed(1)}`);
@@ -107,11 +107,13 @@ export function generateRunDiagnosis(
                 if (r.avgInputPerCall >= medianInput * 2) {
                     reasons.push(`input ${r.avgInputPerCall.toLocaleString()} vs median ${medianInput.toLocaleString()}`);
                 }
-                lines.push(
-                    `| ${r.agentId} | ${r.invocations} | ${r.avgCallsPerInvocation.toFixed(1)} | ` +
-                    `${r.avgInputPerCall.toLocaleString()} | ${r.growthFactor}x | ${reasons.join('; ')} |`,
-                );
-            }
+                return [r.agentId, r.invocations, r.avgCallsPerInvocation.toFixed(1), r.avgInputPerCall.toLocaleString(), `${r.growthFactor}x`, reasons.join('; ')];
+            });
+            lines.push(mdTable(
+                ['Agent', 'Invocations', 'Avg Calls/Inv', 'Avg Input/Call', 'Growth', 'Reason'],
+                outlierRows,
+                ['left', 'right', 'right', 'right', 'right', 'left'],
+            ));
         } else {
             lines.push('No outliers detected (all invocations within 2x of the median).');
         }
@@ -141,12 +143,17 @@ export function generateRunDiagnosis(
     }
 
     if (agentCacheMap.size > 0) {
-        lines.push('| Agent | Input Tokens | Cache Read | Hit Rate |');
-        lines.push('|-------|------------:|-----------:|---------:|');
-        for (const [agentId, stats] of [...agentCacheMap.entries()].sort((a, b) => b[1].input - a[1].input)) {
-            const hitRate = stats.input > 0 ? (stats.cacheRead / stats.input * 100).toFixed(1) : '0.0';
-            lines.push(`| ${agentId} | ${stats.input.toLocaleString()} | ${stats.cacheRead.toLocaleString()} | ${hitRate}% |`);
-        }
+        const cacheRows: (string | number)[][] = [...agentCacheMap.entries()]
+            .sort((a, b) => b[1].input - a[1].input)
+            .map(([agentId, stats]) => {
+                const hitRate = stats.input > 0 ? (stats.cacheRead / stats.input * 100).toFixed(1) : '0.0';
+                return [agentId, stats.input.toLocaleString(), stats.cacheRead.toLocaleString(), `${hitRate}%`];
+            });
+        lines.push(mdTable(
+            ['Agent', 'Input Tokens', 'Cache Read', 'Hit Rate'],
+            cacheRows,
+            ['left', 'right', 'right', 'right'],
+        ));
     }
     lines.push('');
 
@@ -154,14 +161,17 @@ export function generateRunDiagnosis(
     lines.push('## Budget Utilisation');
     lines.push('');
 
-    lines.push(`| Metric | Value | Limit | Utilisation |`);
-    lines.push(`|--------|------:|------:|------------:|`);
-    lines.push(`| Tokens | ${budgetStatus.usedTokens.toLocaleString()} | ${budgetStatus.maxTokens === 0 ? 'unlimited' : budgetStatus.maxTokens.toLocaleString()} | ${budgetStatus.maxTokens > 0 ? pct(budgetStatus.usedTokens, budgetStatus.maxTokens) + '%' : 'n/a'} |`);
-    lines.push(`| Cost | ${usd(budgetStatus.estCostUsd)} | ${budgetStatus.maxCostUsd === 0 ? 'unlimited' : usd(budgetStatus.maxCostUsd)} | ${budgetStatus.maxCostUsd > 0 ? pct(budgetStatus.estCostUsd, budgetStatus.maxCostUsd) + '%' : 'n/a'} |`);
-
     const elapsedSec = Math.round(budgetStatus.elapsedMs / 1000);
     const maxSec = budgetStatus.maxWallMs > 0 ? Math.round(budgetStatus.maxWallMs / 1000) : 0;
-    lines.push(`| Wall clock | ${elapsedSec}s | ${maxSec === 0 ? 'unlimited' : maxSec + 's'} | ${maxSec > 0 ? pct(budgetStatus.elapsedMs, budgetStatus.maxWallMs) + '%' : 'n/a'} |`);
+    lines.push(mdTable(
+        ['Metric', 'Value', 'Limit', 'Utilisation'],
+        [
+            ['Tokens', budgetStatus.usedTokens.toLocaleString(), budgetStatus.maxTokens === 0 ? 'unlimited' : budgetStatus.maxTokens.toLocaleString(), budgetStatus.maxTokens > 0 ? pct(budgetStatus.usedTokens, budgetStatus.maxTokens) + '%' : 'n/a'],
+            ['Cost', usd(budgetStatus.estCostUsd), budgetStatus.maxCostUsd === 0 ? 'unlimited' : usd(budgetStatus.maxCostUsd), budgetStatus.maxCostUsd > 0 ? pct(budgetStatus.estCostUsd, budgetStatus.maxCostUsd) + '%' : 'n/a'],
+            ['Wall clock', `${elapsedSec}s`, maxSec === 0 ? 'unlimited' : `${maxSec}s`, maxSec > 0 ? pct(budgetStatus.elapsedMs, budgetStatus.maxWallMs) + '%' : 'n/a'],
+        ],
+        ['left', 'right', 'right', 'right'],
+    ));
     lines.push('');
 
     lines.push(`**Binding limit:** ${budgetStatus.binding}`);
@@ -192,11 +202,11 @@ export function generateRunDiagnosis(
 
     if (typeCounts.size > 0) {
         const sorted = [...typeCounts.entries()].sort((a, b) => b[1] - a[1]);
-        lines.push('| Event Type | Count |');
-        lines.push('|------------|------:|');
-        for (const [type, count] of sorted) {
-            lines.push(`| ${type} | ${count} |`);
-        }
+        lines.push(mdTable(
+            ['Event Type', 'Count'],
+            sorted.map(([type, count]) => [type, count]),
+            ['left', 'right'],
+        ));
     } else {
         lines.push('No warning or error events recorded.');
     }
@@ -210,12 +220,9 @@ export function generateRunDiagnosis(
 
     // ── Write to disk ───────────────────────────────────────────────────
     const md = lines.join('\n');
-    const dest = path.join(outputPath, 'run-diagnosis.md');
-    try {
-        fs.writeFileSync(dest, md, 'utf-8');
+    const dest = writeOutputFile(outputPath, 'run-diagnosis.md', md);
+    if (dest) {
         log.info(`Run diagnosis written: ${dest}`);
-    } catch (err: any) {
-        log.warn(`Failed to write run diagnosis: ${err?.message ?? err}`);
     }
-    return dest;
+    return path.join(outputPath, 'run-diagnosis.md');
 }

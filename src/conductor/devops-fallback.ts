@@ -8,6 +8,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { getLogger } from '../utils/logger';
+import { DOCKER_ALLOW_INSECURE_NPM } from '../config';
 import type { StackRoot } from './quality-gates';
 import type { RepoContract } from '../agents/_shared/schemas/repo-contract.schema';
 
@@ -32,10 +33,13 @@ export interface FallbackResult {
  * @param buildOutputDir - Build output directory, e.g. 'dist'.
  */
 function spaDockerfile(buildOutputDir: string): string {
+    const npmInstall = DOCKER_ALLOW_INSECURE_NPM
+        ? 'RUN npm config set strict-ssl false && npm ci'
+        : 'RUN npm ci';
     return `FROM node:20-alpine AS build
 WORKDIR /app
 COPY package*.json ./
-RUN npm config set strict-ssl false && npm ci
+${npmInstall}
 COPY . .
 RUN npm run build
 
@@ -59,10 +63,13 @@ function nodeServerDockerfile(entryPoint: string): string {
     const runCmd = needsTsc
         ? `CMD ["node", "dist/${entryPoint.replace(/\.ts$/, '.js').replace(/^src\//, '')}"]`
         : `CMD ["node", "${entryPoint}"]`;
+    const npmInstall = DOCKER_ALLOW_INSECURE_NPM
+        ? 'RUN npm config set strict-ssl false && npm ci --omit=dev'
+        : 'RUN npm ci --omit=dev';
     return `FROM node:20-alpine
 WORKDIR /app
 COPY package*.json ./
-RUN npm config set strict-ssl false && npm ci --omit=dev
+${npmInstall}
 COPY . .
 ${buildStep}
 EXPOSE 3000
@@ -128,7 +135,6 @@ export function generateFallbackDeployment(
 
     for (const root of roots) {
         const rootDir = root.relDir || '.';
-        const absRoot = path.resolve(workspacePath, rootDir);
         const dockerfilePath = rootDir === '.' ? 'Dockerfile' : path.join(rootDir, 'Dockerfile');
         const absDockerfile = path.join(workspacePath, dockerfilePath);
 

@@ -59,7 +59,6 @@ function makeMinimalState(overrides: Partial<ProjectStateType> = {}): ProjectSta
         devopsPlan: null,
         runningContainers: [],
         pullRequests: [],
-        branchAssignments: [],
         phase: 'intake' as any,
         iteration: { bugfix: 0 },
         approvals: [],
@@ -69,7 +68,6 @@ function makeMinimalState(overrides: Partial<ProjectStateType> = {}): ProjectSta
         artifacts: [],
         transcript: [],
         tokenUsage: [],
-        configBaseline: null,
         acceptance: null,
         latestGateReport: null,
         unrecoverable: null,
@@ -77,7 +75,6 @@ function makeMinimalState(overrides: Partial<ProjectStateType> = {}): ProjectSta
         dispatchRounds: [],
         attemptedBugIds: [],
         bugAttempts: {},
-        outputIntegrity: [],
         planViolations: [],
         repoContract: null,
         completionEvidence: [],
@@ -229,7 +226,8 @@ describe('afterQaRouter', () => {
 
         const { afterQaRouter } = require('../src/conductor/graph');
         const state = makeMinimalState({
-            testReports: [makeTestReport('fail')],
+            // Plan 25-04 §5: iterationIndex must match current bugfix iteration
+            testReports: [makeTestReport('fail', { iterationIndex: 3 })],
             iteration: { bugfix: 3 },
         });
 
@@ -245,7 +243,8 @@ describe('afterQaRouter', () => {
 
         const { afterQaRouter } = require('../src/conductor/graph');
         const state = makeMinimalState({
-            testReports: [makeTestReport('fail')],
+            // Plan 25-04 §5: iterationIndex must match current bugfix iteration
+            testReports: [makeTestReport('fail', { iterationIndex: 3 })],
             iteration: { bugfix: 3 },
         });
 
@@ -393,5 +392,52 @@ describe('afterAcceptanceRouter', () => {
         });
 
         expect(afterAcceptanceRouter(state)).toBe('finalize');
+    });
+});
+
+// ─── Cancelled state routing (merged from hitl-graph.test.ts) ───────────────
+
+describe('cancelled state routing', () => {
+    beforeEach(() => jest.resetModules());
+
+    it('afterQaRouter routes to finalize when cancelled', () => {
+        jest.doMock('../src/config', () => ({
+            ...jest.requireActual('../src/config'),
+            MAX_BUGFIX_ITERATIONS: 3,
+            E2E_BUGFIX_ENABLED: false,
+        }));
+        const { afterQaRouter } = require('../src/conductor/graph');
+        const state = makeMinimalState({ cancelled: true });
+        expect(afterQaRouter(state)).toBe('finalize');
+    });
+
+    it('afterE2eRouter routes to finalize when cancelled', () => {
+        jest.doMock('../src/config', () => ({
+            ...jest.requireActual('../src/config'),
+            MAX_BUGFIX_ITERATIONS: 3,
+            E2E_BUGFIX_ENABLED: true,
+        }));
+        const { afterE2eRouter } = require('../src/conductor/graph');
+        const state = makeMinimalState({ cancelled: true });
+        expect(afterE2eRouter(state)).toBe('finalize');
+    });
+});
+
+// ─── Graph compilation (merged from hitl-graph.test.ts) ─────────────────────
+
+describe('buildConductorGraph', () => {
+    beforeEach(() => jest.resetModules());
+
+    it('compiles with default options (autonomous)', () => {
+        const { buildConductorGraph } = require('../src/conductor/graph');
+        const graph = buildConductorGraph({ mode: 'autonomous' });
+        expect(graph).toBeDefined();
+        expect(typeof graph.invoke).toBe('function');
+    });
+
+    it('compiles in human mode with interrupt points', () => {
+        const { buildConductorGraph } = require('../src/conductor/graph');
+        const graph = buildConductorGraph({ mode: 'human' });
+        expect(graph).toBeDefined();
     });
 });

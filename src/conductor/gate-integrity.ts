@@ -15,8 +15,21 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import { getLogger } from '../utils/logger';
-import { GATE_INTEGRITY_MODE, REJECT_TRIVIAL_TESTS, GATE_REACHABILITY_MIN_CLOSURE } from '../config';
+import { writeOutputFile } from '../utils/artifact-writer';
+import { mdTable } from '../utils/markdown-table';
+import { REJECT_TRIVIAL_TESTS, GATE_REACHABILITY_MIN_CLOSURE } from '../config';
 import type { StackRoot } from './quality-gates';
+import type { GateOutcome, GateFinding, GateStatus } from './gate-types';
+import {
+    PRUNE_DIRS, TEST_FILE_PATTERNS, SOURCE_EXTENSIONS, SOURCE_EXTENSIONS_WIDE,
+    walkDir as sharedWalkDir, isTestFile,
+} from '../utils/fs-walk';
+import {
+    extractImportSpecifiers,
+    resolveImportPath,
+    buildImportGraph,
+    transitiveReachable,
+} from '../utils/source-graph';
 
 const log = getLogger('[GateIntegrity]', 214);
 
@@ -119,15 +132,7 @@ export const PROTECTED_SCRIPT_GLOBS: string[] = [
     'Makefile',
 ];
 
-/** Test file glob patterns. */
-const TEST_FILE_PATTERNS = [
-    /\.(?:test|spec)\.(?:ts|tsx|js|jsx|mjs)$/,
-    /__tests__\//,
-    /test_.*\.py$/,
-    /.*_test\.go$/,
-    /.*Test\.java$/,
-    /.*Tests\.cs$/,
-];
+// TEST_FILE_PATTERNS imported from ../utils/fs-walk
 
 /** Regex matching no-op build/test/lint scripts. */
 export const NO_OP_SCRIPT_RE = /^\s*(echo\b.*|true|:|exit\s+0|node\s+-e\s+["']?["']?|cd\s+\.)\s*(&&\s*(echo\b.*|true|exit\s+0))*\s*$/i;
@@ -192,7 +197,6 @@ export function captureConfigBaseline(workspacePath: string, roots: StackRoot[])
     }
 
     for (const dir of dirsToScan) {
-        const relDir = path.relative(workspacePath, dir);
 
         // Hash and store protected config files
         for (const glob of PROTECTED_CONFIG_GLOBS) {
@@ -591,7 +595,7 @@ function isRuleOff(level: string | number): boolean {
 
 function detectGitignoreWidening(
     baseline: ConfigBaseline,
-    current: ConfigBaseline,
+    _current: ConfigBaseline,
     workspacePath: string,
 ): TamperFinding[] {
     const findings: TamperFinding[] = [];
@@ -752,7 +756,7 @@ export function detectTrivialTests(
         if (skipReachabilityChecks) continue;
 
         // Rule 1: no-product-import
-        const imports = extractImports(content);
+        const imports = extractImportSpecifiers(content);
         const productImports = imports.filter(spec =>
             (spec.startsWith('./') || spec.startsWith('../')) &&
             isProductFile(resolveImportPath(absFile, spec, workspacePath), workspacePath, productSourceFiles)
@@ -785,77 +789,12 @@ export function detectTrivialTests(
     return findings;
 }
 
-// ─── Import graph helpers ───────────────────────────────────────────────────
-
-const IMPORT_RE = /(?:import\s+(?:.*?\s+from\s+)?['"]([^'"]+)['"]|export\s+(?:.*?\s+from\s+)?['"]([^'"]+)['"])/g;
-const REQUIRE_RE = /require\s*\(\s*['"]([^'"]+)['"]\s*\)/g;
-
-/**
- * Build a directed import graph: abs file path → Set of abs file paths it imports.
- * Exported so product-verify can reuse it.
- */
-export function buildImportGraph(
-    workspacePath: string,
-    sourceFiles: string[],
-): Map<string, Set<string>> {
-    const graph = new Map<string, Set<string>>();
-
-    for (const relFile of sourceFiles) {
-        const absFile = path.join(workspacePath, relFile);
-        let content: string;
-        try { content = fs.readFileSync(absFile, 'utf-8'); } catch { continue; }
-
-        const edges = new Set<string>();
-        const specs = extractImports(content);
-        for (const spec of specs) {
-            if (spec.startsWith('./') || spec.startsWith('../')) {
-                const resolved = resolveImportPath(absFile, spec, workspacePath);
-                if (resolved) edges.add(resolved);
-            }
-        }
-        graph.set(absFile, edges);
-    }
-
-    return graph;
-}
-
-/** Extract import/require specifiers from source content. */
-function extractImports(content: string): string[] {
-    const specs: string[] = [];
-    let match: RegExpExecArray | null;
-
-    IMPORT_RE.lastIndex = 0;
-    while ((match = IMPORT_RE.exec(content)) !== null) {
-        const spec = match[1] ?? match[2];
-        if (spec) specs.push(spec);
-    }
-
-    REQUIRE_RE.lastIndex = 0;
-    while ((match = REQUIRE_RE.exec(content)) !== null) {
-        if (match[1]) specs.push(match[1]);
-    }
-
-    return specs;
-}
-
-const RESOLVE_EXTENSIONS = ['', '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.json', '.css', '.scss', '.vue', '.svelte'];
-
-/** Resolve a relative import specifier to an absolute path. */
-function resolveImportPath(
-    fromAbsFile: string,
-    specifier: string,
-    _workspacePath: string,
-): string | null {
-    const dir = path.dirname(fromAbsFile);
-    const resolved = path.resolve(dir, specifier);
-    for (const ext of RESOLVE_EXTENSIONS) {
-        if (fs.existsSync(resolved + ext)) return resolved + ext;
-    }
-    for (const ext of RESOLVE_EXTENSIONS) {
-        if (ext && fs.existsSync(path.join(resolved, 'index' + ext))) return path.join(resolved, 'index' + ext);
-    }
-    return null;
-}
+// ─── Import graph helpers (delegated to ../utils/source-graph) ──────────────
+//
+// buildImportGraph, extractImportSpecifiers, resolveImportPath, and
+// transitiveReachable are imported at the top of this file from source-graph.
+// Re-export buildImportGraph for backward compatibility with layout-lint etc.
+export { buildImportGraph };
 
 /** Check if a resolved path is a product source file (not a test file). */
 function isProductFile(absPath: string | null, workspacePath: string, productSourceFiles: string[]): boolean {
@@ -887,8 +826,7 @@ function computeReachable(
     entryPoints: string[],
     workspacePath: string,
 ): Set<string> {
-    const reachable = new Set<string>();
-    const queue = [...entryPoints];
+    const seeds = [...entryPoints];
 
     // Also handle index.html → script src extraction
     for (const entry of entryPoints) {
@@ -901,7 +839,7 @@ function computeReachable(
                     const spec = match[1];
                     if (spec.startsWith('/') || spec.startsWith('./') || spec.startsWith('../')) {
                         const resolved = resolveImportPath(entry, spec.startsWith('/') ? '.' + spec : spec, workspacePath);
-                        if (resolved) queue.push(resolved);
+                        if (resolved) seeds.push(resolved);
                     }
                 }
             } catch {
@@ -910,19 +848,7 @@ function computeReachable(
         }
     }
 
-    while (queue.length > 0) {
-        const current = queue.pop()!;
-        if (reachable.has(current)) continue;
-        reachable.add(current);
-        const edges = graph.get(current);
-        if (edges) {
-            for (const dep of edges) {
-                if (!reachable.has(dep)) queue.push(dep);
-            }
-        }
-    }
-
-    return reachable;
+    return transitiveReachable(graph, seeds);
 }
 
 /** Check if a test file contains exactly one test with a single arithmetic/literal assertion. */
@@ -939,74 +865,29 @@ function isSingleArithmeticTest(content: string): boolean {
     return /^[\d\s+\-*/().'"]+$/.test(arg) || /^\w+\s*\([\d\s,'"]+\)$/.test(arg);
 }
 
-// ─── File collection helpers ────────────────────────────────────────────────
-
-const PRUNE_DIRS = new Set([
-    'node_modules', '.git', '.worktrees', 'dist', 'build', '.next', 'out',
-    'coverage', '.venv', 'venv', 'vendor', 'target', '.conventions',
-]);
+// ─── File collection helpers (delegating to shared fs-walk) ─────────────────
 
 /** Find all test files in the workspace (relative paths). */
 export function findTestFiles(workspacePath: string): string[] {
-    const files: string[] = [];
-    walkDir(workspacePath, workspacePath, (relPath) => {
-        if (TEST_FILE_PATTERNS.some(re => re.test(relPath))) {
-            files.push(relPath);
-        }
-    });
-    return files;
+    return collectFilesShared(workspacePath, isTestFile);
 }
 
 /** Find all non-test source files (relative paths). */
 function findSourceFiles(workspacePath: string): string[] {
-    const SOURCE_EXTENSIONS = new Set([
-        '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.vue', '.svelte',
-    ]);
-    const files: string[] = [];
-    walkDir(workspacePath, workspacePath, (relPath) => {
-        if (SOURCE_EXTENSIONS.has(path.extname(relPath).toLowerCase())) {
-            if (!TEST_FILE_PATTERNS.some(re => re.test(relPath))) {
-                files.push(relPath);
-            }
-        }
-    });
-    return files;
+    return collectFilesShared(workspacePath, (rel) =>
+        SOURCE_EXTENSIONS.has(path.extname(rel).toLowerCase()) && !isTestFile(rel));
 }
 
 /** Find all non-test source files for product entry graph (relative paths). */
 export function findProductSourceFiles(workspacePath: string): string[] {
-    const SOURCE_EXTENSIONS = new Set([
-        '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.vue', '.svelte',
-        '.html', '.css', '.scss',
-    ]);
-    const files: string[] = [];
-    walkDir(workspacePath, workspacePath, (relPath) => {
-        if (SOURCE_EXTENSIONS.has(path.extname(relPath).toLowerCase())) {
-            if (!TEST_FILE_PATTERNS.some(re => re.test(relPath))) {
-                files.push(relPath);
-            }
-        }
-    });
-    return files;
+    return collectFilesShared(workspacePath, (rel) =>
+        SOURCE_EXTENSIONS_WIDE.has(path.extname(rel).toLowerCase()) && !isTestFile(rel));
 }
 
-function walkDir(dir: string, root: string, callback: (relPath: string) => void): void {
-    let entries: string[];
-    try { entries = fs.readdirSync(dir); } catch { return; }
-    for (const entry of entries) {
-        if (PRUNE_DIRS.has(entry)) continue;
-        const absPath = path.join(dir, entry);
-        try {
-            const stat = fs.statSync(absPath);
-            if (stat.isDirectory()) {
-                walkDir(absPath, root, callback);
-            } else {
-                callback(path.relative(root, absPath));
-            }
-        } catch {
-            // skip
-        }
-    }
+function collectFilesShared(root: string, filter: (relPath: string) => boolean): string[] {
+    const files: string[] = [];
+    sharedWalkDir(root, root, (relPath) => { if (filter(relPath)) files.push(relPath); });
+    return files;
 }
 
 function findFilesMatchingGlob(dir: string, glob: string): string[] {
@@ -1027,16 +908,14 @@ export function countTestBlocks(content: string): { tests: number; skipped: numb
     let tests = 0;
     let skipped = 0;
 
-    let match: RegExpExecArray | null;
-
     TEST_BLOCK_RE.lastIndex = 0;
-    while ((match = TEST_BLOCK_RE.exec(content)) !== null) tests++;
+    while (TEST_BLOCK_RE.exec(content) !== null) tests++;
 
     SKIPPED_BLOCK_RE.lastIndex = 0;
-    while ((match = SKIPPED_BLOCK_RE.exec(content)) !== null) skipped++;
+    while (SKIPPED_BLOCK_RE.exec(content) !== null) skipped++;
 
     SKIPPED_ALT_RE.lastIndex = 0;
-    while ((match = SKIPPED_ALT_RE.exec(content)) !== null) skipped++;
+    while (SKIPPED_ALT_RE.exec(content) !== null) skipped++;
 
     return { tests, skipped };
 }
@@ -1059,10 +938,8 @@ export function loadBaseline(outputPath: string): ConfigBaseline | null {
 
 /** Persist a config baseline to disk. */
 export function saveBaseline(outputPath: string, baseline: ConfigBaseline): void {
-    const filePath = path.join(outputPath, 'config-baseline.json');
-    fs.mkdirSync(path.dirname(filePath), { recursive: true });
-    fs.writeFileSync(filePath, JSON.stringify(baseline, null, 2), 'utf-8');
-    log.info(`Config baseline saved to ${filePath}`);
+    writeOutputFile(outputPath, 'config-baseline.json', JSON.stringify(baseline, null, 2));
+    log.info(`Config baseline saved to ${path.join(outputPath, 'config-baseline.json')}`);
 }
 
 // ─── Tamper findings formatting ─────────────────────────────────────────────
@@ -1070,14 +947,52 @@ export function saveBaseline(outputPath: string, baseline: ConfigBaseline): void
 /** Format tamper findings as a Markdown section for PR descriptions. */
 export function tamperFindingsToMarkdown(findings: TamperFinding[]): string {
     if (findings.length === 0) return '';
-    const lines = [
-        '## Gate Integrity',
-        '',
-        '| Severity | Kind | File | Detail |',
-        '|----------|------|------|--------|',
+    const headers = ['Severity', 'Kind', 'File', 'Detail'];
+    const rows = findings.map(f => [
+        f.severity.toUpperCase(),
+        f.kind,
+        `\`${f.file}\``,
+        f.detail,
+    ]);
+    return `## Gate Integrity\n\n${mdTable(headers, rows)}`;
+}
+
+// ─── TamperFinding[] → GateOutcome adapter (Sub-Plan 25-10) ─────────────────
+
+/**
+ * Convert tamper findings into a standard GateOutcome.
+ */
+export function integrityGateOutcome(
+    tamperFindings: TamperFinding[],
+    trivialFindings: TrivialTestFinding[],
+): GateOutcome<{ tamper: TamperFinding[]; trivial: TrivialTestFinding[] }> {
+    const hasCritical = tamperFindings.some(f => f.severity === 'critical')
+        || trivialFindings.some(f => trivialTestSeverity(f.reason) === 'critical');
+    const totalFindings = tamperFindings.length + trivialFindings.length;
+
+    const status: GateStatus = totalFindings === 0 ? 'pass' : hasCritical ? 'fail' : 'pass';
+
+    const findings: GateFinding[] = [
+        ...tamperFindings.map(f => ({
+            id: `TAMPER-${f.kind}-${f.file.replace(/[\\/]/g, '-')}`,
+            severity: f.severity as 'critical' | 'major',
+            detail: f.detail,
+            file: f.file,
+        })),
+        ...trivialFindings.map(f => ({
+            id: `TRIVIAL-${f.reason}-${f.file.replace(/[\\/]/g, '-')}`,
+            severity: trivialTestSeverity(f.reason),
+            detail: f.detail,
+            file: f.file,
+        })),
     ];
-    for (const f of findings) {
-        lines.push(`| ${f.severity.toUpperCase()} | ${f.kind} | \`${f.file}\` | ${f.detail} |`);
-    }
-    return lines.join('\n');
+
+    return {
+        gate: 'gate-integrity',
+        status,
+        findings,
+        detail: { tamper: tamperFindings, trivial: trivialFindings },
+        markdown: tamperFindingsToMarkdown(tamperFindings),
+        bugs: [],  // Bugs are handled by the PR orchestrator via revert-and-rerun
+    };
 }

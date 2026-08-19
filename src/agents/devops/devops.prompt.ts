@@ -1,4 +1,5 @@
 import { getConventionReadInstructions } from '../../utils/coding-conventions';
+import { DOCKER_ALLOW_INSECURE_NPM } from '../../config';
 
 /**
  * Build the DevOps Engineer system prompt.
@@ -48,10 +49,13 @@ export function buildDevOpsPrompt(conventionFiles?: string[]): string {
     - CI triggers MUST match the documented branching strategy. Dev work merges into the
       system branch \`project/<system-name>\`; do not add \`pull_request\` triggers unless the
       documentation asks for them.
-    - Node.js Dockerfiles MUST include \`RUN npm config set strict-ssl false\` (or inline it
+    ${DOCKER_ALLOW_INSECURE_NPM
+        ? `- Node.js Dockerfiles MUST include \`RUN npm config set strict-ssl false\` (or inline it
       as \`npm config set strict-ssl false && npm ci\`) BEFORE any \`npm ci\` or \`npm install\`
-      command. The build environment may use a corporate proxy with self-signed SSL
-      certificates, and without this setting npm will fail with certificate validation errors.
+      command. The build environment uses a corporate proxy with self-signed SSL certificates.`
+        : `- Do NOT add \`npm config set strict-ssl false\` to Dockerfiles unless specifically
+      requested. If the build environment needs custom CA certificates, use
+      \`COPY certs/ /usr/local/share/ca-certificates/ && update-ca-certificates\` instead.`}
 </critical_rules>
 ${conventionsBlock}
 <workflow>

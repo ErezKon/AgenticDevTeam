@@ -1,15 +1,17 @@
-import { Component, OnInit, OnDestroy } from '@angular/core';
+import { Component, OnInit, OnDestroy, ChangeDetectionStrategy, ChangeDetectorRef } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { RouterLink } from '@angular/router';
 import { Subscription } from 'rxjs';
 import { ApiService, AgentEntry, WsMessage } from '../../services/api.service';
+import { EventLogComponent } from '../../components/event-log/event-log.component';
 
 @Component({
   selector: 'app-dashboard',
   standalone: true,
-  imports: [CommonModule, RouterLink],
+  imports: [CommonModule, RouterLink, EventLogComponent],
   templateUrl: './dashboard.component.html',
   styleUrls: ['./dashboard.component.scss'],
+  changeDetection: ChangeDetectionStrategy.OnPush,
 })
 export class DashboardComponent implements OnInit, OnDestroy {
   agents: AgentEntry[] = [];
@@ -22,15 +24,23 @@ export class DashboardComponent implements OnInit, OnDestroy {
   totalCalls = 0;
   private sub?: Subscription;
 
-  constructor(private api: ApiService) {}
+  constructor(private api: ApiService, private cdr: ChangeDetectorRef) {}
 
   ngOnInit() {
-    this.api.getAgents().subscribe(agents => this.agents = agents);
-    this.api.getActiveRuns().subscribe(runs => this.activeRuns = runs);
+    this.api.getAgents().subscribe(agents => { this.agents = agents; this.cdr.markForCheck(); });
+    this.api.getActiveRuns().subscribe(runs => { this.activeRuns = runs; this.cdr.markForCheck(); });
+
+    // Backfill recent events so the dashboard isn't empty on page load / reconnect
+    this.api.getRecentEvents(200).subscribe({
+      next: (events) => {
+        this.events = events.map(e => ({ event: e.type, data: e.payload, timestamp: e.ts } as WsMessage));
+        this.cdr.markForCheck();
+      },
+      error: () => { /* events endpoint may not be available yet */ },
+    });
 
     this.sub = this.api.connectWebSocket().subscribe(msg => {
-      this.events.unshift(msg);
-      if (this.events.length > 200) this.events.length = 200;
+      this.events = [msg, ...this.events].slice(0, 200);
 
       // Track derived state from event types
       if (msg.event === 'phase:start' && msg.data?.phase) {
@@ -46,13 +56,17 @@ export class DashboardComponent implements OnInit, OnDestroy {
       }
       // Refresh active runs on HITL events
       if (msg.event === 'hitl:waiting' || msg.event === 'run:started') {
-        this.api.getActiveRuns().subscribe(runs => this.activeRuns = runs);
+        this.api.getActiveRuns().subscribe(runs => { this.activeRuns = runs; this.cdr.markForCheck(); });
       }
+      this.cdr.markForCheck();
     });
   }
 
   ngOnDestroy() { this.sub?.unsubscribe(); }
 
+  // ── trackBy functions (Plan 25-11) ─────────────────────────────────────
+  trackByAgent(_i: number, agent: AgentEntry): string { return agent.tag; }
+  trackByRun(_i: number, run: any): string { return run.threadId; }
   getColor(code: number): string {
     return `hsl(${(code * 17) % 360}, 70%, 60%)`;
   }
@@ -65,18 +79,6 @@ export class DashboardComponent implements OnInit, OnDestroy {
       case 'operations': return 'green';
       default: return 'blue';
     }
-  }
-
-  eventBadgeClass(eventType: string): string {
-    if (eventType.startsWith('phase:')) return 'badge-purple';
-    if (eventType.startsWith('agent:')) return 'badge-blue';
-    if (eventType.startsWith('pr:')) return 'badge-green';
-    if (eventType.startsWith('gate:')) return 'badge-yellow';
-    if (eventType.startsWith('budget:')) return 'badge-red';
-    if (eventType.startsWith('tokens:')) return 'badge-cyan';
-    if (eventType.startsWith('hitl:')) return 'badge-purple';
-    if (eventType.startsWith('run:')) return 'badge-green';
-    return 'badge-blue';
   }
 
   budgetLevelClass(): string {

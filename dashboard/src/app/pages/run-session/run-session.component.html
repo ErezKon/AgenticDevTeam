@@ -10,6 +10,10 @@
           {{ state?.input?.runType || 'greenfield' }}
         </span>
         <span *ngIf="state?.cancelled" class="badge badge-red">Cancelled</span>
+        <span *ngIf="state?.acceptance?.status" class="acceptance-badge"
+              [ngClass]="acceptanceStatusClass()">
+          {{ state.acceptance.status }}
+        </span>
       </div>
     </div>
     <div class="header-right">
@@ -33,7 +37,7 @@
     <!-- B. Phase Timeline Stepper -->
     <section class="card phase-timeline-card">
       <div class="phase-timeline">
-        <div *ngFor="let step of visiblePhases; let i = index"
+        <div *ngFor="let step of visiblePhases; let i = index; trackBy: trackByPhase"
              class="phase-step"
              [ngClass]="phaseStatus(step)">
           <div class="step-indicator">
@@ -76,7 +80,7 @@
                 [ngModel]="currentArtifact"
                 (ngModelChange)="selectArtifact($event)"
                 [compareWith]="compareArtifacts">
-          <option *ngFor="let a of artifacts" [ngValue]="a">{{ a.title }} ({{ a.agentId }})</option>
+          <option *ngFor="let a of artifacts; trackBy: trackByFilePath" [ngValue]="a">{{ a.title }} ({{ a.agentId }})</option>
         </select>
       </div>
       <app-markdown-viewer [content]="currentArtifact.content"></app-markdown-viewer>
@@ -88,13 +92,8 @@
 
       <div *ngIf="state.pullRequests?.length" class="pr-section">
         <h3>Pull Requests ({{ state.pullRequests.length }})</h3>
-        <div *ngFor="let pr of state.pullRequests" class="pr-entry">
-          <span class="badge"
-            [ngClass]="{
-              'badge-green': pr.status === 'merged',
-              'badge-yellow': pr.status === 'open',
-              'badge-red': pr.status === 'closed'
-            }">{{ pr.status }}</span>
+        <div *ngFor="let pr of state.pullRequests; trackBy: trackByIndex" class="pr-entry">
+          <app-pr-badge [status]="pr.status"></app-pr-badge>
           <span class="pr-title">
             <a *ngIf="pr.url" [href]="pr.url" target="_blank" rel="noopener">#{{ pr.number }} {{ pr.title }}</a>
             <span *ngIf="!pr.url">#{{ pr.number }} {{ pr.title }}</span>
@@ -105,22 +104,7 @@
 
       <div *ngIf="state.fileChanges?.length" class="file-changes-section">
         <h3>File Changes ({{ state.fileChanges.length }})</h3>
-        <table class="data-table">
-          <thead><tr><th>File Path</th><th>Action</th></tr></thead>
-          <tbody>
-            <tr *ngFor="let fc of state.fileChanges">
-              <td><code>{{ fc.filePath }}</code></td>
-              <td>
-                <span class="badge"
-                  [ngClass]="{
-                    'badge-green': fc.action === 'add',
-                    'badge-blue': fc.action === 'modify',
-                    'badge-red': fc.action === 'delete'
-                  }">{{ fc.action }}</span>
-              </td>
-            </tr>
-          </tbody>
-        </table>
+        <app-file-changes-table [changes]="state.fileChanges"></app-file-changes-table>
       </div>
     </section>
 
@@ -201,7 +185,7 @@
     <!-- C. Phase Output Viewer (Tabbed) -->
     <section class="card output-card">
       <div class="output-tabs">
-        <button *ngFor="let tab of availableTabs"
+        <button *ngFor="let tab of availableTabs; trackBy: trackByTab"
           class="tab-btn"
           [class.active]="activeTab === tab.id"
           (click)="activeTab = tab.id">
@@ -219,7 +203,7 @@
           <table class="data-table">
             <thead><tr><th>Name</th><th>Type</th><th>Description</th></tr></thead>
             <tbody>
-              <tr *ngFor="let comp of state.architecture.components">
+              <tr *ngFor="let comp of state.architecture.components; trackBy: trackByIndex">
                 <td><strong>{{ comp.name }}</strong></td>
                 <td><span class="badge badge-blue">{{ comp.type }}</span></td>
                 <td>{{ comp.description }}</td>
@@ -238,7 +222,7 @@
           <table class="data-table">
             <thead><tr><th>Layer</th><th>Choice</th><th>Rationale</th></tr></thead>
             <tbody>
-              <tr *ngFor="let tech of state.techStack">
+              <tr *ngFor="let tech of state.techStack; trackBy: trackByIndex">
                 <td><strong>{{ tech.layer }}</strong></td>
                 <td>{{ tech.choice }}</td>
                 <td>{{ tech.rationale }}</td>
@@ -249,7 +233,7 @@
 
         <!-- Epics Tab -->
         <div *ngIf="activeTab === 'epics'">
-          <div *ngFor="let epic of state.epics" class="epic-item">
+          <div *ngFor="let epic of state.epics; trackBy: trackById" class="epic-item">
             <span class="badge badge-purple">{{ epic.id }}</span>
             <strong>{{ epic.title }}</strong>
             <p>{{ epic.description }}</p>
@@ -258,7 +242,7 @@
 
         <!-- User Stories Tab -->
         <div *ngIf="activeTab === 'stories'">
-          <div *ngFor="let story of state.userStories" class="story-card">
+          <div *ngFor="let story of state.userStories; trackBy: trackById" class="story-card">
             <div class="story-header">
               <span class="badge badge-blue">{{ story.id }}</span>
               <strong>{{ story.title }}</strong>
@@ -266,7 +250,7 @@
             <div *ngIf="story.acceptanceCriteria?.length" class="ac-list">
               <span class="ac-label">Acceptance Criteria:</span>
               <ul>
-                <li *ngFor="let ac of story.acceptanceCriteria">{{ ac }}</li>
+                <li *ngFor="let ac of story.acceptanceCriteria; trackBy: trackByIndex">{{ ac }}</li>
               </ul>
             </div>
           </div>
@@ -277,7 +261,7 @@
           <table class="data-table">
             <thead><tr><th>ID</th><th>Title</th><th>Layer</th><th>Tech</th><th>Story</th></tr></thead>
             <tbody>
-              <tr *ngFor="let task of state.tasks">
+              <tr *ngFor="let task of state.tasks; trackBy: trackById">
                 <td><code>{{ task.id }}</code></td>
                 <td>{{ task.title }}</td>
                 <td>{{ task.layer }}</td>
@@ -293,7 +277,7 @@
           <table class="data-table">
             <thead><tr><th>Dev Agent</th><th>Branch</th><th>Tasks</th><th>Reviewers</th></tr></thead>
             <tbody>
-              <tr *ngFor="let a of state.assignments">
+              <tr *ngFor="let a of state.assignments; trackBy: trackByIndex">
                 <td><strong>{{ a.devAgentId }}</strong></td>
                 <td><code>{{ a.branchName }}</code></td>
                 <td>{{ a.taskIds?.join(', ') }}</td>
@@ -309,10 +293,10 @@
           <table class="data-table">
             <thead><tr><th>Name</th><th>Fields</th></tr></thead>
             <tbody>
-              <tr *ngFor="let entity of state.dbDesign.entities">
+              <tr *ngFor="let entity of state.dbDesign.entities; trackBy: trackByIndex">
                 <td><strong>{{ entity.name }}</strong></td>
                 <td>
-                  <span *ngFor="let field of entity.fields; let last = last">
+                  <span *ngFor="let field of entity.fields; let last = last; trackBy: trackByIndex">
                     {{ field.name }}: {{ field.type }}{{ !last ? ', ' : '' }}
                   </span>
                 </td>
@@ -327,7 +311,7 @@
 
           <div *ngIf="state.dbDesign.migrations?.length">
             <h3>Migrations ({{ state.dbDesign.migrations.length }})</h3>
-            <div *ngFor="let m of state.dbDesign.migrations" class="migration-item">
+            <div *ngFor="let m of state.dbDesign.migrations; trackBy: trackByIndex" class="migration-item">
               <code>{{ m.filename }}</code>
             </div>
           </div>
@@ -335,27 +319,12 @@
 
         <!-- File Changes Tab -->
         <div *ngIf="activeTab === 'fileChanges'">
-          <table class="data-table">
-            <thead><tr><th>File Path</th><th>Action</th></tr></thead>
-            <tbody>
-              <tr *ngFor="let fc of state.fileChanges">
-                <td><code>{{ fc.filePath }}</code></td>
-                <td>
-                  <span class="badge"
-                    [ngClass]="{
-                      'badge-green': fc.action === 'add',
-                      'badge-blue': fc.action === 'modify',
-                      'badge-red': fc.action === 'delete'
-                    }">{{ fc.action }}</span>
-                </td>
-              </tr>
-            </tbody>
-          </table>
+          <app-file-changes-table [changes]="state.fileChanges"></app-file-changes-table>
         </div>
 
         <!-- Test Reports Tab -->
         <div *ngIf="activeTab === 'testReports'">
-          <div *ngFor="let report of state.testReports" class="report-card">
+          <div *ngFor="let report of state.testReports; trackBy: trackByIndex" class="report-card">
             <div class="report-header">
               <strong>{{ report.name }}</strong>
               <span class="badge" [ngClass]="report.passed ? 'badge-green' : 'badge-red'">
@@ -371,7 +340,7 @@
           <table class="data-table">
             <thead><tr><th>ID</th><th>Severity</th><th>Description</th><th>Status</th></tr></thead>
             <tbody>
-              <tr *ngFor="let bug of state.bugs">
+              <tr *ngFor="let bug of state.bugs; trackBy: trackByIndex">
                 <td><code>{{ bug.id }}</code></td>
                 <td>
                   <span class="badge"
@@ -393,17 +362,10 @@
           <table class="data-table">
             <thead><tr><th>#</th><th>Title</th><th>Status</th><th>Branch</th></tr></thead>
             <tbody>
-              <tr *ngFor="let pr of state.pullRequests">
+              <tr *ngFor="let pr of state.pullRequests; trackBy: trackByIndex">
                 <td>{{ pr.number }}</td>
                 <td>{{ pr.title }}</td>
-                <td>
-                  <span class="badge"
-                    [ngClass]="{
-                      'badge-green': pr.status === 'merged',
-                      'badge-yellow': pr.status === 'open',
-                      'badge-red': pr.status === 'closed'
-                    }">{{ pr.status }}</span>
-                </td>
+                <td><app-pr-badge [status]="pr.status"></app-pr-badge></td>
                 <td><code>{{ pr.branch }}</code></td>
               </tr>
             </tbody>
@@ -414,7 +376,7 @@
         <div *ngIf="activeTab === 'devops' && state.devopsPlan">
           <div *ngIf="state.devopsPlan.dockerfiles?.length">
             <h3>Dockerfiles ({{ state.devopsPlan.dockerfiles.length }})</h3>
-            <div *ngFor="let df of state.devopsPlan.dockerfiles" class="devops-item">
+            <div *ngFor="let df of state.devopsPlan.dockerfiles; trackBy: trackByIndex" class="devops-item">
               <code>{{ df.path || df }}</code>
             </div>
           </div>
@@ -424,13 +386,13 @@
           </div>
           <div *ngIf="state.devopsPlan.k8sManifests?.length">
             <h3>K8s Manifests ({{ state.devopsPlan.k8sManifests.length }})</h3>
-            <div *ngFor="let m of state.devopsPlan.k8sManifests" class="devops-item">
+            <div *ngFor="let m of state.devopsPlan.k8sManifests; trackBy: trackByIndex" class="devops-item">
               <code>{{ m.path || m }}</code>
             </div>
           </div>
           <div *ngIf="state.runningContainers?.length">
             <h3>Running Containers</h3>
-            <div *ngFor="let c of state.runningContainers" class="devops-item">
+            <div *ngFor="let c of state.runningContainers; trackBy: trackByIndex" class="devops-item">
               <code>{{ c }}</code>
             </div>
           </div>
@@ -447,7 +409,7 @@
     <section class="card transcript-card">
       <h2 style="margin-bottom: 0.75rem;">Transcript (last {{ transcriptMessages.length }})</h2>
       <div class="transcript-log" #transcriptContainer>
-        <div *ngFor="let msg of transcriptMessages" class="transcript-entry">
+        <div *ngFor="let msg of transcriptMessages; trackBy: trackByIndex" class="transcript-entry">
           <span class="transcript-time">{{ msg.timestamp || msg.ts }}</span>
           <span class="transcript-agent">{{ msg.agentId || msg.agent || 'system' }}:</span>
           <span class="transcript-text">{{ msg.message || msg.text }}</span>
@@ -461,16 +423,7 @@
     <!-- WebSocket Events Log -->
     <section class="card">
       <h2 style="margin-bottom: 0.75rem;">Live Events ({{ events.length }})</h2>
-      <div class="event-log">
-        <div *ngFor="let msg of events.slice().reverse().slice(0, 50)" class="event-entry">
-          <span class="event-time">{{ msg.timestamp | date:'HH:mm:ss' }}</span>
-          <span class="event-type badge" [ngClass]="eventBadgeClass(msg.event)">{{ msg.event }}</span>
-          <span class="event-data">{{ msg.data | json }}</span>
-        </div>
-        <div *ngIf="events.length === 0" class="empty-state">
-          Waiting for WebSocket events...
-        </div>
-      </div>
+      <app-event-log [events]="recentEvents" emptyMessage="Waiting for WebSocket events..."></app-event-log>
     </section>
   </div>
 </div>

@@ -56,16 +56,6 @@ export function estimateCost(
     return inputCost + outputCost;
 }
 
-/**
- * Estimated USD cost at full list price (no cache discounts).
- * Used by the token report to show savings from caching.
- */
-export function estimateListCost(model: string, inputTokens: number, outputTokens: number): number {
-    const pricing = MODEL_PRICING[model];
-    if (!pricing) return 0;
-    return (inputTokens / 1000) * pricing.inputPer1k + (outputTokens / 1000) * pricing.outputPer1k;
-}
-
 /** Estimated USD cost for a whole run summary (cache-aware). */
 export function estimateRunCost(summary: RunUsageSummary): number {
     let total = 0;
@@ -80,18 +70,6 @@ export function estimateRunCost(summary: RunUsageSummary): number {
         const agentCacheRead = Math.round(runCacheRead * ratio);
         const agentCacheWrite = Math.round(runCacheWrite * ratio);
         total += estimateCost(a.model, a.inputTokens, a.outputTokens, agentCacheRead, agentCacheWrite);
-    }
-    return total;
-}
-
-/**
- * Estimated full list-price cost for a whole run summary (no cache discounts).
- * Used alongside `estimateRunCost` to show the savings from prompt caching.
- */
-export function estimateRunListCost(summary: RunUsageSummary): number {
-    let total = 0;
-    for (const a of summary.byAgent) {
-        total += estimateListCost(a.model, a.inputTokens, a.outputTokens);
     }
     return total;
 }

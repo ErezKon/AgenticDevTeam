@@ -10,9 +10,10 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { getLogger } from './logger';
+import { appendOutputLine } from './artifact-writer';
 import { RUN_LEDGER_ENABLED } from '../config';
 import type { PhaseName } from '../agents/_shared/schemas/phase.schema';
-import type { AcceptanceStatus } from '../conductor/acceptance-gate';
+import type { AcceptanceStatus } from '../conductor/gate-types';
 import type { TamperFinding } from '../conductor/gate-integrity';
 
 const log = getLogger('[Ledger]', 178);
@@ -39,25 +40,35 @@ type DistributiveOmit<T, K extends keyof any> = T extends any ? Omit<T, K> : nev
 
 // ─── Singleton state ────────────────────────────────────────────────────────
 
+import { getRunContext } from './run-context';
+
 let _outputPath: string | null = null;
+
+/** Get the active ledger output path — per-run scoped or module default. */
+function _activeOutputPath(): string | null {
+    const ctx = getRunContext();
+    return ctx ? ctx.ledger.outputPath : _outputPath;
+}
 
 // ─── Public API ─────────────────────────────────────────────────────────────
 
 /** Set the output directory for this run. Must be called before the first append. */
 export function initLedger(outputPath: string): void {
-    _outputPath = outputPath;
+    const ctx = getRunContext();
+    if (ctx) {
+        ctx.ledger.outputPath = outputPath;
+    } else {
+        _outputPath = outputPath;
+    }
 }
 
 /** Append a single entry to the ledger JSONL file. Never throws. */
 export function appendLedger(entry: DistributiveOmit<LedgerEntry, 't'>): void {
-    if (!RUN_LEDGER_ENABLED || !_outputPath) return;
-    try {
-        const full = { t: new Date().toISOString(), ...entry };
-        const line = JSON.stringify(full) + '\n';
-        fs.appendFileSync(path.join(_outputPath, 'ledger.jsonl'), line, 'utf-8');
-    } catch (err: any) {
-        log.warn(`Ledger write failed: ${err.message}`);
-    }
+    const outPath = _activeOutputPath();
+    if (!RUN_LEDGER_ENABLED || !outPath) return;
+    const full = { t: new Date().toISOString(), ...entry };
+    const line = JSON.stringify(full) + '\n';
+    appendOutputLine(outPath, 'ledger.jsonl', line);
 }
 
 /** Read back the complete ledger as an array of entries. */

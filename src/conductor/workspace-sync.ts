@@ -12,7 +12,7 @@
  * already pushed by commitAndPushArtifacts.
  */
 import { getLogger } from '../utils/logger';
-import { gitExec, gitExecVerbose, gitPush } from '../utils/git-exec';
+import { gitExec, gitExecVerbose } from '../utils/git-exec';
 import { WORKSPACE_SYNC_ALLOW_RESET } from '../config';
 import type { GitContext } from '../agents/_shared/base-schemas';
 
@@ -69,10 +69,9 @@ export const GIT_FETCH_ATTEMPTS = 3;
 /** Base backoff between fetch retries; doubles each attempt. */
 const FETCH_RETRY_BASE_MS = 1_000;
 
-/** Busy-wait backoff — `syncWorkspaceToBranch` is synchronous by design. */
-function sleepSync(ms: number): void {
-    const until = Date.now() + ms;
-    while (Date.now() < until) { /* spin */ }
+/** Non-blocking sleep — Plan 25-11: replaced busy-wait `sleepSync` that blocked the event loop. */
+function sleep(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 /**
@@ -82,17 +81,17 @@ function sleepSync(ms: number): void {
  * the timeout). A single attempt turned a blip into a failed sync, which left
  * QA and DevOps reading a stale tree.
  */
-export function fetchWithRetry(
+export async function fetchWithRetry(
     gitRoot: string,
     branch: string,
     attempts = GIT_FETCH_ATTEMPTS,
-): { ok: boolean; stdout: string; stderr: string; code: number } {
+): Promise<{ ok: boolean; stdout: string; stderr: string; code: number }> {
     let last = { ok: false, stdout: '', stderr: 'fetch not attempted', code: 1 };
     for (let attempt = 1; attempt <= attempts; attempt++) {
         last = gitExecVerbose(gitRoot, `fetch origin ${branch}`);
         if (last.ok) return last;
         log.warn(`fetch origin/${branch} attempt ${attempt}/${attempts} failed [exit ${last.code}]: ${last.stderr}`);
-        if (attempt < attempts) sleepSync(FETCH_RETRY_BASE_MS * 2 ** (attempt - 1));
+        if (attempt < attempts) await sleep(FETCH_RETRY_BASE_MS * 2 ** (attempt - 1));
     }
     return last;
 }
@@ -107,12 +106,12 @@ export function fetchWithRetry(
  * @param gitContext  Optional git context for authenticated fetches.
  * @param opts      `allowReset`: if true (default), fall back to `reset --hard` when ff/rebase fail.
  */
-export function syncWorkspaceToBranch(
+export async function syncWorkspaceToBranch(
     gitRoot: string,
     branch: string,
-    gitContext?: GitContext | null,
+    _gitContext?: GitContext | null,
     opts?: { allowReset?: boolean },
-): SyncResult {
+): Promise<SyncResult> {
     const allowReset = opts?.allowReset ?? WORKSPACE_SYNC_ALLOW_RESET;
 
     // 1. Prune stale worktree tracking entries
@@ -129,7 +128,7 @@ export function syncWorkspaceToBranch(
     // 3. Fetch origin/<branch> — network op, so use the verbose variant with
     //    retries. A transient/SIGTERM'd fetch used to abort the whole sync with
     //    the opaque message `Error:` and no exit code (Plan 21, E6).
-    const fetch = fetchWithRetry(gitRoot, branch);
+    const fetch = await fetchWithRetry(gitRoot, branch);
     if (!fetch.ok) {
         log.error(`Failed to fetch origin/${branch} after ${GIT_FETCH_ATTEMPTS} attempt(s) [exit ${fetch.code}]: ${fetch.stderr}`);
         return { ok: false, headSha: '', details: `fetch failed (exit ${fetch.code}): ${fetch.stderr}`, strategy: 'failed' };
