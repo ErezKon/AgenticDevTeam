@@ -316,7 +316,9 @@ ${cfg.conventionFiles.map((f) => `    - .conventions/${f}`).join('\n')}
     not demonstrably met by the diff, that is \`major\`.
     Exception: interface stubs created by the scaffold assignment from the repo contract (files
     with throw new Error('not implemented') bodies) are expected scaffolding and MUST NOT be
-    flagged as placeholder code.
+    flagged as placeholder code. The PR description's "Intentional Scaffold Stubs" section
+    lists which assignments produce stubs — defer to it. These stubs will be replaced by
+    real implementations in dependent feature branches.
 </severity_rubric>
 
 <tool_usage>

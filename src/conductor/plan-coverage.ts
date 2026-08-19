@@ -26,7 +26,9 @@ export interface CoverageViolation {
         | 'dangling-task-ref'
         | 'dangling-dependency'
         | 'epic-without-story'
-        | 'duplicate-id';
+        | 'duplicate-id'
+        | 'oversized-assignment'
+        | 'agent-overloaded';
     severity: 'critical' | 'major';
     id: string;
     detail: string;
@@ -241,6 +243,42 @@ export function validateAssignmentPlan(state: ProjectStateType): CoverageViolati
         }
     }
 
+    // ── Plan 26, B2: Scope feasibility — flag oversized assignments ──────
+    const COMPLEXITY_CONCERN_THRESHOLD = new Set(['complex', 'very-complex']);
+    const ESTIMATE_CONCERN_RE = /^[3-9]d$|^\d{2,}d$/; // 3d+ or 10d+
+
+    for (const a of state.assignments ?? []) {
+        // Flag assignments that are both complex AND have high estimates
+        if (COMPLEXITY_CONCERN_THRESHOLD.has(a.complexity) && ESTIMATE_CONCERN_RE.test(a.estimate)) {
+            violations.push({
+                kind: 'oversized-assignment',
+                severity: 'major',
+                id: a.id,
+                detail: `Assignment ${a.id} is ${a.complexity} with estimate ${a.estimate} — consider splitting into smaller assignments`,
+            });
+        }
+
+        // Flag agents with too many tasks on one branch
+        const agentAssignmentsOnBranch = (state.assignments ?? [])
+            .filter(other => other.devAgentId === a.devAgentId && other.branchName === a.branchName);
+        const totalTasks = agentAssignmentsOnBranch.reduce((sum, o) => sum + (o.taskIds?.length ?? 0), 0);
+        if (totalTasks > 6) {
+            // Deduplicate: only report once per agent+branch pair
+            const agentBranchKey = `${a.devAgentId}:${a.branchName}`;
+            const alreadyReported = violations.some(
+                v => v.kind === 'agent-overloaded' && v.id === agentBranchKey,
+            );
+            if (!alreadyReported) {
+                violations.push({
+                    kind: 'agent-overloaded',
+                    severity: 'major',
+                    id: agentBranchKey,
+                    detail: `Agent ${a.devAgentId} has ${totalTasks} tasks on branch ${a.branchName} — risk of budget exhaustion`,
+                });
+            }
+        }
+    }
+
     return violations;
 }
 
@@ -257,6 +295,8 @@ export function buildCoverageGapPrompt(
     const storyGaps = violations.filter(v => v.kind === 'story-without-assignment');
     const taskGaps = violations.filter(v => v.kind === 'task-without-assignment');
     const danglingDeps = violations.filter(v => v.kind === 'dangling-dependency');
+    const oversized = violations.filter(v => v.kind === 'oversized-assignment');
+    const overloaded = violations.filter(v => v.kind === 'agent-overloaded');
 
     const parts: string[] = [
         'Your assignment plan is incomplete. The following gaps MUST be closed:',
@@ -278,6 +318,21 @@ export function buildCoverageGapPrompt(
     if (danglingDeps.length > 0) {
         parts.push(`## Dangling dependsOn ids (${danglingDeps.length}):`);
         for (const v of danglingDeps) parts.push(`  ${v.detail}`);
+        parts.push('');
+    }
+
+    // Plan 26, B2: scope feasibility feedback
+    if (oversized.length > 0) {
+        parts.push(`## Oversized assignments (${oversized.length}):`);
+        for (const v of oversized) parts.push(`  ${v.detail}`);
+        parts.push('Split these into smaller assignments with sequential dependsOn.');
+        parts.push('');
+    }
+
+    if (overloaded.length > 0) {
+        parts.push(`## Agent overload (${overloaded.length}):`);
+        for (const v of overloaded) parts.push(`  ${v.detail}`);
+        parts.push('Redistribute tasks across agents or split into separate assignments.');
         parts.push('');
     }
 

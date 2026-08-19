@@ -101,12 +101,17 @@ export async function runReviewLoop(input: ReviewLoopInput): Promise<ReviewLoopR
 
     for (let iteration = 1; iteration <= getEffectiveLimits().maxReviewIterations; iteration++) {
         // Plan 24 D2: check branch budget before each review iteration
+        // Plan 26, A3: guarantee at least ONE review iteration runs regardless of budget
         const reviewBudgetReason = checkBranchBudget(`before review iteration ${iteration}`);
         if (reviewBudgetReason) {
-            log.warn(`Branch ${branchName} budget exceeded: ${reviewBudgetReason} — ending review loop`);
-            allTranscript.push(msg('conductor', `Branch budget exceeded during review: ${reviewBudgetReason}`));
-            emitRunEvent('branch:budget-exceeded', { branchName, reason: reviewBudgetReason, checkpoint: `review iteration ${iteration}` });
-            break;
+            if (iteration > 1) {
+                log.warn(`Branch ${branchName} budget exceeded: ${reviewBudgetReason} — ending review loop`);
+                allTranscript.push(msg('conductor', `Branch budget exceeded during review: ${reviewBudgetReason}`));
+                emitRunEvent('branch:budget-exceeded', { branchName, reason: reviewBudgetReason, checkpoint: `review iteration ${iteration}` });
+                break;
+            }
+            log.warn(`Branch ${branchName} budget exceeded: ${reviewBudgetReason} — proceeding with mandatory first review`);
+            allTranscript.push(msg('conductor', `Budget exceeded but proceeding with mandatory first review iteration`));
         }
 
         const effectiveReviewLimit = getEffectiveLimits().maxReviewIterations;

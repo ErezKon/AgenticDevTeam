@@ -101,19 +101,44 @@ function hasCacheControl(content: unknown): boolean {
 }
 
 /**
- * Return the message's content as a block array with `cache_control: ephemeral`
- * on the final block. String content is promoted to a single text block.
+ * Block types that must never carry `cache_control`.
+ *
+ * Anthropic's API rejects `cache_control` on `thinking` and `redacted_thinking`
+ * blocks (`Extra inputs are not permitted`). When `sanitizeStreamingContentBlocks`
+ * strips tool_use blocks and only thinking blocks remain, we must skip breakpoint
+ * placement entirely.  (Plan 26, A1)
  */
-function blocksWithTrailingBreakpoint(content: unknown): TextBlock[] | null {
+const THINKING_TYPES = new Set(['thinking', 'redacted_thinking']);
+
+/**
+ * Return the message's content as a block array with `cache_control: ephemeral`
+ * on the last non-thinking block. String content is promoted to a single text block.
+ *
+ * Returns `null` when:
+ * - content is empty or not an array/string
+ * - all blocks are thinking blocks (no valid target for cache_control)
+ */
+export function blocksWithTrailingBreakpoint(content: unknown): TextBlock[] | null {
     if (typeof content === 'string') {
         if (content.length === 0) return null;
         return [{ type: 'text', text: content, cache_control: EPHEMERAL }];
     }
     if (!Array.isArray(content) || content.length === 0) return null;
     const blocks = content.map(b => (b !== null && typeof b === 'object' ? { ...(b as TextBlock) } : b)) as TextBlock[];
-    const last = blocks[blocks.length - 1];
-    if (last === null || typeof last !== 'object') return null;
-    last.cache_control = EPHEMERAL;
+
+    // Plan 26, A1: scan backwards for the last block whose type is NOT thinking.
+    // Placing cache_control on a thinking block causes Anthropic API rejection.
+    let targetIdx = -1;
+    for (let i = blocks.length - 1; i >= 0; i--) {
+        const b = blocks[i];
+        if (b !== null && typeof b === 'object' && !THINKING_TYPES.has(b.type)) {
+            targetIdx = i;
+            break;
+        }
+    }
+    if (targetIdx < 0) return null; // all blocks are thinking — skip breakpoint
+
+    blocks[targetIdx].cache_control = EPHEMERAL;
     return blocks;
 }
 

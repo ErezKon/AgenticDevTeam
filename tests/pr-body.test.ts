@@ -155,4 +155,43 @@ describe('buildPRDescription', () => {
         const desc = buildPRDescription([makeAssignment()], [], 'feature');
         expect(desc).toContain('_(changes will be listed after development)_');
     });
+
+    // Plan 26, B5: stub awareness tests
+    it('includes scaffold stubs section for assignments with [STUBS] tag', () => {
+        const stubAssignment = makeAssignment({
+            id: 'A-003',
+            description: '[STUBS] Create interface stub files for all declared modules',
+            taskType: 'chore',
+        });
+        const desc = buildPRDescription([stubAssignment], [], 'chore');
+        expect(desc).toContain('## Intentional Scaffold Stubs');
+        expect(desc).toContain('throw new Error');
+        expect(desc).toContain('A-003');
+        expect(desc).toContain('[STUBS]');
+    });
+
+    it('includes scaffold stubs section for chore assignments mentioning "stub"', () => {
+        const stubAssignment = makeAssignment({
+            id: 'A-004',
+            description: 'Create stub implementations for all remaining modules',
+            taskType: 'chore',
+        });
+        const desc = buildPRDescription([stubAssignment], [], 'chore');
+        expect(desc).toContain('## Intentional Scaffold Stubs');
+        expect(desc).toContain('A-004');
+    });
+
+    it('does not include stubs section for regular feature assignments', () => {
+        const desc = buildPRDescription([makeAssignment()], [], 'feature');
+        expect(desc).not.toContain('## Intentional Scaffold Stubs');
+    });
+
+    it('does not include stubs section when taskType is not chore', () => {
+        const assignment = makeAssignment({
+            description: 'Some stub-like description but not chore',
+            taskType: 'feature',
+        });
+        const desc = buildPRDescription([assignment], [], 'feature');
+        expect(desc).not.toContain('## Intentional Scaffold Stubs');
+    });
 });

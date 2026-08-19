@@ -74,5 +74,20 @@ export function buildPRDescription(
         sections.push('_(changes will be listed after development)_');
     }
 
+    // Plan 26, B5: Intentional scaffold stubs section
+    const stubAssignments = assignments.filter(a =>
+        a.description.includes('[STUBS]') ||
+        (a.taskType === 'chore' && a.description.toLowerCase().includes('stub')),
+    );
+    if (stubAssignments.length > 0) {
+        sections.push('\n## Intentional Scaffold Stubs\n');
+        sections.push('The following files contain `throw new Error(\'not implemented\')` stubs.');
+        sections.push('These are intentional scaffolding from the repo contract — they will be');
+        sections.push('replaced by real implementations in feature branches. **Do NOT flag these as incomplete.**\n');
+        for (const sa of stubAssignments) {
+            sections.push(`- ${sa.id}: ${sa.description.slice(0, 200)}`);
+        }
+    }
+
     return sections.join('\n');
 }

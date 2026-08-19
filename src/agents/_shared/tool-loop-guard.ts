@@ -169,23 +169,54 @@ const DEFAULT_BUDGETS: Record<string, Required<ToolBudgets>> = {
 };
 
 /**
- * Resolve per-rank budgets, with optional JSON override from config.
+ * Plan 26, B4: complexity multipliers for budget scaling.
+ *
+ * Trivial/simple assignments get a smaller budget (they should need fewer turns),
+ * complex/very-complex get proportionally more so the agent can finish without
+ * exhausting its budget and requiring a costly respawn.
+ */
+export const COMPLEXITY_MULTIPLIERS: Record<string, number> = {
+    'trivial': 0.75,
+    'simple': 0.75,
+    'moderate': 1.0,
+    'complex': 1.5,
+    'very-complex': 2.0,
+};
+
+/**
+ * Resolve per-rank budgets, with optional JSON override from config and
+ * optional complexity scaling (Plan 26, B4).
  *
  * The override may specify a subset of fields; missing fields fall back to the
  * built-in defaults for that rank so a partial override cannot accidentally
  * zero out a category.
+ *
+ * When `complexity` is provided, `turns` and `writes` are scaled by the
+ * corresponding multiplier. Reads and shell stay at base — they are rarely
+ * the binding constraint.
  */
-export function resolveToolBudgets(rank: string, jsonOverride?: string): Required<ToolBudgets> {
+export function resolveToolBudgets(rank: string, jsonOverride?: string, complexity?: string): Required<ToolBudgets> {
     const base = DEFAULT_BUDGETS[rank] ?? DEFAULT_BUDGETS.default;
-    if (!jsonOverride) return { ...base };
-    try {
-        const parsed = JSON.parse(jsonOverride);
-        const entry = parsed?.[rank];
-        if (entry && typeof entry === 'object') return { ...base, ...entry };
-    } catch {
-        guardLog.warn(`TOOL_BUDGETS_JSON is not valid JSON — using defaults for rank "${rank}"`);
+    let resolved = { ...base };
+    if (jsonOverride) {
+        try {
+            const parsed = JSON.parse(jsonOverride);
+            const entry = parsed?.[rank];
+            if (entry && typeof entry === 'object') resolved = { ...resolved, ...entry };
+        } catch {
+            guardLog.warn(`TOOL_BUDGETS_JSON is not valid JSON — using defaults for rank "${rank}"`);
+        }
     }
-    return { ...base };
+
+    // Plan 26, B4: apply complexity scaling to turns and writes
+    const multiplier = COMPLEXITY_MULTIPLIERS[complexity ?? 'moderate'] ?? 1.0;
+    if (multiplier !== 1.0) {
+        resolved.turns = Math.round(resolved.turns * multiplier);
+        resolved.writes = Math.round(resolved.writes * multiplier);
+        // reads and shell stay at base — they're rarely the bottleneck
+    }
+
+    return resolved;
 }
 
 // ─── Guard implementation ───────────────────────────────────────────────────

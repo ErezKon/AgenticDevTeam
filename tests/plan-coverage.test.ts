@@ -185,6 +185,83 @@ describe('validateAssignmentPlan', () => {
     });
 });
 
+// ─── Plan 26, B2: scope feasibility checks ─────────────────────────────────
+
+describe('validateAssignmentPlan — scope feasibility (Plan 26, B2)', () => {
+    it('flags oversized assignments (complex + 3d estimate)', () => {
+        const state = makeState({
+            assignments: [
+                {
+                    id: 'ASSIGN-001', storyId: 'US-001', additionalStoryIds: [], taskIds: ['TASK-001'], acIndexes: [],
+                    devAgentId: 'principal-frontend', rank: 'principal', priority: 'high', complexity: 'complex',
+                    estimate: '3d', description: 'Build everything', dependsOn: [], taskType: 'chore',
+                },
+                {
+                    id: 'ASSIGN-002', storyId: 'US-002', additionalStoryIds: [], taskIds: ['TASK-002'], acIndexes: [],
+                    devAgentId: 'senior-frontend', rank: 'senior', priority: 'medium', complexity: 'moderate',
+                    estimate: '4h', description: 'Build admin', dependsOn: [], taskType: 'feature',
+                },
+            ] as any,
+        });
+        const v = validateAssignmentPlan(state);
+        const oversized = v.filter(vi => vi.kind === 'oversized-assignment');
+        expect(oversized).toHaveLength(1);
+        expect(oversized[0].id).toBe('ASSIGN-001');
+    });
+
+    it('does not flag moderate assignments', () => {
+        const state = makeState();
+        const v = validateAssignmentPlan(state);
+        expect(v.filter(vi => vi.kind === 'oversized-assignment')).toHaveLength(0);
+    });
+
+    it('flags very-complex + 5d estimate', () => {
+        const state = makeState({
+            assignments: [
+                {
+                    id: 'ASSIGN-001', storyId: 'US-001', additionalStoryIds: ['US-002'],
+                    taskIds: ['TASK-001', 'TASK-002'], acIndexes: [],
+                    devAgentId: 'principal-frontend', rank: 'principal', priority: 'critical',
+                    complexity: 'very-complex', estimate: '5d', description: 'All tasks', dependsOn: [],
+                    taskType: 'chore',
+                },
+            ] as any,
+        });
+        const v = validateAssignmentPlan(state);
+        const oversized = v.filter(vi => vi.kind === 'oversized-assignment');
+        expect(oversized.length).toBeGreaterThanOrEqual(1);
+    });
+
+    it('flags agent-overloaded when >6 tasks on one branch', () => {
+        const tasks = Array.from({ length: 8 }, (_, i) => `TASK-${String(i + 1).padStart(3, '0')}`);
+        const state = makeState({
+            tasks: [
+                { id: 'TASK-001', storyId: 'US-001', title: 'T1', layer: 'backend', suggestedTech: 'Node', description: '' },
+                { id: 'TASK-002', storyId: 'US-002', title: 'T2', layer: 'frontend', suggestedTech: 'React', description: '' },
+            ] as any,
+            assignments: [
+                {
+                    id: 'ASSIGN-001', storyId: 'US-001', additionalStoryIds: ['US-002'],
+                    taskIds: tasks, acIndexes: [],
+                    devAgentId: 'senior-backend', rank: 'senior', priority: 'high', complexity: 'moderate',
+                    estimate: '4h', description: 'All tasks',
+                    dependsOn: [], taskType: 'feature', branchName: 'proj/feat/us-001',
+                },
+            ] as any,
+        });
+        const v = validateAssignmentPlan(state);
+        const overloaded = v.filter(vi => vi.kind === 'agent-overloaded');
+        expect(overloaded.length).toBeGreaterThanOrEqual(1);
+        expect(overloaded[0].detail).toContain('senior-backend');
+    });
+
+    it('does not flag agent-overloaded when <= 6 tasks', () => {
+        const state = makeState();
+        const v = validateAssignmentPlan(state);
+        expect(v.filter(vi => vi.kind === 'agent-overloaded')).toHaveLength(0);
+    });
+});
+
 // ─── buildCoverageGapPrompt ─────────────────────────────────────────────────
 
 describe('buildCoverageGapPrompt', () => {

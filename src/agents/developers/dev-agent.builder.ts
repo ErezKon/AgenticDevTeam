@@ -32,12 +32,14 @@ function getModelForRank(rank: DevRank): string {
  * @param workspaceRoot  The generated-project workspace directory
  * @param conventionFiles  Optional list of convention file names to inject into the prompt
  * @param isMaintainMode  When true, appends maintain-mode instructions to the persona
+ * @param complexity  Assignment complexity level for budget scaling (Plan 26, B4)
  */
 export function buildDevAgent(
     apiKey: string, entry: DevAgentEntry, workspaceRoot: string,
     gitContext?: GitContext | null, baseBranch?: string,
     conventionFiles?: string[],
     isMaintainMode?: boolean,
+    complexity?: string,
 ) {
     const systemPrompt = buildDevPersona({
         rank: entry.rank,
@@ -64,7 +66,8 @@ export function buildDevAgent(
     // tool *calls*, so a Claude agent that batched 11 reads into one turn burned
     // its whole budget in five turns and could no longer write anything —
     // 3 of 6 dev generations in the pacmanclaude run produced zero writes.
-    const toolBudgets = resolveToolBudgets(entry.rank, TOOL_BUDGETS_JSON);
+    // Plan 26, B4: pass complexity for budget scaling
+    const toolBudgets = resolveToolBudgets(entry.rank, TOOL_BUDGETS_JSON, complexity);
 
     return buildAgent(apiKey, {
         id: entry.id,

@@ -146,7 +146,7 @@ src/
     pr-workflow.ts                 # Backward-compatible re-export shim (~80 lines)
     pr/                            # PR workflow modules (Sub-Plan 25-08)
       index.ts                     # Barrel re-export
-      orchestrator.ts              # Top-level PR lifecycle orchestrator (~620 lines)
+      orchestrator.ts              # Top-level PR lifecycle orchestrator; Plan 26: per-assignment invocations, gate-blocking, dev-failure tracking
       worktree.ts                  # Worktree creation, disposal, salvage, eviction
       pr-github.ts                 # Octokit wrapper, PR creation/retry/merge, postComment
       pr-body.ts                   # PR title & description builders (pure, testable)
@@ -186,7 +186,7 @@ src/
       history-compactor.ts         # ReAct history compaction + streaming-residue sanitiser
       persona.ts                   # Developer prompt builder (rank/domain/languages)
       artifact.ts                  # Mission report writer (docs/agents/*.md)
-      tool-loop-guard.ts           # Read/write/shell/turn budgets + loop detection
+      tool-loop-guard.ts           # Read/write/shell/turn budgets + loop detection + complexity-aware scaling (Plan 26)
       base-schemas.ts              # Barrel re-export of all schemas
       schemas/                     # 17 individual Zod schema files
         index.ts                   # Barrel export
@@ -249,7 +249,7 @@ src/
     structured-output.ts           # JSON extraction + Zod validation + repair + content-block text extraction
     response-log.ts                # Full-response dumps (outputs/<run>/full-responses/*.json + index.jsonl)
     run-context.ts                 # Per-run AsyncLocalStorage context (RunContext class); makes all singletons safe for concurrent server runs
-    event-bus.ts                   # Typed event bus (14 event types, incl. run:budget-stop, run:provider-stop); context-aware via RunContext
+    event-bus.ts                   # Typed event bus (16 event types, incl. run:budget-stop, run:provider-stop, branch:partial-failure, branch:gates-blocked); context-aware via RunContext
     token-tracker.ts               # Token consumption tracker; context-aware via RunContext Proxy; Plan 25-11: appends JSONL per call (O(1)), debounces full JSON flush every 10s
     token-callback.ts              # LangChain callback for token recording (two-tier provider lookup)
     token-usage-extractor.ts       # Shared usage normalisation (normaliseUsage/sumUsageMetadata) + per-invocation aggregation
@@ -303,7 +303,7 @@ tests/                             # Jest test suite (ts-jest)
     state-factory.ts               # makeState(overrides?) — canonical ProjectStateType fixture
     tmp.ts                         # makeTempDir(), withTempDir() — temp dir lifecycle
     git.ts                         # git(), createTestRepo() — isolated git helpers
-  *.test.ts                        # 85+ test files (Sub-Plan 25-13)
+  *.test.ts                        # 87 test files (Sub-Plan 25-13 + Plan 26)
   # Notable new test files (Sub-Plan 25-13):
   # provider-failure.test.ts        — classifyProviderFailure, isProviderLevelFailure, ProviderRecoveryFailedError
   # cost.test.ts                    — estimateCost, estimateRunCost (cache-aware pricing)
@@ -349,7 +349,7 @@ intake -> [codebase-analyzer] -> architect -> product-manager -> dba -> team-lea
 | 3 | **Product Manager** | `productManagerNode` | Convert architecture + epics into user stories (with acceptance criteria) and granular tasks |
 | 4 | **DBA** | `dbaNode` | Design database entities, relationships, indexes, migration scripts, ERD diagram |
 | 5 | **Team Leader** | `teamLeaderNode` | Assign tasks to developers with rank-based reviewer selection, branch naming, dependencies |
-| 6 | **Development** | `developmentNode` | Fan-out assignments to dev agents via `dispatchDevelopers` with topological sorting and concurrency control. Each branch goes through the full PR workflow. Appends one `DispatchRound` to `state.dispatchRounds` counting **merged** PRs only, so `detectUnrecoverable()` can see a zero-output round |
+| 6 | **Development** | `developmentNode` | Fan-out assignments to dev agents via `dispatchDevelopers` with topological sorting and concurrency control. Each branch goes through the full PR workflow with **per-assignment invocations** (Plan 26: each assignment gets its own agent with complexity-scaled budget; crashes are isolated). Critical gate failures (typecheck/build) block PR creation. Appends one `DispatchRound` to `state.dispatchRounds` counting **merged** PRs only, so `detectUnrecoverable()` can see a zero-output round |
 | 7 | **QA** | `qaNode` | QA Lead creates test plan -> QA Unit writes tests -> **Real test runner** parses runner output (authoritative signal; agent self-report is advisory) -> Test sufficiency gate (min counts, coverage floor, per-story coverage) -> Quality gates (deterministic build/lint/test) -> Security gates (secrets, deps, licences) -> AC coverage gate. QA crash synthesises a bug; testReports is never empty after qaNode. |
 | 8 | **Bug-fix Triage** | `bugfixTriageNode` | Runs `detectUnrecoverable()` first (halts the QA→triage→dev loop under `RUN_FAIL_POLICY=halt`); Team Leader re-assigns critical/major bugs; namespaced IDs prevent collision; `sanitizeAssignmentStoryIds()` guarantees every `storyId` references a real user story |
 | 9 | **DevOps** | `devopsNode` | Generate Dockerfiles, compose, K8s manifests; fallback Dockerfile generator when agent fails (`DEVOPS_FALLBACK_ENABLED`); always overwrite agent claims with `verifyDeployment` result; synthesise `DEPLOY-BUILD-FAILED`/`DEPLOY-UNHEALTHY` bugs |
@@ -427,7 +427,7 @@ These are load-bearing. Changing any of them reintroduces a failure mode that is
 
 | Invariant | Where | Why |
 |-----------|-------|-----|
-| Anthropic requests carry `cache_control` breakpoints on the system message, the task message and a rolling history point | `prompt-cache.ts`, wired in `agent-factory.ts` | Anthropic serialises `tools` → `system` → `messages`, so the **system** breakpoint also caches the tool schemas and the injected response schema. Without breakpoints the ~6 kB fixed preamble is re-billed on every call: the pacmanclaude run reported `cache_read: 0` on all 227 Anthropic calls and billed **2.32M input / 99.7K output** (23:1) for one branch of fifteen. Max 4 breakpoints per request. Flag: `ANTHROPIC_PROMPT_CACHE_ENABLED`. |
+| Anthropic requests carry `cache_control` breakpoints on the system message, the task message and a rolling history point | `prompt-cache.ts`, wired in `agent-factory.ts` | Anthropic serialises `tools` → `system` → `messages`, so the **system** breakpoint also caches the tool schemas and the injected response schema. Without breakpoints the ~6 kB fixed preamble is re-billed on every call: the pacmanclaude run reported `cache_read: 0` on all 227 Anthropic calls and billed **2.32M input / 99.7K output** (23:1) for one branch of fifteen. Max 4 breakpoints per request. Flag: `ANTHROPIC_PROMPT_CACHE_ENABLED`. Plan 26 A1: `blocksWithTrailingBreakpoint()` now skips `thinking` and `redacted_thinking` blocks (placing `cache_control` on them causes Anthropic API rejection). |
 | `cacheReadTokens` / `cacheCreationTokens` are recorded on every `TokenCallRecord`, and a zero-cache run logs an ERROR | `token-usage-extractor.ts`, `token-callback.ts`, `token-report.ts` | These numbers were present on every Anthropic response and discarded, so a total cache miss was invisible. `SANITY_ASSERT_CACHE` fires once after `SANITY_ASSERT_CACHE_AFTER` (20) Anthropic calls with zero cache reads. |
 | `opts.timeout` reaches Anthropic (`clientOptions.timeout`) and Google (`timeout`) | `llm-provider.ts` | It was applied to `ChatOpenAI` only, so `LLM_REQUEST_TIMEOUT_MS` was silently OpenAI-exclusive. |
 | `ChatAnthropic` is created **with** `streaming: true` + A2 sanitiser guard | `llm-provider.ts` | Anthropic's HTTP endpoint times out after ~10 minutes on non-streaming requests, killing long agent runs. Streaming residue (`input_json_delta`, id-less `tool_use`) is stripped by `sanitizeStreamingContentBlocks()` before every LLM call. Token accounting for streaming uses the `usage_metadata` fallback (D's two-tier lookup). |

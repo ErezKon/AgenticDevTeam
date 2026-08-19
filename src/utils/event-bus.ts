@@ -29,6 +29,10 @@ export type RunEventType =
     | 'branch:pushed' | 'branch:pr-pending'
     // Plan 24 D2: branch exceeded its per-branch cost or wall-time cap.
     | 'branch:budget-exceeded'
+    // Plan 26, A2: some dev agents on a branch crashed but others completed.
+    | 'branch:partial-failure'
+    // Plan 26, A4: critical quality gates (typecheck/build) blocked PR creation.
+    | 'branch:gates-blocked'
     | 'gate:result'
     | 'acceptance:result'
     | 'plan:coverage'

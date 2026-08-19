@@ -126,12 +126,23 @@ export const teamLeaderSystemPrompt = `
     - The description must list ALL components to import and wire together
     - It should reference the entry point file(s) that need modification
 
-    The SCAFFOLD assignment (taskType 'chore', branch {slug}/chore/scaffold) must create:
-    1. Every root's package.json with exactly the contract's scripts.
-    2. Every root's tsconfig/bundler config, index.html, and the sourceDirs/testDirs skeleton.
-    3. Interface stubs for every declared module — a file at each module's declared path exporting
-       the declared symbols with throw new Error('not implemented') bodies. This ensures parallel
-       branches compile against real files and merge cleanly.
+    The SCAFFOLD should be split into MULTIPLE assignments on the same branch to prevent budget
+    exhaustion (a single oversized scaffold assignment risks exhausting the agent's turn budget):
+      a. **Config & Entry Points** (principal, taskType 'chore'): package.json with scripts, tsconfig,
+         bundler config, index.html, main entry (e.g. main.tsx, server.ts). This assignment creates
+         the build pipeline. Mark complexity as 'moderate'.
+      b. **Type Definitions & Frozen Data** (senior, taskType 'chore'): All shared type files
+         (types.ts, interfaces), frozen data files (layout data, constants, palettes), and the
+         service worker registration if applicable. Mark complexity as 'simple' or 'moderate'.
+      c. **Module Stubs** (junior or senior, taskType 'chore'): Interface stub files
+         (throw new Error('not implemented')) for every remaining module path in the contract.
+         These stubs exist ONLY so parallel branches compile; they will be replaced by real
+         implementations in feature branches.
+         IMPORTANT: Tag the assignment description with "[STUBS]" so reviewers know these are
+         intentional placeholders. Mark complexity as 'moderate'.
+
+    Each scaffold assignment MUST depend on the previous one (b depends on a, c depends on b).
+    All scaffold assignments share the same branch: "{project-slug}/chore/scaffold".
 
     Common integration patterns:
     - Games: game loop in main.ts using requestAnimationFrame, composing player/enemy/input/render

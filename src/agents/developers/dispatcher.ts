@@ -566,13 +566,17 @@ export async function dispatchDevelopers(
                     const branchAssignments = branchGroups.get(branchName) ?? [];
                     const reviewerIds = collectReviewers(branchAssignments);
                     const taskType = primaryTaskType(branchAssignments);
+                    // Plan 26, A5: use scaffold fallback ref as base for non-scaffold branches
+                    const isScaffold = scaffoldBranches?.includes(branchName);
+                    const effectiveBaseBranch = (!isScaffold && scaffoldFallbackRef) ? scaffoldFallbackRef : baseBranch;
 
                     log.info(`Branch "${branchName}": ${branchAssignments.length} assignment(s), ` +
-                        `${reviewerIds.length} reviewer(s), type=${taskType}`);
+                        `${reviewerIds.length} reviewer(s), type=${taskType}` +
+                        (effectiveBaseBranch !== baseBranch ? `, base=${effectiveBaseBranch} (scaffold fallback)` : ''));
 
                     return executePRWorkflow({
                         branchName,
-                        baseBranch,
+                        baseBranch: effectiveBaseBranch,
                         assignments: branchAssignments,
                         reviewerAgentIds: reviewerIds,
                         taskType,
@@ -657,6 +661,8 @@ export async function dispatchDevelopers(
         };
 
         // Run scaffold branches first (sequentially), then sync workspace
+        // Plan 26, A5: track scaffold fallback ref for feature branch creation
+        let scaffoldFallbackRef: string | undefined;
         if (scaffoldBranches.length > 0) {
             log.info(`Scaffold barrier: running ${scaffoldBranches.length} scaffold branch(es) first`);
             for (const scaffoldBranch of scaffoldBranches) {
@@ -667,12 +673,15 @@ export async function dispatchDevelopers(
                 if (scaffoldPR?.status === 'merged') {
                     syncWorkspaceToBranch(gitRoot, baseBranch);
                 } else {
-                    log.error(`Scaffold branch ${scaffoldBranch} failed to merge — feature branches may conflict`);
+                    // Plan 26, A5: use scaffold branch tip as fallback base for feature branches
+                    log.error(`Scaffold branch ${scaffoldBranch} failed to merge — using scaffold tip as fallback base`);
+                    scaffoldFallbackRef = scaffoldBranch;
+                    syncWorkspaceToBranch(gitRoot, scaffoldBranch);
                     transcript.push({
                         timestamp: new Date().toISOString(),
                         agentId: 'dispatcher',
                         phase: 'development' as PhaseName,
-                        message: `Scaffold branch ${scaffoldBranch} failed to merge — remaining branches may have conflicts`,
+                        message: `Scaffold branch ${scaffoldBranch} failed to merge — using scaffold tip as fallback base for feature branches`,
                     });
                 }
             }

@@ -72,6 +72,36 @@ function msg(agentId: string, message: string): TranscriptMessage {
     return { timestamp: ts(), agentId, phase: 'development' as PhaseName, message };
 }
 
+/**
+ * Plan 26, B3: simple topological sort for assignments within a branch.
+ * Respects dependsOn ordering so earlier assignments run first.
+ * Falls back to original order when no dependsOn edges exist or cycles are found.
+ */
+function topologicalSortAssignments(assignments: Assignment[]): Assignment[] {
+    if (assignments.length <= 1) return assignments;
+    const idSet = new Set(assignments.map(a => a.id));
+    const completed = new Set<string>();
+    const sorted: Assignment[] = [];
+    let remaining = [...assignments];
+
+    while (remaining.length > 0) {
+        const ready = remaining.filter(a =>
+            (a.dependsOn ?? []).every(dep => !idSet.has(dep) || completed.has(dep)),
+        );
+        if (ready.length === 0) {
+            // Cyclic or unresolvable — append the rest in original order
+            sorted.push(...remaining);
+            break;
+        }
+        for (const a of ready) {
+            sorted.push(a);
+            completed.add(a.id);
+        }
+        remaining = remaining.filter(a => !completed.has(a.id));
+    }
+    return sorted;
+}
+
 // ─── Types ───────────────────────────────────────────────────────────────────
 
 export interface PRWorkflowInput {
@@ -188,69 +218,85 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
         const branchBaseline = (GATE_INTEGRITY_MODE !== 'off') ? captureBaseline(worktreeWorkspace) : null;
 
         // ── 1. Run dev agent(s) on assignments ──────────────────────────
-        const byDev = new Map<string, Assignment[]>();
-        for (const a of assignments) {
-            const existing = byDev.get(a.devAgentId) ?? [];
-            existing.push(a);
-            byDev.set(a.devAgentId, existing);
-        }
+        // Plan 26, B3: per-assignment invocations instead of per-agent batching.
+        // Each assignment gets its own invocation with a fresh tool budget.
+        // A crash on one assignment doesn't block others on the same branch.
 
-        for (const [devId, devAssignments] of byDev) {
-            const branchBudgetReason = checkBranchBudget(`before dev ${devId}`);
+        // Plan 26, A2: track dev agent failures to distinguish crash from completion
+        const failedAgentIds = new Set<string>();
+        const failedAssignmentIds: string[] = [];
+        let hasDevFailures = false;
+
+        // Topological sort within the branch: respect dependsOn ordering
+        const sortedAssignments = topologicalSortAssignments(assignments);
+        const completedAssignmentDescs: string[] = [];
+
+        for (const assignment of sortedAssignments) {
+            const devId = assignment.devAgentId;
+            const branchBudgetReason = checkBranchBudget(`before assignment ${assignment.id} (dev ${devId})`);
             if (branchBudgetReason) {
                 log.warn(`Branch ${branchName} budget exceeded: ${branchBudgetReason} — stopping branch`);
                 allTranscript.push(msg('conductor', `Branch budget exceeded: ${branchBudgetReason}`));
-                emitRunEvent('branch:budget-exceeded', { branchName, reason: branchBudgetReason, checkpoint: `before dev ${devId}` });
+                emitRunEvent('branch:budget-exceeded', { branchName, reason: branchBudgetReason, checkpoint: `before assignment ${assignment.id}` });
                 commitWorktree(worktreeWorkspace, branchName, projectSlug, primaryStoryId, 'chore', `partial work before budget stop`, gitContext);
                 if (outputPath) salvageWorktree(worktreeWorkspace, gitRoot, baseRef, branchName, branchBudgetReason, outputPath);
                 break;
             }
 
             const entry = getDevAgent(devId);
-            if (!entry) { log.warn(`Unknown dev agent: ${devId}, skipping`); continue; }
+            if (!entry) { log.warn(`Unknown dev agent: ${devId}, skipping assignment ${assignment.id}`); continue; }
 
             const devLog = getLogger(entry.tag, entry.colorCode);
-            devLog.info(`Working on branch ${branchName}: ${devAssignments.length} assignment(s)`);
+            devLog.info(`Working on assignment ${assignment.id} [${assignment.priority}/${assignment.complexity}] on branch ${branchName}`);
 
             const conventionFiles = resolveConventionFiles(entry.languages, techStack);
-            const buildAgentFn = () => buildDevAgent(apiKey, entry, worktreeWorkspace, gitContext, baseBranch, conventionFiles, isMaintainMode);
+            // Plan 26, B4: pass this assignment's complexity for budget scaling
+            const buildAgentFn = () => buildDevAgent(apiKey, entry, worktreeWorkspace, gitContext, baseBranch, conventionFiles, isMaintainMode, assignment.complexity);
             const agent = buildAgentFn();
 
-            const assignmentText = devAssignments.map(a => `Assignment ${a.id} [${a.priority}/${a.complexity}]: ${a.description}`).join('\n\n');
+            const assignmentText = `Assignment ${assignment.id} [${assignment.priority}/${assignment.complexity}]: ${assignment.description}`;
 
-            // Build per-branch story section
-            const branchStoryIds = [...new Set(devAssignments.flatMap(a => [a.storyId, ...(a.additionalStoryIds ?? [])]).filter(Boolean))] as string[];
+            // Build per-assignment story section
+            const assignmentStoryIds = [assignment.storyId, ...(assignment.additionalStoryIds ?? [])].filter(Boolean) as string[];
             let storySection = '';
-            if (userStories?.length && branchStoryIds.length) {
-                const { text: storyText, missing: missingStoryIds } = storiesForIds(userStories, branchStoryIds);
-                storySection = `\n## User Stories for This Branch\n\n${storyText}`;
+            if (userStories?.length && assignmentStoryIds.length) {
+                const { text: storyText, missing: missingStoryIds } = storiesForIds(userStories, assignmentStoryIds);
+                storySection = `\n## User Stories for This Assignment\n\n${storyText}`;
                 if (missingStoryIds.length > 0) {
-                    log.error(`Assignment(s) on branch ${branchName} reference unknown story id(s): ${missingStoryIds.join(', ')} — the developer will have NO acceptance criteria. This is a planning defect.`);
+                    log.error(`Assignment ${assignment.id} on branch ${branchName} references unknown story id(s): ${missingStoryIds.join(', ')} — the developer will have NO acceptance criteria. This is a planning defect.`);
                 }
             }
 
-            const branchTaskIds = [...new Set(devAssignments.flatMap(a => a.taskIds ?? []))];
-            const taskSection = (tasks?.length && branchTaskIds.length)
-                ? `\n## Tasks for This Branch\n\n${tasksForIds(tasks, branchTaskIds)}`
+            const assignmentTaskIds = assignment.taskIds ?? [];
+            const taskSection = (tasks?.length && assignmentTaskIds.length)
+                ? `\n## Tasks for This Assignment\n\n${tasksForIds(tasks, assignmentTaskIds)}`
                 : '';
 
+            // Plan 26, B3: refresh workspace snapshot for each assignment so the agent
+            // sees files created by earlier assignments on this branch
             let snapshotSection = '';
             try {
                 snapshotSection = '\n' + buildWorkspaceSnapshot(worktreeWorkspace, { maxFiles: SNAPSHOT_MAX_FILES, maxChars: SNAPSHOT_MAX_CHARS });
             } catch (snapErr: any) { log.warn(`Workspace snapshot failed (non-fatal): ${snapErr.message}`); }
 
+            // Plan 26, B3: include context about previously completed assignments
+            const previousWorkSection = completedAssignmentDescs.length > 0
+                ? `\n## Previously Completed Assignments on This Branch\n\nThe following assignments have already been completed. Their files are already in the workspace.\n${completedAssignmentDescs.map(d => `- ${d}`).join('\n')}\n`
+                : '';
+
             const message = [
                 contextPrompt, snapshotSection, storySection, taskSection,
+                previousWorkSection,
                 `\n## Project Slug: ${projectSlug}`, `\n## Your Branch: ${branchName}`,
                 `\nYou are already on this branch. Do NOT create or switch branches — your workspace is isolated for this branch.`,
                 `\n## IMPORTANT: Workspace Context`, `Your current working directory IS the project root.`,
                 `Do NOT prefix paths with "generated-projects/${projectSlug}/" — all file operations are relative to the project root.`,
-                `\n## Your Assignments\n\n${assignmentText}`,
+                `\n## Your Assignment\n\n${assignmentText}`,
             ].join('\n');
 
             try {
                 const devModel = getModelForRank(entry.rank as DevRank);
-                const { output, tokenUsage: devTokenUsage, allTokenUsage: devAllTokenUsage } = await invokeDevAgent(agent, message, `${entry.id}-${branchName}`, entry.id, devModel, buildAgentFn, respawnCtx);
+                const { output, tokenUsage: devTokenUsage, allTokenUsage: devAllTokenUsage } = await invokeDevAgent(agent, message, `${entry.id}-${branchName}-${assignment.id}`, entry.id, devModel, buildAgentFn, respawnCtx);
                 if (devTokenUsage) allTokenUsage.push(devTokenUsage);
                 if (devAllTokenUsage) allTokenUsage.push(...devAllTokenUsage.slice(1));
 
@@ -268,28 +314,33 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                 const artifact = writeArtifact({
                     agentId: entry.id, colorCode: entry.colorCode,
                     workspacePath: worktreeWorkspace, outputPath,
-                    title: `${entry.name} Mission Report`,
+                    title: `${entry.name} Mission Report — ${assignment.id}`,
                     content: [
-                        `## Branch: ${branchName}\n`, `## Files Changed\n`,
+                        `## Branch: ${branchName}\n`, `## Assignment: ${assignment.id}\n`, `## Files Changed\n`,
                         ...(output.fileChanges ?? []).map(fc => `- **${fc.action}** \`${fc.path}\` — ${fc.summary}`),
                         output.notes ? `\n## Notes\n\n${output.notes}` : '',
                         output.mermaidDiagram ? `\n## Diagram\n\n\`\`\`mermaid\n${output.mermaidDiagram}\n\`\`\`` : '',
                     ].join('\n'),
                 });
                 allArtifacts.push(artifact);
-                allTranscript.push(msg(entry.id, `Completed ${output.fileChanges?.length ?? 0} file changes on branch ${branchName}`));
-                devLog.info(`Done: ${output.fileChanges?.length ?? 0} file changes`);
+                allTranscript.push(msg(entry.id, `Completed ${output.fileChanges?.length ?? 0} file changes for ${assignment.id} on branch ${branchName}`));
+                devLog.info(`Done: ${output.fileChanges?.length ?? 0} file changes for ${assignment.id}`);
+                completedAssignmentDescs.push(`${assignment.id}: ${assignment.description.slice(0, 120)}`);
             } catch (err: any) {
                 if (err instanceof InvocationBudgetExceededError) {
-                    log.warn(`Dev agent ${devId} stopped: ${err.message}`);
-                    allTranscript.push(msg(devId, `Stopped (invocation budget exceeded): ${err.message}`));
+                    log.warn(`Dev agent ${devId} stopped on ${assignment.id}: ${err.message}`);
+                    allTranscript.push(msg(devId, `Stopped on ${assignment.id} (invocation budget exceeded): ${err.message}`));
                 } else {
-                    log.error(`Dev agent ${devId} failed: ${err.message}`);
-                    allTranscript.push(msg(devId, `Failed: ${err.message}`));
+                    // Plan 26, A2: track the failure but continue with next assignment
+                    log.error(`Dev agent ${devId} failed on ${assignment.id}: ${err.message}`);
+                    allTranscript.push(msg(devId, `Failed on ${assignment.id}: ${err.message}`));
+                    failedAgentIds.add(devId);
+                    failedAssignmentIds.push(assignment.id);
                 }
             } finally {
+                // Commit after each assignment, not just on failure
                 commitWorktree(worktreeWorkspace, branchName, projectSlug, primaryStoryId, 'feat',
-                    `partial work from ${devId} (durable commit)`, gitContext);
+                    `work from ${devId} on ${assignment.id} (durable commit)`, gitContext);
             }
         }
 
@@ -301,7 +352,17 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
         }
         gitPush(worktreeWorkspace, branchName, gitContext);
 
-        log.info(`All ${assignments.length} assignment(s) complete on ${branchName} — running quality gates before opening the PR`);
+        // Plan 26, A2: report partial completion when assignments crashed
+        if (failedAssignmentIds.length > 0) {
+            hasDevFailures = true;
+            const completedCount = sortedAssignments.length - failedAssignmentIds.length;
+            const failedIds = [...failedAgentIds].join(', ');
+            log.warn(`${completedCount} of ${sortedAssignments.length} assignment(s) completed (${failedAssignmentIds.length} crashed: [${failedAssignmentIds.join(', ')}], agents: [${failedIds}])`);
+            allTranscript.push(msg('conductor', `PARTIAL: ${completedCount}/${sortedAssignments.length} assignments completed; crashed: [${failedAssignmentIds.join(', ')}]`));
+            emitRunEvent('branch:partial-failure', { branchName, failedAgentIds: [...failedAgentIds], failedAssignmentIds, completedCount, totalCount: sortedAssignments.length });
+        } else {
+            log.info(`All ${sortedAssignments.length} assignment(s) complete on ${branchName} — running quality gates before opening the PR`);
+        }
         emitRunEvent('branch:pr-pending', { branchName, assignments: assignments.length, reason: 'quality-gates' });
 
         // ── 1a. Post-development quality gates + repair ─────────────────
@@ -374,7 +435,32 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
             }
         }
 
-        // ── 1c. Check for actual commits before creating PR ─────────────
+        // ── 1c. Plan 26, A4: Block PR when critical gates (typecheck/build) still fail ──
+        if (gateReport && !gateReport.passed) {
+            const criticalSteps = ['typecheck', 'build'];
+            const criticalFailures = gateReport.results
+                .filter(r => !r.passed && !r.skipped && criticalSteps.includes(r.step));
+            if (criticalFailures.length > 0) {
+                const failedSteps = criticalFailures.map(f => f.step).join(', ');
+                log.error(`Critical gates still failing on ${branchName}: ${failedSteps} — skipping PR`);
+                allTranscript.push(msg('conductor', `BLOCKED: ${failedSteps} still failing after repair`));
+                emitRunEvent('branch:gates-blocked', { branchName, failedSteps });
+                if (outputPath) salvageWorktree(worktreeWorkspace, gitRoot, baseRef, branchName, 'critical-gates-failed', outputPath);
+                return {
+                    pullRequest: {
+                        id: `PR-GATES-FAILED-${branchName}`, prNumber: 0, prUrl: '',
+                        title: `[GATES-FAILED] ${failedSteps} on ${branchName}`,
+                        description: `Critical quality gates (${failedSteps}) still failing after repair attempts.`,
+                        branchName, authorAgentId: assignments[0].devAgentId, reviewerAgentIds,
+                        reviews: [], status: 'closed', assignmentIds: assignments.map(a => a.id), taskType, currentState,
+                    },
+                    fileChanges: allFileChanges, artifacts: allArtifacts, transcript: allTranscript, tokenUsage: allTokenUsage,
+                    salvageBranch: branchName,
+                };
+            }
+        }
+
+        // ── 1d. Check for actual commits before creating PR ─────────────
         const diffCheck = gitExec(worktreeWorkspace, `log ${baseRef}..HEAD --oneline`);
         if (!diffCheck || diffCheck.startsWith('Error:') || diffCheck.trim() === '') {
             log.warn(`No commits on branch ${branchName} relative to ${baseBranch} — skipping PR creation`);
@@ -393,6 +479,12 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
         // ── 2. Create GitHub PR ─────────────────────────────────────────
         const prTitle = buildPRTitle(assignments, taskType, projectSlug);
         let prBody = buildPRDescription(assignments, allFileChanges, taskType, currentState, assignments[0].devAgentId);
+        // Plan 26, A4: warn in PR body when dev agents crashed
+        if (hasDevFailures) {
+            prBody += `\n\n## Dev Agent Failures\n\n`;
+            prBody += `**Warning:** The following agent(s) crashed during development: ${[...failedAgentIds].join(', ')}.\n`;
+            prBody += `Failed assignment(s): ${failedAssignmentIds.join(', ')}. Some work may be incomplete.\n`;
+        }
         if (gateReport && gateReport.results.length > 0) prBody += `\n\n## Quality Gates\n\n${gateReportToMarkdown(gateReport)}`;
         if (integrityFindings.length > 0) {
             const criticals = integrityFindings.filter(f => f.severity === 'critical');
