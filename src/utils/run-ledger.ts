@@ -40,21 +40,35 @@ type DistributiveOmit<T, K extends keyof any> = T extends any ? Omit<T, K> : nev
 
 // ─── Singleton state ────────────────────────────────────────────────────────
 
+import { getRunContext } from './run-context';
+
 let _outputPath: string | null = null;
+
+/** Get the active ledger output path — per-run scoped or module default. */
+function _activeOutputPath(): string | null {
+    const ctx = getRunContext();
+    return ctx ? ctx.ledger.outputPath : _outputPath;
+}
 
 // ─── Public API ─────────────────────────────────────────────────────────────
 
 /** Set the output directory for this run. Must be called before the first append. */
 export function initLedger(outputPath: string): void {
-    _outputPath = outputPath;
+    const ctx = getRunContext();
+    if (ctx) {
+        ctx.ledger.outputPath = outputPath;
+    } else {
+        _outputPath = outputPath;
+    }
 }
 
 /** Append a single entry to the ledger JSONL file. Never throws. */
 export function appendLedger(entry: DistributiveOmit<LedgerEntry, 't'>): void {
-    if (!RUN_LEDGER_ENABLED || !_outputPath) return;
+    const outPath = _activeOutputPath();
+    if (!RUN_LEDGER_ENABLED || !outPath) return;
     const full = { t: new Date().toISOString(), ...entry };
     const line = JSON.stringify(full) + '\n';
-    appendOutputLine(_outputPath, 'ledger.jsonl', line);
+    appendOutputLine(outPath, 'ledger.jsonl', line);
 }
 
 /** Read back the complete ledger as an array of entries. */

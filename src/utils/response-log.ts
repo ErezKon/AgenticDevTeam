@@ -73,10 +73,34 @@ export interface ResponseLogEntry extends ResponseLogMeta {
 
 // ─── Singleton state ────────────────────────────────────────────────────────
 
+import { getRunContext, type ResponseLogState } from './run-context';
+
 let _dir: string | null = null;
 let _seq = 0;
 /** agentId -> file that already carries this agent's system prompt verbatim. */
 const _systemPromptSeen = new Map<string, string>();
+
+/** Get the active response-log state — per-run scoped or module default. */
+function _active(): { dir: string | null; seq: number; setSeq: (n: number) => void; setDir: (d: string | null) => void; systemPromptSeen: Map<string, string> } {
+    const ctx = getRunContext();
+    if (ctx) {
+        const s = ctx.responseLog as ResponseLogState;
+        return {
+            get dir() { return s.dir; },
+            get seq() { return s.seq; },
+            setSeq(n: number) { s.seq = n; },
+            setDir(d: string | null) { s.dir = d; },
+            systemPromptSeen: s.systemPromptSeen,
+        };
+    }
+    return {
+        get dir() { return _dir; },
+        get seq() { return _seq; },
+        setSeq(n: number) { _seq = n; },
+        setDir(d: string | null) { _dir = d; },
+        systemPromptSeen: _systemPromptSeen,
+    };
+}
 
 // ─── Public API ─────────────────────────────────────────────────────────────
 
@@ -87,15 +111,16 @@ const _systemPromptSeen = new Map<string, string>();
  */
 export function initResponseLog(outputPath: string): void {
     if (!FULL_RESPONSE_LOG_ENABLED) return;
-    _seq = 0;
-    _systemPromptSeen.clear();
+    const state = _active();
+    state.setSeq(0);
+    state.systemPromptSeen.clear();
     const dir = path.join(outputPath, FULL_RESPONSE_LOG_DIR_NAME);
     try {
         fs.mkdirSync(dir, { recursive: true });
-        _dir = dir;
+        state.setDir(dir);
         log.info(`Full-response logging enabled → ${dir}`);
     } catch (err: any) {
-        _dir = null;
+        state.setDir(null);
         log.warn(`Could not create full-response log dir: ${err.message}`);
     }
 }
@@ -107,13 +132,15 @@ export function initResponseLog(outputPath: string): void {
  * @returns the absolute file path written, or `null` when logging is off.
  */
 export function logAgentResponse(meta: ResponseLogMeta, result: unknown): string | null {
-    if (!FULL_RESPONSE_LOG_ENABLED || !_dir) return null;
+    const state = _active();
+    if (!FULL_RESPONSE_LOG_ENABLED || !state.dir) return null;
     try {
-        const seq = ++_seq;
+        state.setSeq(state.seq + 1);
+        const seq = state.seq;
         const kind = meta.kind ?? 'invoke';
         const suffix = kind === 'invoke' ? '' : `-${kind}${meta.attempt ?? ''}`;
         const file = `${String(seq).padStart(3, '0')}-${slug(meta.agentId)}-${slug(meta.phase)}${suffix}.json`;
-        const filePath = path.join(_dir, file);
+        const filePath = path.join(state.dir, file);
 
         const messages: unknown[] = Array.isArray((result as any)?.messages) ? (result as any).messages : [];
         const extraction = extractAgentText(messages);
@@ -139,8 +166,8 @@ export function logAgentResponse(meta: ResponseLogMeta, result: unknown): string
             // includes the injected JSON schema, so it is stored once per agent.
             system_prompt: meta.systemPrompt === undefined
                 ? undefined
-                : (_systemPromptSeen.has(meta.agentId)
-                    ? { see: _systemPromptSeen.get(meta.agentId) }
+                : (state.systemPromptSeen.has(meta.agentId)
+                    ? { see: state.systemPromptSeen.get(meta.agentId) }
                     : meta.systemPrompt),
             user_message: meta.userMessage,
             model_request: {
@@ -162,8 +189,8 @@ export function logAgentResponse(meta: ResponseLogMeta, result: unknown): string
             });
         }
         fs.writeFileSync(filePath, body, 'utf-8');
-        if (meta.systemPrompt !== undefined && !_systemPromptSeen.has(meta.agentId)) {
-            _systemPromptSeen.set(meta.agentId, file);
+        if (meta.systemPrompt !== undefined && !state.systemPromptSeen.has(meta.agentId)) {
+            state.systemPromptSeen.set(meta.agentId, file);
         }
 
         const entry: ResponseLogEntry = {
@@ -184,7 +211,7 @@ export function logAgentResponse(meta: ResponseLogMeta, result: unknown): string
             hasStructuredResponse: structuredResponse !== undefined,
             clipped,
         };
-        fs.appendFileSync(path.join(_dir, 'index.jsonl'), JSON.stringify(entry) + '\n', 'utf-8');
+        fs.appendFileSync(path.join(state.dir!, 'index.jsonl'), JSON.stringify(entry) + '\n', 'utf-8');
         return filePath;
     } catch (err: any) {
         log.warn(`Full-response log write failed: ${err.message}`);

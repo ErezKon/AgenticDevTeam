@@ -60,11 +60,33 @@ export function writeStateSnapshot(outputPath: string, state: any): string | nul
  */
 const SNAPSHOT_MIN_INTERVAL_MS = 30_000; // 30 seconds
 
+import { getRunContext, type RunSnapshotState } from './run-context';
+
 /** Timestamp of the last successfully written snapshot. */
 let _lastSnapshotWrittenAt = 0;
 
 /** Pending debounced snapshot timer (Plan 26-11). */
 let _snapshotTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** Get active snapshot debounce state — per-run scoped or module default. */
+function _activeSnapshot(): { lastWrittenAt: number; setLastWrittenAt: (t: number) => void; timer: ReturnType<typeof setTimeout> | null; setTimer: (t: ReturnType<typeof setTimeout> | null) => void } {
+    const ctx = getRunContext();
+    if (ctx) {
+        const s = ctx.snapshot as RunSnapshotState;
+        return {
+            get lastWrittenAt() { return s.lastSnapshotWrittenAt; },
+            setLastWrittenAt(t: number) { s.lastSnapshotWrittenAt = t; },
+            get timer() { return s.snapshotTimer; },
+            setTimer(t: ReturnType<typeof setTimeout> | null) { s.snapshotTimer = t; },
+        };
+    }
+    return {
+        get lastWrittenAt() { return _lastSnapshotWrittenAt; },
+        setLastWrittenAt(t: number) { _lastSnapshotWrittenAt = t; },
+        get timer() { return _snapshotTimer; },
+        setTimer(t: ReturnType<typeof setTimeout> | null) { _snapshotTimer = t; },
+    };
+}
 
 /**
  * Write a state snapshot at the start of a phase — captures the full
@@ -94,21 +116,22 @@ export function writePeriodicSnapshot(
     writeOutputFile(outputPath, 'latest-phase.json', JSON.stringify(marker, null, 2));
 
     // Debounce the expensive full state snapshot (Plan 26-11)
+    const snap = _activeSnapshot();
     const now = Date.now();
-    const elapsed = now - _lastSnapshotWrittenAt;
+    const elapsed = now - snap.lastWrittenAt;
     if (elapsed >= SNAPSHOT_MIN_INTERVAL_MS) {
         // Enough time has passed — write immediately
         writeStateSnapshot(outputPath, state);
-        _lastSnapshotWrittenAt = now;
-        if (_snapshotTimer) { clearTimeout(_snapshotTimer); _snapshotTimer = null; }
-    } else if (!_snapshotTimer) {
+        snap.setLastWrittenAt(now);
+        if (snap.timer) { clearTimeout(snap.timer); snap.setTimer(null); }
+    } else if (!snap.timer) {
         // Schedule a deferred write so data is not lost
         const delay = SNAPSHOT_MIN_INTERVAL_MS - elapsed;
-        _snapshotTimer = setTimeout(() => {
-            _snapshotTimer = null;
+        snap.setTimer(setTimeout(() => {
+            snap.setTimer(null);
             writeStateSnapshot(outputPath, state);
-            _lastSnapshotWrittenAt = Date.now();
-        }, delay);
+            snap.setLastWrittenAt(Date.now());
+        }, delay));
     }
 }
 

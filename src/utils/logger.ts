@@ -18,12 +18,25 @@ function stripAnsi(s: string): string {
     return s.replace(/\x1b\[[0-9;]*m/g, '');
 }
 
+import { getRunContext } from './run-context';
+
 /** Active run log path — set once per run via `setRunLogPath`. */
 let runLogPath: string | null = null;
 
+/** Get the active run log path — per-run scoped or module default. */
+function _activeLogPath(): string | null {
+    const ctx = getRunContext();
+    return ctx ? ctx.logger.runLogPath : runLogPath;
+}
+
 /** Set the log file path for the current run. */
 export function setRunLogPath(logPath: string): void {
-    runLogPath = logPath;
+    const ctx = getRunContext();
+    if (ctx) {
+        ctx.logger.runLogPath = logPath;
+    } else {
+        runLogPath = logPath;
+    }
     // Ensure the directory exists
     const dir = path.dirname(logPath);
     fs.mkdirSync(dir, { recursive: true });
@@ -31,9 +44,10 @@ export function setRunLogPath(logPath: string): void {
 
 /** Append a line to the run log file (plain text, no ANSI). */
 function appendToRunLog(line: string): void {
-    if (!runLogPath) return;
+    const logPath = _activeLogPath();
+    if (!logPath) return;
     try {
-        fs.appendFileSync(runLogPath, stripAnsi(line) + '\n', 'utf-8');
+        fs.appendFileSync(logPath, stripAnsi(line) + '\n', 'utf-8');
     } catch {
         // Best-effort — don't crash on log write failure.
     }

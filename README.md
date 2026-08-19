@@ -766,6 +766,7 @@ AgenticDevTeam/
 │   │   ├── oauth-auth.util.ts              # OAuth2 client-credentials token cache
 │   │   ├── workspace.ts                    # Project workspace + output dir creation
 │   │   ├── conventions-digest.ts           # Compact in-prompt conventions digest
+│   │   ├── run-context.ts                  # Per-run AsyncLocalStorage context (RunContext) for concurrent server safety
 │   │   ├── token-tracker.ts                # Per-invocation token tracking + efficiency metrics
 │   │   ├── token-report.ts                 # HTML token usage report (+ Invocation Efficiency table)
 │   │   ├── codebase-analysis-writer.ts     # Write analysis markdown to project + outputs

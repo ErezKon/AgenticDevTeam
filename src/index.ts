@@ -69,10 +69,33 @@ if (API_TOKEN) {
     log.info('API_TOKEN is set — API endpoints require Bearer authentication');
 }
 
-// ─── In-memory session store ────────────────────────────────────────────────
+// ─── In-memory session store (Sub-Plan 26-14: fix key-space collision) ──────
+//
+// Both sessions and states are now keyed consistently by threadId.
+// A secondary index maps systemName → threadId for autonomous run lookup.
+// LRU eviction prevents unbounded growth in long-running server processes.
+
+const MAX_CACHED_RUNS = 200;
 
 const sessions = new Map<string, RunSession>();
 const states = new Map<string, any>();
+/** systemName → threadId alias for backward-compat lookup of autonomous runs. */
+const _systemNameIndex = new Map<string, string>();
+
+/** Evict oldest entries when maps exceed MAX_CACHED_RUNS. */
+function _evictIfNeeded(): void {
+    while (states.size > MAX_CACHED_RUNS) {
+        const oldest = states.keys().next().value;
+        if (oldest === undefined) break;
+        states.delete(oldest);
+        sessions.delete(oldest);
+    }
+    while (_systemNameIndex.size > MAX_CACHED_RUNS) {
+        const oldest = _systemNameIndex.keys().next().value;
+        if (oldest === undefined) break;
+        _systemNameIndex.delete(oldest);
+    }
+}
 
 // ─── WebSocket broadcast ────────────────────────────────────────────────────
 
@@ -166,19 +189,23 @@ app.post('/api/run', async (req, res) => {
         const runMode = mode === 'autonomous' ? 'autonomous' : 'human';
 
         if (runMode === 'autonomous') {
-            broadcast('run:started', { systemName, mode: 'autonomous' });
+            // Sub-Plan 26-14: generate a threadId and use it as the key (fixes key-space collision)
+            const autoThreadId = `run-${systemName}-${Date.now()}`;
+            broadcast('run:started', { systemName, threadId: autoThreadId, mode: 'autonomous' });
 
             // Fire and forget — results come via WebSocket
             runAutonomous({ systemName, requirementsText: text, mode: 'autonomous', runType: resolvedRunType, existingProjectPath, repoTarget })
                 .then((state) => {
-                    states.set(systemName, state);
+                    states.set(autoThreadId, state);
+                    _systemNameIndex.set(systemName, autoThreadId);
+                    _evictIfNeeded();
                     const acceptance = state.acceptance;
                     const status = state.cancelled ? 'cancelled'
                         : acceptance?.status === 'accepted' ? 'completed'
                         : acceptance?.status === 'partial' ? 'partial'
                         : acceptance?.status === 'inconclusive' ? 'inconclusive'
                         : 'failed';
-                    broadcast('run:complete', { systemName, state, status, blockers: acceptance?.blockers ?? [] });
+                    broadcast('run:complete', { systemName, threadId: autoThreadId, state, status, blockers: acceptance?.blockers ?? [] });
                 })
                 .catch((err) => {
                     // run.ts already flushes the token report on failure,
@@ -187,12 +214,13 @@ app.post('/api/run', async (req, res) => {
                     const reportPath = tokenTracker.getOutputPath();
                     broadcast('run:error', {
                         systemName,
+                        threadId: autoThreadId,
                         error: err.message,
                         tokenReportPath: reportPath ? `${reportPath}/token-usage-report.html` : null,
                     });
                 });
 
-            res.json({ status: 'started', systemName, mode: 'autonomous' });
+            res.json({ status: 'started', threadId: autoThreadId, systemName, mode: 'autonomous' });
         } else {
             const session = await runHumanInTheLoop({
                 systemName,
@@ -206,6 +234,7 @@ app.post('/api/run', async (req, res) => {
             sessions.set(session.threadId, session);
             const state = await session.getState();
             states.set(session.threadId, state);
+            _evictIfNeeded();
             broadcast('run:started', { systemName, threadId: session.threadId, mode: 'human' });
             // With interruptAfter, the first HITL phase has already completed.
             // Notify the dashboard that the phase output is ready for review.
@@ -231,14 +260,16 @@ app.post('/api/run', async (req, res) => {
 });
 
 app.get('/api/run/:id', async (req, res) => {
-    const session = sessions.get(req.params.id);
+    // Sub-Plan 26-14: resolve systemName alias to threadId for backward compat
+    const resolvedId = _systemNameIndex.get(req.params.id) ?? req.params.id;
+    const session = sessions.get(resolvedId);
     if (session) {
         const state = await session.getState();
-        states.set(req.params.id, state);
+        states.set(resolvedId, state);
         res.json(redactState(state));
         return;
     }
-    const cached = states.get(req.params.id);
+    const cached = states.get(resolvedId);
     if (cached) {
         res.json(redactState(cached));
         return;
@@ -425,7 +456,9 @@ app.post('/api/run/continue', async (req, res) => {
             continueRun({ outputPath, mode: 'autonomous', threadId: resolvedThreadId })
                 .then((state) => {
                     const finalState = state as any;
-                    states.set(systemName, finalState);
+                    states.set(resolvedThreadId, finalState);
+                    _systemNameIndex.set(systemName, resolvedThreadId);
+                    _evictIfNeeded();
                     const acceptance = finalState.acceptance;
                     const status = finalState.cancelled ? 'cancelled'
                         : acceptance?.status === 'accepted' ? 'completed'
@@ -461,6 +494,7 @@ app.post('/api/run/continue', async (req, res) => {
             sessions.set(session.threadId, session);
             const state = await session.getState();
             states.set(session.threadId, state);
+            _evictIfNeeded();
             broadcast('run:started', { systemName, threadId: session.threadId, mode: 'human', continuing: true, resumePhase });
             broadcast('hitl:waiting', {
                 threadId: session.threadId,

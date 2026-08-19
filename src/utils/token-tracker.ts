@@ -87,7 +87,7 @@ interface InvocationEfficiencyRow {
 
 // ─── Singleton ──────────────────────────────────────────────────────────────
 
-class TokenTracker {
+export class TokenTracker {
     private ledger: TokenCallRecord[] = [];
     private _invocations: Map<string, InvocationRecord> = new Map();
     private _nextInvocationId = 0;
@@ -406,5 +406,36 @@ class TokenTracker {
     }
 }
 
-/** Module-level singleton — shared across all agents in a run. */
-export const tokenTracker = new TokenTracker();
+// ─── Context-aware singleton (Sub-Plan 26-14) ──────────────────────────────
+//
+// When running inside a RunContext (server mode), the proxy delegates to the
+// per-run TokenTracker instance. When no context is active (CLI mode), the
+// module-level _defaultTracker is used — preserving backward compatibility.
+
+import { getRunContext } from './run-context';
+
+const _defaultTracker = new TokenTracker();
+
+/**
+ * Module-level singleton — transparent per-run scoping via Proxy.
+ *
+ * All existing `import { tokenTracker }` continue to work unchanged.
+ * In server mode each concurrent run gets its own TokenTracker instance;
+ * in CLI mode the shared _defaultTracker is used.
+ */
+export const tokenTracker: TokenTracker = new Proxy(_defaultTracker, {
+    get(_target, prop) {
+        const ctx = getRunContext();
+        let active: TokenTracker;
+        if (ctx) {
+            if (!ctx.tokenTracker) {
+                ctx.tokenTracker = new TokenTracker();
+            }
+            active = ctx.tokenTracker as TokenTracker;
+        } else {
+            active = _defaultTracker;
+        }
+        const value = (active as any)[prop];
+        return typeof value === 'function' ? value.bind(active) : value;
+    },
+});

@@ -10,6 +10,7 @@ import { writeStateSnapshot, writeRunManifest } from '../utils/run-snapshot';
 import { appendLedger } from '../utils/run-ledger';
 import { collectRunState, reconstructState, reconcileGitState } from './continue';
 import { rehydrateSingletons } from './continue/singleton-rehydration';
+import { RunContext, runWithContext } from '../utils/run-context';
 import type { RepoTarget, PhaseName } from '../agents/_shared/base-schemas';
 import type { ProjectStateType } from './state';
 
@@ -201,65 +202,73 @@ function makeSession(
  * Returns the final ProjectState snapshot.
  */
 export async function runAutonomous(opts: RunOptions): Promise<ProjectStateType> {
-    log.info(`Starting autonomous run for "${opts.systemName}"...`);
-
-    const conductor = createConductor({ mode: 'autonomous' });
     const threadId = `run-${opts.systemName}-${Date.now()}`;
-    const config = { configurable: { thread_id: threadId } };
+    const ctx = new RunContext(threadId);
 
-    const input: Partial<ProjectStateType> = {
-        input: {
-            systemName: opts.systemName,
-            requirementsText: opts.requirementsText ?? '',
-            requirementsDocPath: opts.requirementsDocPath,
-            mode: 'autonomous',
-            runType: opts.runType ?? 'greenfield',
-            existingProjectPath: opts.existingProjectPath,
-            repoTarget: opts.repoTarget,
-        },
-    };
+    return runWithContext(ctx, async () => {
+        log.info(`Starting autonomous run for "${opts.systemName}"...`);
 
-    try {
-        const finalState = await conductor.invoke(input, config);
+        const conductor = createConductor({ mode: 'autonomous' });
+        const config = { configurable: { thread_id: threadId } };
 
-        log.info('Autonomous run complete.');
-        return finalState as ProjectStateType;
-    } catch (err: any) {
-        // Mark the run as failed and flush the token report with whatever
-        // data was collected before the crash — ensures the report exists.
-        return handleRunCrash(conductor, config, err, log, 'Autonomous run failed');
-    }
+        const input: Partial<ProjectStateType> = {
+            input: {
+                systemName: opts.systemName,
+                requirementsText: opts.requirementsText ?? '',
+                requirementsDocPath: opts.requirementsDocPath,
+                mode: 'autonomous',
+                runType: opts.runType ?? 'greenfield',
+                existingProjectPath: opts.existingProjectPath,
+                repoTarget: opts.repoTarget,
+            },
+        };
+
+        try {
+            const finalState = await conductor.invoke(input, config);
+
+            log.info('Autonomous run complete.');
+            return finalState as ProjectStateType;
+        } catch (err: any) {
+            // Mark the run as failed and flush the token report with whatever
+            // data was collected before the crash — ensures the report exists.
+            return handleRunCrash(conductor, config, err, log, 'Autonomous run failed');
+        }
+    });
 }
 
 // ─── Human-in-the-loop run ──────────────────────────────────────────────────
 
 export async function runHumanInTheLoop(opts: RunOptions): Promise<RunSession> {
-    log.info(`Starting HITL run for "${opts.systemName}"...`);
-
-    const conductor = createConductor({ mode: 'human' });
     const threadId = `run-${opts.systemName}-${Date.now()}`;
-    const config = { configurable: { thread_id: threadId } };
+    const ctx = new RunContext(threadId);
 
-    const input: Partial<ProjectStateType> = {
-        input: {
-            systemName: opts.systemName,
-            requirementsText: opts.requirementsText ?? '',
-            requirementsDocPath: opts.requirementsDocPath,
-            mode: 'human',
-            runType: opts.runType ?? 'greenfield',
-            existingProjectPath: opts.existingProjectPath,
-            repoTarget: opts.repoTarget,
-        },
-    };
+    return runWithContext(ctx, async () => {
+        log.info(`Starting HITL run for "${opts.systemName}"...`);
 
-    // Start — will pause at the first interrupt point
-    try {
-        await conductor.invoke(input, config);
-    } catch (err: any) {
-        return handleRunCrash(conductor, config, err, log, 'HITL run failed during initial invoke');
-    }
+        const conductor = createConductor({ mode: 'human' });
+        const config = { configurable: { thread_id: threadId } };
 
-    return makeSession(conductor, threadId, log);
+        const input: Partial<ProjectStateType> = {
+            input: {
+                systemName: opts.systemName,
+                requirementsText: opts.requirementsText ?? '',
+                requirementsDocPath: opts.requirementsDocPath,
+                mode: 'human',
+                runType: opts.runType ?? 'greenfield',
+                existingProjectPath: opts.existingProjectPath,
+                repoTarget: opts.repoTarget,
+            },
+        };
+
+        // Start — will pause at the first interrupt point
+        try {
+            await conductor.invoke(input, config);
+        } catch (err: any) {
+            return handleRunCrash(conductor, config, err, log, 'HITL run failed during initial invoke');
+        }
+
+        return makeSession(conductor, threadId, log);
+    });
 }
 
 // ─── Continue a stopped run (Plan 23, Sub-Plan 04) ──────────────────────────
@@ -289,98 +298,102 @@ export interface ContinueRunOptions {
 export async function continueRun(
     opts: ContinueRunOptions,
 ): Promise<RunSession | ProjectStateType> {
-    const continueLog = getLogger('[ContinueRun]', 177);
-    continueLog.info(`Continuing run from: ${opts.outputPath}`);
+    const threadId = opts.threadId ?? `continue-${Date.now()}`;
+    const ctx = new RunContext(threadId);
 
-    // ── 1. Collect artifacts ─────────────────────────────────────────────
-    const collected = collectRunState(opts.outputPath);
+    return runWithContext(ctx, async () => {
+        const continueLog = getLogger('[ContinueRun]', 177);
+        continueLog.info(`Continuing run from: ${opts.outputPath}`);
 
-    if (!collected.workspaceExists) {
-        throw new Error(
-            `Cannot continue run — workspace directory not found: "${collected.workspacePath || '(unknown)'}". ` +
-            `The generated project must exist on disk to continue.`,
-        );
-    }
+        // ── 1. Collect artifacts ─────────────────────────────────────────────
+        const collected = collectRunState(opts.outputPath);
 
-    // ── 2. Reconstruct state ─────────────────────────────────────────────
-    const { state: reconstructedState, resumePhase, confidence, warnings } = reconstructState(collected);
-
-    continueLog.info(`Reconstruction confidence: ${confidence}`);
-    continueLog.info(`Resume phase: ${resumePhase}`);
-    if (warnings.length > 0) {
-        for (const w of warnings) continueLog.warn(`  Warning: ${w}`);
-    }
-
-    if (confidence === 'minimal') {
-        continueLog.warn(
-            'Only minimal state reconstruction was possible. ' +
-            'The continued run may repeat significant work.',
-        );
-    }
-
-    // ── 3. Rehydrate singletons ──────────────────────────────────────────
-    // These are normally initialised by intakeNode, which will be skipped
-    // during continuation (its idempotency guard detects existing paths).
-    rehydrateSingletons(collected, reconstructedState);
-
-    // ── 3b. Git state reconciliation ─────────────────────────────────────
-    // Verify and fix workspace git state before resuming. This cleans up
-    // stale worktrees, lock files, and branches from the previous run.
-    if (collected.workspaceIsGitRepo) {
-        const reconciliation = reconcileGitState(collected, reconstructedState);
-        if (reconciliation.warnings.length > 0) {
-            for (const w of reconciliation.warnings) continueLog.warn(`  Git: ${w}`);
-        }
-        if (!reconciliation.ok) {
-            continueLog.warn(
-                'Git reconciliation completed with issues. The continued run may encounter git errors.',
+        if (!collected.workspaceExists) {
+            throw new Error(
+                `Cannot continue run — workspace directory not found: "${collected.workspacePath || '(unknown)'}". ` +
+                `The generated project must exist on disk to continue.`,
             );
         }
-    }
 
-    // ── 4. Build the graph and invoke ────────────────────────────────────
-    const resolvedMode = opts.mode ?? 'autonomous';
-    const conductor = createConductor({
-        mode: resolvedMode,
-        outputPath: collected.outputPath,
-    });
-    const threadId = opts.threadId ?? `continue-${Date.now()}`;
-    const config = { configurable: { thread_id: threadId } };
+        // ── 2. Reconstruct state ─────────────────────────────────────────────
+        const { state: reconstructedState, resumePhase, confidence, warnings } = reconstructState(collected);
 
-    // Inject the continuation flags into the state.
-    // Plan 25: clear cancelled and _stopReason from the previous run — the user
-    // is explicitly continuing, so budget/provider stops should not carry over.
-    const initialState: Partial<ProjectStateType> = {
-        ...reconstructedState as Partial<ProjectStateType>,
-        _isContinuation: true,
-        _resumePhase: resumePhase,
-        cancelled: false,
-        _stopReason: null,
-    };
-
-    // Append a ledger entry marking the continuation
-    appendLedger({
-        kind: 'phase',
-        phase: resumePhase,
-        event: 'start',
-    });
-
-    if (resolvedMode === 'autonomous') {
-        try {
-            const finalState = await conductor.invoke(initialState, config);
-            continueLog.info('Continued autonomous run complete.');
-            return finalState as ProjectStateType;
-        } catch (err: any) {
-            return handleRunCrash(conductor, config, err, continueLog, 'Continued autonomous run failed');
+        continueLog.info(`Reconstruction confidence: ${confidence}`);
+        continueLog.info(`Resume phase: ${resumePhase}`);
+        if (warnings.length > 0) {
+            for (const w of warnings) continueLog.warn(`  Warning: ${w}`);
         }
-    }
 
-    // ── HITL mode: return a session ──────────────────────────────────────
-    try {
-        await conductor.invoke(initialState, config);
-    } catch (err: any) {
-        return handleRunCrash(conductor, config, err, continueLog, 'Continued HITL run failed during initial invoke');
-    }
+        if (confidence === 'minimal') {
+            continueLog.warn(
+                'Only minimal state reconstruction was possible. ' +
+                'The continued run may repeat significant work.',
+            );
+        }
 
-    return makeSession(conductor, threadId, continueLog);
+        // ── 3. Rehydrate singletons ──────────────────────────────────────────
+        // These are normally initialised by intakeNode, which will be skipped
+        // during continuation (its idempotency guard detects existing paths).
+        rehydrateSingletons(collected, reconstructedState);
+
+        // ── 3b. Git state reconciliation ─────────────────────────────────────
+        // Verify and fix workspace git state before resuming. This cleans up
+        // stale worktrees, lock files, and branches from the previous run.
+        if (collected.workspaceIsGitRepo) {
+            const reconciliation = reconcileGitState(collected, reconstructedState);
+            if (reconciliation.warnings.length > 0) {
+                for (const w of reconciliation.warnings) continueLog.warn(`  Git: ${w}`);
+            }
+            if (!reconciliation.ok) {
+                continueLog.warn(
+                    'Git reconciliation completed with issues. The continued run may encounter git errors.',
+                );
+            }
+        }
+
+        // ── 4. Build the graph and invoke ────────────────────────────────────
+        const resolvedMode = opts.mode ?? 'autonomous';
+        const conductor = createConductor({
+            mode: resolvedMode,
+            outputPath: collected.outputPath,
+        });
+        const config = { configurable: { thread_id: threadId } };
+
+        // Inject the continuation flags into the state.
+        // Plan 25: clear cancelled and _stopReason from the previous run — the user
+        // is explicitly continuing, so budget/provider stops should not carry over.
+        const initialState: Partial<ProjectStateType> = {
+            ...reconstructedState as Partial<ProjectStateType>,
+            _isContinuation: true,
+            _resumePhase: resumePhase,
+            cancelled: false,
+            _stopReason: null,
+        };
+
+        // Append a ledger entry marking the continuation
+        appendLedger({
+            kind: 'phase',
+            phase: resumePhase,
+            event: 'start',
+        });
+
+        if (resolvedMode === 'autonomous') {
+            try {
+                const finalState = await conductor.invoke(initialState, config);
+                continueLog.info('Continued autonomous run complete.');
+                return finalState as ProjectStateType;
+            } catch (err: any) {
+                return handleRunCrash(conductor, config, err, continueLog, 'Continued autonomous run failed');
+            }
+        }
+
+        // ── HITL mode: return a session ──────────────────────────────────────
+        try {
+            await conductor.invoke(initialState, config);
+        } catch (err: any) {
+            return handleRunCrash(conductor, config, err, continueLog, 'Continued HITL run failed during initial invoke');
+        }
+
+        return makeSession(conductor, threadId, continueLog);
+    });
 }

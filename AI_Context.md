@@ -191,8 +191,9 @@ src/
     run-budget.ts                  # Graceful degradation on budget limits + shouldStopRun()
     structured-output.ts           # JSON extraction + Zod validation + repair + content-block text extraction
     response-log.ts                # Full-response dumps (outputs/<run>/full-responses/*.json + index.jsonl)
-    event-bus.ts                   # Typed singleton event bus (14 event types, incl. run:budget-stop, run:provider-stop)
-    token-tracker.ts               # Token consumption tracker (singleton); Plan 26-11: appends JSONL per call (O(1)), debounces full JSON flush every 10s
+    run-context.ts                 # Per-run AsyncLocalStorage context (RunContext class); makes all singletons safe for concurrent server runs
+    event-bus.ts                   # Typed event bus (14 event types, incl. run:budget-stop, run:provider-stop); context-aware via RunContext
+    token-tracker.ts               # Token consumption tracker; context-aware via RunContext Proxy; Plan 26-11: appends JSONL per call (O(1)), debounces full JSON flush every 10s
     token-callback.ts              # LangChain callback for token recording (two-tier provider lookup)
     token-usage-extractor.ts       # Shared usage normalisation (normaliseUsage/sumUsageMetadata) + per-invocation aggregation
     token-report.ts                # HTML + JSON token usage report generator
@@ -1238,6 +1239,7 @@ The system evolved through 16+ iteration plans. Key milestones:
 | 26-05 | Utility extraction: created 8 shared utilities (fs-walk, source-graph, markdown-table, shell-exec, bug-factory, branch-naming, artifact-writer, gate-types) |
 | 26-06 | Utility deduplication: migrated all consumers to shared utilities (shell-exec 3 files, markdown-table 11 files/23 tables, bug-factory 7 files/19 sites, branch-naming 6 files/13 sites, artifact-writer 8 files/13 sites). Fixed continue-run slug mismatch bug, added missing pipe-escaping to 9 of 11 table sites, added missing error handling to 3 output-write sites |
 | 26-10 | Unified Gate abstraction: `gate-types.ts` exports `GateStatus`, `FindingSeverity`, `GateFinding`, `GateOutcome<R>`, `WorkspaceIndex`; every gate module exports a `*GateOutcome()` adapter; `workspace-index.ts` builds a shared file index once; `gate:result` events carry a `gate` discriminator. Removed dead code: `layout-lint.ts`, `REPO_CONTRACT_MODE`, `CONTRACT_STUB_SCAFFOLD` |
+| 26-14 | RunContext & Singleton Elimination: `AsyncLocalStorage`-based per-run context, `RunContext` class, all singletons context-aware, index.ts key-space collision fix + LRU eviction, history-compactor per-run memo, prompt-cache per-run breakpoint set |
 
 When referenced in code comments, these plans are cited as "fixes A1", "fixes A2", etc. (referring to sub-plans within Plan 16).
 
@@ -1263,6 +1265,7 @@ When referenced in code comments, these plans are cited as "fixes A1", "fixes A2
 12. **Only `source: 'executed'` test reports count toward coverage and routing** — agent self-reported (`claimed`) test results are advisory only and do not drive pipeline decisions.
 13. **`completed` now means accepted by the acceptance gate** — never a false positive. The `finalStatus` is one of `completed`, `failed`, `partial`, or `inconclusive`, determined by the deterministic acceptance gate.
 14. **`.agent/` is gitignored in generated projects** — the `repo-contract.json` and other machine-generated files live there and must not be committed.
+15. **Singletons are per-run in server mode** — `token-tracker`, `event-bus`, `run-budget`, `run-ledger`, `response-log`, `logger`, `run-snapshot`, `history-compactor` memo/stats, and `prompt-cache` breakpoint set are scoped per-run via `RunContext` + `AsyncLocalStorage` (Plan 26-14). Module-level globals remain as CLI-mode defaults. New singletons must follow the `_active()` pattern or use `RunContext` to avoid cross-run contamination.
 
 ---
 

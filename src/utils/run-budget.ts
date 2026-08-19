@@ -44,10 +44,36 @@ export interface BudgetStatus {
 
 // ─── State ──────────────────────────────────────────────────────────────────
 
+import { getRunContext, type RunBudgetState } from './run-context';
+
 let _runStartMs = Date.now();
 let _lastLoggedLevel: BudgetLevel = 'ok';
 /** Accumulated paused time (ms) excluded from wall utilisation (Plan 24, D4). */
 let _pausedMs = 0;
+
+/** Get the active budget state — per-run scoped or module default. */
+function _active(): { runStartMs: number; setRunStartMs: (ms: number) => void; lastLoggedLevel: BudgetLevel; setLastLoggedLevel: (l: BudgetLevel) => void; pausedMs: number; setPausedMs: (ms: number) => void } {
+    const ctx = getRunContext();
+    if (ctx) {
+        const s = ctx.budget as RunBudgetState;
+        return {
+            get runStartMs() { return s.runStartMs; },
+            setRunStartMs(ms: number) { s.runStartMs = ms; },
+            get lastLoggedLevel() { return s.lastLoggedLevel as BudgetLevel; },
+            setLastLoggedLevel(l: BudgetLevel) { s.lastLoggedLevel = l; },
+            get pausedMs() { return s.pausedMs; },
+            setPausedMs(ms: number) { s.pausedMs = ms; },
+        };
+    }
+    return {
+        get runStartMs() { return _runStartMs; },
+        setRunStartMs(ms: number) { _runStartMs = ms; },
+        get lastLoggedLevel() { return _lastLoggedLevel; },
+        setLastLoggedLevel(l: BudgetLevel) { _lastLoggedLevel = l; },
+        get pausedMs() { return _pausedMs; },
+        setPausedMs(ms: number) { _pausedMs = ms; },
+    };
+}
 
 // ─── Pure helpers ───────────────────────────────────────────────────────────
 
@@ -63,9 +89,10 @@ export function computeBudgetLevel(utilisation: number): BudgetLevel {
 
 /** Call once at run start (from intakeNode) to stamp the wall-clock origin. */
 export function startRunBudget(): void {
-    _runStartMs = Date.now();
-    _lastLoggedLevel = 'ok';
-    _pausedMs = 0;
+    const s = _active();
+    s.setRunStartMs(Date.now());
+    s.setLastLoggedLevel('ok');
+    s.setPausedMs(0);
     log.info('Run budget started');
 }
 
@@ -74,11 +101,12 @@ export function startRunBudget(): void {
 // ─── Status ─────────────────────────────────────────────────────────────────
 
 export function getBudgetStatus(): BudgetStatus {
+    const s = _active();
     const summary = tokenTracker.getRunSummary();
     const usedTokens = summary.totalTokens;
     const estCostUsd = estimateRunCost(summary);
     // Plan 24 D4: subtract paused time from elapsed wall clock
-    const elapsedMs = Math.max(0, Date.now() - _runStartMs - _pausedMs);
+    const elapsedMs = Math.max(0, Date.now() - s.runStartMs - s.pausedMs);
 
     // Compute per-limit utilisation (0 = disabled → 0 utilisation)
     const tokenUtil = MAX_RUN_TOKENS > 0 ? usedTokens / MAX_RUN_TOKENS : 0;
@@ -101,18 +129,18 @@ export function getBudgetStatus(): BudgetStatus {
     const level = computeBudgetLevel(utilisation);
 
     // Log each level transition exactly once
-    if (level !== _lastLoggedLevel) {
+    if (level !== s.lastLoggedLevel) {
         const logLevel = level === 'stop' ? 'error' : 'warn';
         if (level !== 'ok') {
             log[logLevel](
-                `Budget level: ${_lastLoggedLevel} → ${level} — binding=${binding}, ` +
+                `Budget level: ${s.lastLoggedLevel} → ${level} — binding=${binding}, ` +
                 `utilisation=${(utilisation * 100).toFixed(1)}%, ` +
                 `tokens=${usedTokens.toLocaleString()}/${MAX_RUN_TOKENS || '∞'}, ` +
                 `cost=$${estCostUsd.toFixed(4)}/${MAX_RUN_COST_USD || '∞'}, ` +
                 `wall=${(elapsedMs / 1000).toFixed(0)}s/${MAX_RUN_WALL_MS ? (MAX_RUN_WALL_MS / 1000).toFixed(0) + 's' : '∞'}`,
             );
         }
-        _lastLoggedLevel = level;
+        s.setLastLoggedLevel(level);
         emitRunEvent('budget:level', { level, binding, utilisation, usedTokens, estCostUsd, elapsedMs });
     }
 

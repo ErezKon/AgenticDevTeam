@@ -74,8 +74,16 @@ const CHARS_PER_TOKEN_ESTIMATE = 4;
 
 const EPHEMERAL = { type: 'ephemeral' as const };
 
+import { getRunContext } from '../../utils/run-context';
+
 /** Set of agent IDs for which we have already logged breakpoint placement. */
 const _breakpointLoggedAgents = new Set<string>();
+
+/** Get the active breakpoint-logged set — per-run scoped or module default. */
+function _activeLoggedAgents(): Set<string> {
+    const ctx = getRunContext();
+    return ctx?.breakpointLoggedAgents ?? _breakpointLoggedAgents;
+}
 
 // ─── Block helpers ──────────────────────────────────────────────────────────
 
@@ -140,9 +148,10 @@ export function withSystemCacheBreakpoint(
     const toolsChars = opts?.tools?.length ? JSON.stringify(opts.tools).length : 0;
     const combinedChars = systemChars + toolsChars;
 
+    const logged = _activeLoggedAgents();
     if (combinedChars < minChars) {
-        if (agentId && !_breakpointLoggedAgents.has(`sys:${agentId}`)) {
-            _breakpointLoggedAgents.add(`sys:${agentId}`);
+        if (agentId && !logged.has(`sys:${agentId}`)) {
+            logged.add(`sys:${agentId}`);
             cacheLog.debug(
                 `${agentId}: system breakpoint skipped — combined ${combinedChars} chars < ${minChars} min `
                 + `(model="${model}", family min=${minTokens} tokens)`,
@@ -154,8 +163,8 @@ export function withSystemCacheBreakpoint(
     const blocks = blocksWithTrailingBreakpoint(systemMessage.content);
     if (!blocks) return systemMessage;
 
-    if (agentId && !_breakpointLoggedAgents.has(`sys:${agentId}`)) {
-        _breakpointLoggedAgents.add(`sys:${agentId}`);
+    if (agentId && !logged.has(`sys:${agentId}`)) {
+        logged.add(`sys:${agentId}`);
         cacheLog.debug(
             `${agentId}: system breakpoint placed — combined ${combinedChars} chars >= ${minChars} min `
             + `(system=${systemChars}, tools=${toolsChars}, model="${model}")`,

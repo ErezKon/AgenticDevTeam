@@ -76,6 +76,8 @@ const PRIORITY_TYPES = new Set<string>([
 
 // ─── Singleton state ────────────────────────────────────────────────────────
 
+import { getRunContext, type EventBusState } from './run-context';
+
 const emitter = new EventEmitter();
 emitter.setMaxListeners(50); // avoid the default 10-listener warning
 
@@ -83,6 +85,30 @@ let _buffer: RunEvent[] = [];
 let _bufferSize = EVENT_BUFFER_SIZE;
 let _priorityBuffer: RunEvent[] = [];
 let _priorityBufferSize = EVENT_PRIORITY_BUFFER_SIZE;
+
+/** Get the active event bus state — per-run scoped or module default. */
+function _active(): { emitter: EventEmitter; buffer: RunEvent[]; setBuffer: (b: RunEvent[]) => void; bufferSize: number; priorityBuffer: RunEvent[]; priorityBufferSize: number } {
+    const ctx = getRunContext();
+    if (ctx) {
+        const s = ctx.eventBus as EventBusState;
+        return {
+            emitter: s.emitter,
+            get buffer() { return s.buffer as RunEvent[]; },
+            setBuffer(b: RunEvent[]) { s.buffer = b; },
+            bufferSize: s.bufferSize,
+            get priorityBuffer() { return s.priorityBuffer as RunEvent[]; },
+            priorityBufferSize: s.priorityBufferSize,
+        };
+    }
+    return {
+        emitter,
+        get buffer() { return _buffer; },
+        setBuffer(b: RunEvent[]) { _buffer = b; },
+        bufferSize: _bufferSize,
+        get priorityBuffer() { return _priorityBuffer; },
+        priorityBufferSize: _priorityBufferSize,
+    };
+}
 
 // ─── Public API ─────────────────────────────────────────────────────────────
 
@@ -97,22 +123,24 @@ export function emitRunEvent(type: RunEventType, payload: Record<string, unknown
         payload,
     };
 
+    const bus = _active();
+
     // Ring buffer
-    _buffer.push(event);
-    if (_buffer.length > _bufferSize) {
-        _buffer = _buffer.slice(_buffer.length - _bufferSize);
+    bus.buffer.push(event);
+    if (bus.buffer.length > bus.bufferSize) {
+        bus.setBuffer(bus.buffer.slice(bus.buffer.length - bus.bufferSize));
     }
 
     // Priority buffer (never evicts high-severity events)
     if (PRIORITY_TYPES.has(type)) {
-        if (_priorityBuffer.length < _priorityBufferSize) {
-            _priorityBuffer.push(event);
+        if (bus.priorityBuffer.length < bus.priorityBufferSize) {
+            bus.priorityBuffer.push(event);
         }
     }
 
     // Notify listeners (never throw)
     try {
-        emitter.emit('run-event', event);
+        bus.emitter.emit('run-event', event);
     } catch (err: any) {
         log.warn(`Event listener error on ${type}: ${err?.message ?? err}`);
     }
@@ -122,6 +150,7 @@ export function emitRunEvent(type: RunEventType, payload: Record<string, unknown
  * Subscribe to all run events. Returns an unsubscribe function.
  */
 export function onRunEvent(cb: (e: RunEvent) => void): () => void {
+    const bus = _active();
     const safeListener = (e: RunEvent) => {
         try {
             cb(e);
@@ -129,28 +158,30 @@ export function onRunEvent(cb: (e: RunEvent) => void): () => void {
             log.warn(`Event listener threw on ${e.type}: ${err?.message ?? err}`);
         }
     };
-    emitter.on('run-event', safeListener);
-    return () => { emitter.removeListener('run-event', safeListener); };
+    bus.emitter.on('run-event', safeListener);
+    return () => { bus.emitter.removeListener('run-event', safeListener); };
 }
 
 /** Last N events from the ring buffer, for backfilling a reconnecting dashboard. */
 export function getRecentEvents(limit?: number): RunEvent[] {
-    const n = limit ?? _bufferSize;
-    if (n >= _buffer.length) return [..._buffer];
-    return _buffer.slice(_buffer.length - n);
+    const bus = _active();
+    const n = limit ?? bus.bufferSize;
+    if (n >= bus.buffer.length) return [...bus.buffer];
+    return bus.buffer.slice(bus.buffer.length - n);
 }
 
 /** All priority events (never evicted). */
 export function getPriorityEvents(): RunEvent[] {
-    return [..._priorityBuffer];
+    return [..._active().priorityBuffer];
 }
 
 /** Combined view: priority events + recent ring events, deduplicated and sorted. */
 export function getAllEvents(limit?: number): RunEvent[] {
+    const bus = _active();
     const seen = new Set<string>();
     const all: RunEvent[] = [];
     // Priority first
-    for (const e of _priorityBuffer) {
+    for (const e of bus.priorityBuffer) {
         const key = `${e.ts}:${e.type}`;
         if (!seen.has(key)) {
             seen.add(key);
@@ -158,7 +189,7 @@ export function getAllEvents(limit?: number): RunEvent[] {
         }
     }
     // Ring buffer
-    for (const e of _buffer) {
+    for (const e of bus.buffer) {
         const key = `${e.ts}:${e.type}`;
         if (!seen.has(key)) {
             seen.add(key);
