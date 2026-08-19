@@ -9,7 +9,9 @@ import {
     summariseDbDesign,
     summariseStories,
     storiesForIds,
+    storiesWithCriteria,
     summariseTasks,
+    tasksForIds,
     summariseFileChanges,
     summariseCodebaseAnalysis,
     summariseEpics,
@@ -233,6 +235,40 @@ describe('storiesForIds', () => {
     it('returns fallback for empty inputs', () => {
         expect(storiesForIds([], ['US-001']).text).toBe('(no stories)');
         expect(storiesForIds(fixtureStories, []).text).toBe('(no stories)');
+    });
+});
+
+describe('storiesWithCriteria', () => {
+    it('includes numbered AC for each story', () => {
+        const text = storiesWithCriteria(fixtureStories);
+        expect(text).toContain('US-001');
+        expect(text).toContain('US-002');
+        expect(text).toContain('Email required');
+    });
+
+    it('returns placeholder for empty stories', () => {
+        expect(storiesWithCriteria([])).toBe('(no user stories)');
+    });
+});
+
+describe('tasksForIds', () => {
+    it('returns matched tasks with descriptions', () => {
+        const text = tasksForIds(fixtureTasks, ['TASK-001']);
+        expect(text).toContain('TASK-001');
+        expect(text).toContain('POST /api/auth/register endpoint');
+    });
+
+    it('returns placeholder when no matches', () => {
+        expect(tasksForIds(fixtureTasks, ['TASK-GHOST'])).toBe('(no matching tasks)');
+    });
+
+    it('clips long descriptions', () => {
+        const longTasks: Task[] = [{
+            id: 'TASK-LONG', storyId: 'US-001', title: 'Long', layer: 'backend',
+            suggestedTech: 'Node', description: 'x'.repeat(2000), moduleIds: [],
+        }];
+        const text = tasksForIds(longTasks, ['TASK-LONG'], 100);
+        expect(text.length).toBeLessThan(2000);
     });
 });
 

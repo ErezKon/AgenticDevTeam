@@ -9,8 +9,17 @@
  *
  * Pure: no LLM, no git, no network.
  */
-import { AIMessage, HumanMessage, ToolMessage } from '@langchain/core/messages';
-import { sanitizeStreamingContentBlocks, compactHistory } from '../src/agents/_shared/history-compactor';
+import { AIMessage, AIMessageChunk, HumanMessage, ToolMessage } from '@langchain/core/messages';
+
+jest.mock('../src/config', () => ({
+    ...jest.requireActual('../src/config'),
+    HISTORY_KEEP_RECENT_TOOL_RESULTS: 4,
+    HISTORY_KEEP_RECENT_TURNS: 3,
+    HISTORY_KEEP_RECENT_WRITE_ARGS: 2,
+    HISTORY_MAX_CHARS: 1_000_000,
+}));
+
+import { sanitizeStreamingContentBlocks, compactHistory, normaliseAIMessageForState } from '../src/agents/_shared/history-compactor';
 
 /** The corrupt assistant message produced by streamed chunk reassembly. */
 function corruptAssistantMessage(): AIMessage {
@@ -124,5 +133,93 @@ describe('sanitizeStreamingContentBlocks', () => {
         }
         // Original state is still untouched by either pass.
         expect((messages[1].content as any[])).toHaveLength(6);
+    });
+
+    it('reconstructs input from sibling deltas when there is no matching tool_call', () => {
+        // Corrupt history restored from a checkpoint: content blocks survived but
+        // tool_calls did not. Dropping the tool_use here would lose the call.
+        const orphan = new AIMessageChunk({
+            content: [
+                { index: 1, type: 'tool_use', id: 'toolu_X', name: 'read_file', input: '' },
+                { index: 1, type: 'input_json_delta', input: '{"filePath": "src/a.ts"}' },
+            ] as any,
+        });
+
+        const { messages } = sanitizeStreamingContentBlocks([orphan]);
+        const blocks = messages[0].content as any[];
+
+        expect(blocks).toHaveLength(1);
+        expect(blocks[0].type).toBe('tool_use');
+        expect(blocks[0].input).toEqual({ filePath: 'src/a.ts' });
+    });
+});
+
+// ─── normaliseAIMessageForState (Plan 22 E2) ────────────────────────────────
+
+/** The exact block layout observed in full-responses/006. */
+function anthropicChunk() {
+    return new AIMessageChunk({
+        content: [
+            { index: 0, type: 'text', text: "I'll inspect the workspace." },
+            { index: 1, type: 'tool_use', id: 'toolu_A', name: 'read_file', input: '' },
+            { index: 1, type: 'input_json_delta', input: '{"filePath": "README.md"}' },
+            { index: 2, type: 'tool_use', id: 'toolu_B', name: 'read_file', input: '' },
+            { index: 2, type: 'input_json_delta', input: '{"filePath": ".gitignore"}' },
+        ] as any,
+        tool_calls: [
+            { id: 'toolu_A', name: 'read_file', args: { filePath: 'README.md' }, type: 'tool_call' },
+            { id: 'toolu_B', name: 'read_file', args: { filePath: '.gitignore' }, type: 'tool_call' },
+        ],
+    });
+}
+
+function blockTypes(m: any): string[] {
+    return (m.content as any[]).map((b: any) => b.type);
+}
+
+describe('normaliseAIMessageForState (Plan 22 E2)', () => {
+    it('returns a clean AIMessage for a residue-bearing chunk', () => {
+        const clean = normaliseAIMessageForState(anthropicChunk()) as AIMessage;
+
+        expect(blockTypes(clean)).toEqual(['text']);
+        expect(clean.tool_calls).toHaveLength(2);
+    });
+
+    it('returns the same object when there is nothing to clean', () => {
+        const m = new AIMessage({ content: [{ type: 'text', text: 'ok' }] as any });
+        expect(normaliseAIMessageForState(m)).toBe(m);
+    });
+
+    it('passes through non-AI and string-content messages unchanged', () => {
+        const human = new HumanMessage('task');
+        const stringAi = new AIMessage('plain text');
+        expect(normaliseAIMessageForState(human)).toBe(human);
+        expect(normaliseAIMessageForState(stringAi)).toBe(stringAi);
+    });
+
+    it('stops the monotonic residue growth seen in the run log', () => {
+        const history: any[] = [new HumanMessage('task')];
+        const dropCounts: number[] = [];
+
+        for (let turn = 0; turn < 5; turn++) {
+            history.push(normaliseAIMessageForState(anthropicChunk()));
+            history.push(new ToolMessage({ content: 'ok', tool_call_id: `t${turn}` }));
+            dropCounts.push(sanitizeStreamingContentBlocks(history).blocksDropped);
+        }
+
+        expect(dropCounts).toEqual([0, 0, 0, 0, 0]);
+    });
+
+    it('would grow monotonically without normalisation — the observed bug', () => {
+        const history: any[] = [new HumanMessage('task')];
+        const dropCounts: number[] = [];
+
+        for (let turn = 0; turn < 5; turn++) {
+            history.push(anthropicChunk());
+            history.push(new ToolMessage({ content: 'ok', tool_call_id: `t${turn}` }));
+            dropCounts.push(sanitizeStreamingContentBlocks(history).blocksDropped);
+        }
+
+        expect(dropCounts).toEqual([4, 8, 12, 16, 20]);
     });
 });

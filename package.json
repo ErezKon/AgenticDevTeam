@@ -11,7 +11,7 @@
     "test:greenfield": "jest --runInBand --verbose --testPathPattern=greenfield",
     "test:maintain": "jest --runInBand --verbose --testPathPattern=maintain",
     "test:unit": "jest --runInBand --verbose --testPathIgnorePatterns='greenfield|maintain|pipeline-replay'",
-    "test:regression": "jest --runInBand --verbose --testPathPattern=regression-plan19",
+    "test:regression": "jest --runInBand --verbose --testPathPattern=acceptance-gate.regression",
     "test:replay": "jest --runInBand --verbose --testPathPattern=pipeline-replay",
     "record:cassette": "LLM_CASSETTE_MODE=record CASSETTE_NAME=greenfield-smoke GITHUB_MODE=local tsx src/cli.ts",
     "typecheck": "tsc --noEmit",

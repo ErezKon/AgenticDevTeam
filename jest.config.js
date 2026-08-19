@@ -22,4 +22,18 @@ module.exports = {
     transformIgnorePatterns: [
         'node_modules/(?!(@octokit|universal-user-agent|before-after-hook)/)',
     ],
+    collectCoverageFrom: [
+        'src/**/*.ts',
+        '!src/**/*.d.ts',
+        '!src/index.ts',
+        '!src/cli.ts',
+    ],
+    coverageThreshold: {
+        global: {
+            lines: 25,
+            branches: 20,
+            functions: 20,
+            statements: 25,
+        },
+    },
 };

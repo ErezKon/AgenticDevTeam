@@ -12,7 +12,7 @@
 4. **Never break the pipeline.** The LangGraph state machine is the backbone. Changes to `state.ts`, `graph.ts`, or `nodes/` require understanding the full flow and how reducers merge state.
 5. **Schema changes cascade.** Modifying a Zod schema in `src/agents/_shared/schemas/` affects every agent that uses it, the conductor nodes, and the tests. Trace all consumers before changing.
 6. **Environment variables are the API.** All configuration is via `.env`. When adding a new config, add it to `src/config.ts`, `.env.example` (with documentation), and the README's Environment Variables table.
-7. **Test what you change.** Run `npm run test:unit` for unit tests. Use `npm run test:greenfield` or `npm run test:maintain` for integration tests. Default test timeout is 10 seconds; integration tests set their own per-test timeouts. Use `npm run typecheck` for type checking and `npm run lint` for unused-code detection.
+7. **Test what you change.** Run `npm run test:unit` for unit tests. Use `npm run test:greenfield` or `npm run test:maintain` for integration tests. Use `npm run test:regression` for acceptance-gate regression tests. Default test timeout is 10 seconds; integration tests set their own per-test timeouts. Use `npm run typecheck` for type checking and `npm run lint` for unused-code detection. Coverage thresholds are configured in `jest.config.js`; run with `--coverage` to check.
 8. **Do not hardcode vendor-specific values.** The system is designed to work with any OpenAI-compatible LLM endpoint. All URLs, tokens, and model names come from environment variables.
 9. **Never commit and push changes without explicit consent.** The user will review the changes and approve them, he will commit and push manually. Unless user specifically requests you to commit/push the changes.
 
@@ -239,7 +239,16 @@ tests/                             # Jest test suite (ts-jest)
     state-factory.ts               # makeState(overrides?) — canonical ProjectStateType fixture
     tmp.ts                         # makeTempDir(), withTempDir() — temp dir lifecycle
     git.ts                         # git(), createTestRepo() — isolated git helpers
-  *.test.ts                        # 80+ test files
+  *.test.ts                        # 85+ test files (Sub-Plan 26-13)
+  # Notable new test files (Sub-Plan 26-13):
+  # provider-failure.test.ts        — classifyProviderFailure, isProviderLevelFailure, ProviderRecoveryFailedError
+  # cost.test.ts                    — estimateCost, estimateRunCost (cache-aware pricing)
+  # config.test.ts                  — envInt, envFloat, envBool, envEnum helpers
+  # assembly-gate.test.ts           — runAssemblyGate, buildAssemblyAssignment, assemblyGateOutcome
+  # branch-consolidation.test.ts    — consolidateBranches (union-find, squash, module overlap)
+  # workspace.test.ts               — resolveWorkspacePath (security-critical path resolution)
+  # pr-body.test.ts                 — buildPRTitle, buildPRDescription (pure functions)
+  # acceptance-gate.regression.test.ts — (renamed from regression-plan19.test.ts, tautological tests removed)
 
 Plans/                             # Historical plan documents (01 … 21) + implementation reports
 specs/
