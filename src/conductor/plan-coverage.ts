@@ -11,6 +11,7 @@
  */
 import type { ProjectStateType } from './state';
 import { getLogger } from '../utils/logger';
+import { getDevAgent } from '../agents/developers/registry';
 
 const log = getLogger('[plan-coverage]', 213);
 
@@ -28,7 +29,8 @@ export interface CoverageViolation {
         | 'epic-without-story'
         | 'duplicate-id'
         | 'oversized-assignment'
-        | 'agent-overloaded';
+        | 'agent-overloaded'
+        | 'off-stack-agent';
     severity: 'critical' | 'major';
     id: string;
     detail: string;
@@ -279,7 +281,70 @@ export function validateAssignmentPlan(state: ProjectStateType): CoverageViolati
         }
     }
 
+    // ── Plan 27-E: Off-stack agent detection — flag junior agents assigned outside their domain ──
+    const stackChoices = new Set<string>();
+    const stackLayers = new Set<string>();
+    for (const tech of state.techStack ?? []) {
+        stackChoices.add((tech.choice ?? '').toLowerCase());
+        stackLayers.add((tech.layer ?? '').toLowerCase());
+    }
+
+    // Determine if the project is frontend-only, backend-only, or fullstack
+    const frontendChoices = ['react', 'angular', 'vue', 'svelte', 'typescript', 'html/css', 'tailwind'];
+    const backendChoices = ['python', 'java', 'go', 'c#', 'c#/.net', 'node.js', 'express', 'fastapi', 'django', 'spring'];
+    const hasFrontend = stackLayers.has('frontend') || stackLayers.has('styling') ||
+                        frontendChoices.some(c => stackChoices.has(c));
+    const hasBackend = stackLayers.has('backend') ||
+                       backendChoices.some(c => stackChoices.has(c));
+
+    for (const a of state.assignments ?? []) {
+        const entry = getDevAgent(a.devAgentId);
+        if (!entry) continue;
+
+        // Flag backend-only juniors on frontend-only projects
+        if (entry.domain === 'backend' && entry.rank === 'junior' && hasFrontend && !hasBackend) {
+            violations.push({
+                kind: 'off-stack-agent',
+                severity: 'major',
+                id: a.id,
+                detail: `Assignment ${a.id} assigns ${a.devAgentId} (backend/${entry.languages.join(',')}) ` +
+                        `to a frontend-only project — reassign to a frontend agent`,
+            });
+        }
+
+        // Flag frontend-only juniors on backend-only projects
+        if (entry.domain === 'frontend' && entry.rank === 'junior' && hasBackend && !hasFrontend) {
+            violations.push({
+                kind: 'off-stack-agent',
+                severity: 'major',
+                id: a.id,
+                detail: `Assignment ${a.id} assigns ${a.devAgentId} (frontend/${entry.languages.join(',')}) ` +
+                        `to a backend-only project — reassign to a backend agent`,
+            });
+        }
+    }
+
     return violations;
+}
+
+// ─── Gap Repair Context (Plan 27-D) ────────────────────────────────────────
+
+/** Context passed to gap-repair to prevent blind assignment generation. */
+export interface GapRepairContext {
+    /** Violations that triggered the gap repair */
+    violations: CoverageViolation[];
+    /** Next assignment ID to continue from */
+    nextAssignmentId: number;
+    /** Project slug for branch naming */
+    projectSlug?: string;
+    /** Tech stack decisions from the architect */
+    techStack?: string;
+    /** Repo contract summary */
+    repoContract?: string;
+    /** Assignments already produced in the first TL call */
+    existingAssignments?: string;
+    /** Branch names already created */
+    existingBranches?: string[];
 }
 
 // ─── Gap Prompt Builder ─────────────────────────────────────────────────────
@@ -287,21 +352,86 @@ export function validateAssignmentPlan(state: ProjectStateType): CoverageViolati
 /**
  * Build a targeted gap prompt for the TL to close coverage gaps.
  * Returns only the additions needed, not the full plan.
+ *
+ * Plan 27-D: accepts a GapRepairContext with project slug, tech stack, repo contract,
+ * and existing assignments to prevent blind assignment generation.
  */
 export function buildCoverageGapPrompt(
-    violations: CoverageViolation[],
-    nextAssignmentId: number,
+    violationsOrCtx: CoverageViolation[] | GapRepairContext,
+    nextAssignmentId?: number,
 ): string {
+    // Support both legacy (violations, nextId) and new (GapRepairContext) signatures
+    let violations: CoverageViolation[];
+    let nextId: number;
+    let projectSlug: string | undefined;
+    let techStack: string | undefined;
+    let repoContract: string | undefined;
+    let existingAssignments: string | undefined;
+    let existingBranches: string[] | undefined;
+
+    if (Array.isArray(violationsOrCtx)) {
+        violations = violationsOrCtx;
+        nextId = nextAssignmentId ?? 1;
+    } else {
+        violations = violationsOrCtx.violations;
+        nextId = violationsOrCtx.nextAssignmentId;
+        projectSlug = violationsOrCtx.projectSlug;
+        techStack = violationsOrCtx.techStack;
+        repoContract = violationsOrCtx.repoContract;
+        existingAssignments = violationsOrCtx.existingAssignments;
+        existingBranches = violationsOrCtx.existingBranches;
+    }
+
+    const parts: string[] = [];
+
+    // Include critical context that the gap-repair agent needs (Plan 27-D)
+    if (projectSlug) {
+        parts.push(`## Project Slug: ${projectSlug}`);
+        parts.push(`All branch names MUST start with "${projectSlug}/". Examples:`);
+        parts.push(`  - "${projectSlug}/chore/scaffold" for scaffold work`);
+        parts.push(`  - "${projectSlug}/feature/us-001-description" for features`);
+        parts.push('');
+    }
+
+    if (techStack) {
+        parts.push(`## Tech Stack (from Architect)`);
+        parts.push(techStack);
+        parts.push('');
+        parts.push('IMPORTANT: Match developer expertise to this tech stack. Do NOT assign backend-only agents (junior-python, junior-java, junior-go, junior-csharp) to frontend/TypeScript tasks.');
+        parts.push('');
+    }
+
+    if (repoContract) {
+        parts.push(`## Repo Contract`);
+        parts.push(repoContract);
+        parts.push('');
+    }
+
+    if (existingAssignments) {
+        parts.push(`## Already-Produced Assignments`);
+        parts.push('These assignments were already generated. DO NOT restate them.');
+        parts.push(existingAssignments);
+        parts.push('');
+    }
+
+    if (existingBranches?.length) {
+        parts.push(`## Existing Branches`);
+        parts.push('These branches already exist. Reuse them when assigning stories to the same branch.');
+        for (const b of existingBranches) parts.push(`  - ${b}`);
+        parts.push('');
+    }
+
+    parts.push('---');
+    parts.push('');
+    parts.push('Your assignment plan is incomplete. The following gaps MUST be closed:');
+    parts.push('');
+
     const storyGaps = violations.filter(v => v.kind === 'story-without-assignment');
     const taskGaps = violations.filter(v => v.kind === 'task-without-assignment');
     const danglingDeps = violations.filter(v => v.kind === 'dangling-dependency');
     const oversized = violations.filter(v => v.kind === 'oversized-assignment');
     const overloaded = violations.filter(v => v.kind === 'agent-overloaded');
-
-    const parts: string[] = [
-        'Your assignment plan is incomplete. The following gaps MUST be closed:',
-        '',
-    ];
+    const offStack = violations.filter(v => v.kind === 'off-stack-agent');
 
     if (storyGaps.length > 0) {
         parts.push(`## Unassigned stories (${storyGaps.length}):`);
@@ -336,10 +466,18 @@ export function buildCoverageGapPrompt(
         parts.push('');
     }
 
+    // Plan 27-E: off-stack agent feedback
+    if (offStack.length > 0) {
+        parts.push(`## Off-Stack Agent Assignments (${offStack.length}):`);
+        for (const v of offStack) parts.push(`  ${v.detail}`);
+        parts.push('Reassign these to agents whose domain and languages match the project tech stack.');
+        parts.push('');
+    }
+
     parts.push(
         `Return ONLY the ADDITIONAL assignments needed to close these gaps, as`,
         `{ "assignments": [ ...the remaining items... ] }`,
-        `Continue the id sequence from ASSIGN-${String(nextAssignmentId).padStart(3, '0')}.`,
+        `Continue the id sequence from ASSIGN-${String(nextId).padStart(3, '0')}.`,
         `Do not restate assignments you already produced.`,
     );
 

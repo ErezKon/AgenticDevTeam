@@ -309,6 +309,18 @@ export const DEV_CONTEXT_FILE_CHANGES_LIMIT =
 export const MAX_CONCURRENT_DEVS =
     envInt('MAX_CONCURRENT_DEVS', 2);
 
+/** Dispatch branches sequentially (one at a time) instead of in parallel batches.
+ *  When true, MAX_CONCURRENT_DEVS is forced to 1. Default: true (Plan 27-B).
+ *  Sequential dispatch prevents wasting tokens on doomed branches when scaffold fails. */
+export const SEQUENTIAL_DISPATCH =
+    envBool('SEQUENTIAL_DISPATCH', true);
+
+/** Halt the entire dispatch when any branch fails to produce a merged PR.
+ *  Values: 'strict' (halt on any failure), 'scaffold-only' (halt only if scaffold fails),
+ *  'off' (never halt, original behavior). Default: 'strict' (Plan 27-B). */
+export const DISPATCH_HALT_POLICY =
+    envEnum('DISPATCH_HALT_POLICY', ['strict', 'scaffold-only', 'off'] as const, 'strict');
+
 /** Delay (ms) between dispatching batches of branches to avoid rate limits. */
 export const INTER_BATCH_DELAY_MS =
     envInt('INTER_BATCH_DELAY_MS', 5000);
@@ -411,11 +423,12 @@ export const BUDGET_DEGRADE_AT =
 export const LLM_MAX_OUTPUT_TOKENS =
     envInt('LLM_MAX_OUTPUT_TOKENS', 16000);
 
-/** Output-token ceiling for planning agents (architect, PM, DBA, team-leader). Default 64 000.
- *  Raised from 32 000: PM on complex specs (e.g. Pac-Man, 35 stories + 66 tasks) hit the
- *  ceiling at exactly 32 005 tokens, truncating the last task mid-word and crashing the run. */
+/** Output-token ceiling for planning agents (architect, PM, DBA, team-leader). Default 128 000.
+ *  Raised from 32K → 64K (Plan 19): PM hit ceiling on complex specs.
+ *  Raised from 64K → 128K (Plan 27-D): TL truncated at 64 005 tokens on a 35-story, 46-assignment
+ *  plan — only 8 assignments survived. 128K supports up to ~80-story projects. */
 export const PLANNING_MAX_OUTPUT_TOKENS =
-    envInt('PLANNING_MAX_OUTPUT_TOKENS', 64000);
+    envInt('PLANNING_MAX_OUTPUT_TOKENS', 128000);
 
 /** Per-request LLM timeout (ms). The hardcoded 120 000 was too short for long planning generations. */
 export const LLM_REQUEST_TIMEOUT_MS =
@@ -658,10 +671,13 @@ export const LICENCE_DENYLIST =
 
 // ─── Shell Tool ─────────────────────────────────────────────────────────────
 
-/** Allow agents to run shell commands on the host (default: false).
- *  Set to true to enable host shell execution (commands use an env allowlist). */
+/** Allow agents to run shell commands on the host (default: true).
+ *  Plan 27-A: changed default from false to true. Dev agents need shell access
+ *  to run npm install, tsc, npm test, etc. Without it, agents have zero
+ *  compile/test feedback and every branch fails quality gates.
+ *  Set to false to disable host shell execution. Commands use an env allowlist. */
 export const SHELL_ALLOW_HOST =
-    envBool('SHELL_ALLOW_HOST', false);
+    envBool('SHELL_ALLOW_HOST', true);
 
 /** Default timeout (seconds) for shell commands when none is specified. */
 export const SHELL_DEFAULT_TIMEOUT_S =
@@ -983,26 +999,27 @@ export const AGENT_ARTIFACTS_IN_REPO =
 export const SNAPSHOT_MAX_CHARS =
     envInt('SNAPSHOT_MAX_CHARS', 8000);
 
-/** Extra read calls granted when an agent is making verified progress (writes). */
+/** Extra read calls (and half as many bonus turns) granted when an agent is making
+ *  verified progress (writes). Plan 27-C: raised from 10 to 15. */
 export const LOOP_GUARD_PROGRESS_BONUS =
-    envInt('LOOP_GUARD_PROGRESS_BONUS', 10);
+    envInt('LOOP_GUARD_PROGRESS_BONUS', 15);
 
 /** Absolute per-invocation tool-call ceiling.
- *  Was 80 — raised to 140 in Plan 22 because the per-category and per-turn
- *  ceilings are now the binding constraints and 80 calls is only ~8 turns for a
- *  model that batches 9–11 tool calls per turn. */
+ *  Was 80 → 140 (Plan 22) → 250 (Plan 27-C). With 45 turns and ~10 calls/turn,
+ *  the old ceiling of 140 could be hit in 14 turns. Raised to 250 so the
+ *  per-category and per-turn budgets remain the binding constraint. */
 export const LOOP_GUARD_HARD_CEILING =
-    envInt('LOOP_GUARD_HARD_CEILING', 140);
+    envInt('LOOP_GUARD_HARD_CEILING', 250);
 
 /**
  * Per-rank read/write/shell/turn budgets for developer agents, as a JSON object
  * keyed by rank. A partial entry is merged over the built-in defaults, so
- * `{"junior":{"turns":26}}` changes only the junior turn ceiling.
+ * `{"junior":{"turns":40}}` changes only the junior turn ceiling.
  *
- * Built-in defaults (see `tool-loop-guard.ts`):
- *   principal { reads: 60, writes: 30, shell: 14, turns: 28 }
- *   senior    { reads: 50, writes: 25, shell: 12, turns: 24 }
- *   junior    { reads: 40, writes: 20, shell: 12, turns: 20 }
+ * Built-in defaults (see `tool-loop-guard.ts`, Plan 27-C):
+ *   principal { reads: 80, writes: 40, shell: 20, turns: 45 }
+ *   senior    { reads: 70, writes: 35, shell: 18, turns: 40 }
+ *   junior    { reads: 60, writes: 30, shell: 16, turns: 35 }
  *
  * Until Plan 22 this variable — and the whole budget system it configures —
  * was dead: `buildAgent()` always passed a single flat call ceiling to

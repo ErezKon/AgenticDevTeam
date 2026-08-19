@@ -14,6 +14,8 @@ import { getLogger } from '../../utils/logger';
 import { emitRunEvent } from '../../utils/event-bus';
 import { shouldStopRun, getBudgetStatus } from '../../utils/run-budget';
 import { writePeriodicSnapshot } from '../../utils/run-snapshot';
+import { appendLedger } from '../../utils/run-ledger';
+import { setLastKnownState } from '../../utils/run-context';
 import { haltIfUnrecoverable } from '../acceptance-gate';
 import { RUN_FAIL_POLICY } from '../../config';
 import type { ProjectStateType } from '../state';
@@ -227,7 +229,19 @@ export function phaseNode(
             rerunUpdate = checkRerun(state, phase, log);
         }
 
-        // 7. Body
-        return body(state, { rerunUpdate });
+        // 7. Update last known state for graceful shutdown (Plan 27-G)
+        setLastKnownState(state as Record<string, any>);
+
+        // 8. Ledger: phase start (Plan 27-F)
+        appendLedger({ kind: 'phase', phase, event: 'start' });
+        const phaseStartMs = Date.now();
+
+        // 9. Body
+        const result = await body(state, { rerunUpdate });
+
+        // 10. Ledger: phase end (Plan 27-F)
+        appendLedger({ kind: 'phase', phase, event: 'end', durationMs: Date.now() - phaseStartMs });
+
+        return result;
     };
 }

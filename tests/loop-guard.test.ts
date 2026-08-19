@@ -247,37 +247,38 @@ describe('Tool Loop Guard', () => {
 describe('resolveToolBudgets', () => {
     // Plan 22 A1 retuned these for models that batch tool calls, and added a
     // `turns` ceiling so budget behaviour no longer depends on parallel fan-out.
+    // Plan 27-C: raised ~2x from Plan 22 values.
     it('returns default budgets for known ranks', () => {
         const principal = resolveToolBudgets('principal');
-        expect(principal).toEqual({ reads: 60, writes: 30, shell: 14, turns: 28 });
+        expect(principal).toEqual({ reads: 80, writes: 40, shell: 20, turns: 45 });
 
         const junior = resolveToolBudgets('junior');
-        expect(junior).toEqual({ reads: 40, writes: 20, shell: 12, turns: 20 });
+        expect(junior).toEqual({ reads: 60, writes: 30, shell: 16, turns: 35 });
     });
 
     it('falls back to default for unknown ranks', () => {
         const unknown = resolveToolBudgets('intern');
-        expect(unknown).toEqual({ reads: 50, writes: 25, shell: 12, turns: 24 });
+        expect(unknown).toEqual({ reads: 70, writes: 35, shell: 18, turns: 40 });
     });
 
     it('merges a partial JSON override over the rank defaults', () => {
-        const override = JSON.stringify({ senior: { reads: 50, writes: 40, shell: 20 } });
+        const override = JSON.stringify({ senior: { reads: 70, writes: 50, shell: 25 } });
         const senior = resolveToolBudgets('senior', override);
         // reads/writes/shell overridden; `turns` retained from the defaults so a
         // partial override cannot silently zero out a category.
-        expect(senior).toEqual({ reads: 50, writes: 40, shell: 20, turns: 24 });
+        expect(senior).toEqual({ reads: 70, writes: 50, shell: 25, turns: 40 });
     });
 
     it('lets an override set only the turn ceiling', () => {
-        const override = JSON.stringify({ junior: { turns: 40 } });
+        const override = JSON.stringify({ junior: { turns: 50 } });
         expect(resolveToolBudgets('junior', override)).toEqual({
-            reads: 40, writes: 20, shell: 12, turns: 40,
+            reads: 60, writes: 30, shell: 16, turns: 50,
         });
     });
 
     it('falls back to defaults when the override is not valid JSON', () => {
         expect(resolveToolBudgets('principal', '{not json')).toEqual({
-            reads: 60, writes: 30, shell: 14, turns: 28,
+            reads: 80, writes: 40, shell: 20, turns: 45,
         });
     });
 });

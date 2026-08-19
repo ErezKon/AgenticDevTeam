@@ -33,6 +33,7 @@ import { InvocationBudgetExceededError } from '../../utils/run-budget';
 import { buildWorkspaceSnapshot } from '../workspace-snapshot';
 import { reconcileFileChanges } from '../file-change-reconciliation';
 import { emitRunEvent } from '../../utils/event-bus';
+import { appendLedger } from '../../utils/run-ledger';
 import { storiesForIds, tasksForIds } from '../context-builder';
 import { decideMerge, type ReviewOutcome } from '../review-policy';
 import { runQualityGates, gateReportToMarkdown, detectStackRoots } from '../quality-gates';
@@ -326,16 +327,61 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                 allTranscript.push(msg(entry.id, `Completed ${output.fileChanges?.length ?? 0} file changes for ${assignment.id} on branch ${branchName}`));
                 devLog.info(`Done: ${output.fileChanges?.length ?? 0} file changes for ${assignment.id}`);
                 completedAssignmentDescs.push(`${assignment.id}: ${assignment.description.slice(0, 120)}`);
+
+                // Plan 27-F: ledger entry for successful assignment completion
+                appendLedger({
+                    kind: 'agent',
+                    agentId: entry.id,
+                    phase: 'development',
+                    invocation: sortedAssignments.indexOf(assignment),
+                    toolCalls: { read: 0, write: output.fileChanges?.length ?? 0, shell: 0 },
+                    respawns: 0,
+                    poisoned: false,
+                    filesWritten: (output.fileChanges ?? []).map(fc => fc.path),
+                    filesClaimed: (output.fileChanges ?? []).map(fc => fc.path),
+                    phantoms: [],
+                    outcome: 'ok',
+                });
             } catch (err: any) {
                 if (err instanceof InvocationBudgetExceededError) {
                     log.warn(`Dev agent ${devId} stopped on ${assignment.id}: ${err.message}`);
                     allTranscript.push(msg(devId, `Stopped on ${assignment.id} (invocation budget exceeded): ${err.message}`));
+                    // Plan 27-F: ledger entry for budget-exhausted assignment
+                    appendLedger({
+                        kind: 'agent',
+                        agentId: devId,
+                        phase: 'development',
+                        invocation: sortedAssignments.indexOf(assignment),
+                        toolCalls: { read: 0, write: 0, shell: 0 },
+                        respawns: 0,
+                        poisoned: false,
+                        filesWritten: [],
+                        filesClaimed: [],
+                        phantoms: [],
+                        outcome: 'budget-exhausted',
+                        error: err.message,
+                    });
                 } else {
                     // Plan 26, A2: track the failure but continue with next assignment
                     log.error(`Dev agent ${devId} failed on ${assignment.id}: ${err.message}`);
                     allTranscript.push(msg(devId, `Failed on ${assignment.id}: ${err.message}`));
                     failedAgentIds.add(devId);
                     failedAssignmentIds.push(assignment.id);
+                    // Plan 27-F: ledger entry for failed assignment
+                    appendLedger({
+                        kind: 'agent',
+                        agentId: devId,
+                        phase: 'development',
+                        invocation: sortedAssignments.indexOf(assignment),
+                        toolCalls: { read: 0, write: 0, shell: 0 },
+                        respawns: 0,
+                        poisoned: false,
+                        filesWritten: [],
+                        filesClaimed: [],
+                        phantoms: [],
+                        outcome: 'failed',
+                        error: err.message,
+                    });
                 }
             } finally {
                 // Commit after each assignment, not just on failure

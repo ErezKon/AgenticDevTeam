@@ -131,7 +131,7 @@ src/
     nodes/                         # Phase node functions (split into focused modules)
       index.ts                     # Barrel re-export of all 13 node functions
       _invoke.ts                   # invokeAgent<S>() (generic over Zod schema), getModelForAgent()
-      _guards.ts                   # phaseNode() decorator, shouldSkipOnContinue, checkBudgetStop, msg()
+      _guards.ts                   # phaseNode() decorator, shouldSkipOnContinue, checkBudgetStop, msg(); Plan 27-F: phase start/end ledger entries; Plan 27-G: setLastKnownState at phase entry
       _git-helpers.ts              # detectDefaultBranch, commitAndPushArtifacts, ensureNodeLockfileSync
       intake.ts                    # intakeNode (Phase 1)
       planning.ts                  # codebaseAnalyzerNode, architectNode, pmNode, dbaNode, tlNode (Phases 1b-5)
@@ -186,7 +186,7 @@ src/
       history-compactor.ts         # ReAct history compaction + streaming-residue sanitiser
       persona.ts                   # Developer prompt builder (rank/domain/languages)
       artifact.ts                  # Mission report writer (docs/agents/*.md)
-      tool-loop-guard.ts           # Read/write/shell/turn budgets + loop detection + complexity-aware scaling (Plan 26)
+      tool-loop-guard.ts           # Read/write/shell/turn budgets + loop detection + complexity-aware scaling (Plans 26, 27-C)
       base-schemas.ts              # Barrel re-export of all schemas
       schemas/                     # 17 individual Zod schema files
         index.ts                   # Barrel export
@@ -220,7 +220,7 @@ src/
       registry.ts                  # 11 developer agent definitions
       dev-agent.builder.ts         # Developer agent constructor
       reviewer-agent.builder.ts    # Code reviewer agent constructor
-      dispatcher.ts                # Branch-grouped fan-out + concurrency
+      dispatcher.ts                # Branch-grouped fan-out + concurrency; Plan 27-B: sequential dispatch + halt-on-failure
       schemas/                     # dev-output.schema.ts, review-output.schema.ts
     qa/                            # QA Lead + Unit + E2E agents
     devops/                        # DevOps agent
@@ -248,8 +248,8 @@ src/
     run-budget.ts                  # Graceful degradation on budget limits + shouldStopRun()
     structured-output.ts           # JSON extraction + Zod validation + repair + content-block text extraction
     response-log.ts                # Full-response dumps (outputs/<run>/full-responses/*.json + index.jsonl)
-    run-context.ts                 # Per-run AsyncLocalStorage context (RunContext class); makes all singletons safe for concurrent server runs
-    event-bus.ts                   # Typed event bus (16 event types, incl. run:budget-stop, run:provider-stop, branch:partial-failure, branch:gates-blocked); context-aware via RunContext
+    run-context.ts                 # Per-run AsyncLocalStorage context (RunContext class + lastKnownState + setLastKnownState); makes all singletons safe for concurrent server runs; Plan 27-G: lastKnownState updated at each phase entry for graceful shutdown
+    event-bus.ts                   # Typed event bus (17 event types, incl. run:budget-stop, run:provider-stop, branch:partial-failure, branch:gates-blocked, dispatch:halted); context-aware via RunContext
     token-tracker.ts               # Token consumption tracker; context-aware via RunContext Proxy; Plan 25-11: appends JSONL per call (O(1)), debounces full JSON flush every 10s
     token-callback.ts              # LangChain callback for token recording (two-tier provider lookup)
     token-usage-extractor.ts       # Shared usage normalisation (normaliseUsage/sumUsageMetadata) + per-invocation aggregation
@@ -273,7 +273,7 @@ src/
     ledger-report.ts               # Produces outputs/<run>/run-report.md from ledger data
     run-diagnosis.ts               # Automated failure-cause summary (run-diagnosis.md)
     repo-contract-writer.ts        # Write, read, and render .agent/repo-contract.json + Markdown
-    crash-handlers.ts              # flushTokenReportOnExit + installProcessHandlers (shared between cli.ts and index.ts)
+    crash-handlers.ts              # flushTokenReportOnExit + installProcessHandlers + graceful shutdown hooks (shared between cli.ts and index.ts); Plan 27-G: onGracefulShutdown() hook registry, SIGINT/SIGTERM save state with _stopReason: 'manual-kill'
 
   templates/
     codebase-analysis.template.ts  # Markdown renderer for CodebaseAnalysis
@@ -349,7 +349,7 @@ intake -> [codebase-analyzer] -> architect -> product-manager -> dba -> team-lea
 | 3 | **Product Manager** | `productManagerNode` | Convert architecture + epics into user stories (with acceptance criteria) and granular tasks |
 | 4 | **DBA** | `dbaNode` | Design database entities, relationships, indexes, migration scripts, ERD diagram |
 | 5 | **Team Leader** | `teamLeaderNode` | Assign tasks to developers with rank-based reviewer selection, branch naming, dependencies |
-| 6 | **Development** | `developmentNode` | Fan-out assignments to dev agents via `dispatchDevelopers` with topological sorting and concurrency control. Each branch goes through the full PR workflow with **per-assignment invocations** (Plan 26: each assignment gets its own agent with complexity-scaled budget; crashes are isolated). Critical gate failures (typecheck/build) block PR creation. Appends one `DispatchRound` to `state.dispatchRounds` counting **merged** PRs only, so `detectUnrecoverable()` can see a zero-output round |
+| 6 | **Development** | `developmentNode` | Fan-out assignments to dev agents via `dispatchDevelopers` with topological sorting. Plan 27-B: sequential dispatch by default (`SEQUENTIAL_DISPATCH=true`, forces concurrency to 1) with halt-on-failure (`DISPATCH_HALT_POLICY=strict` -- halts when any branch fails). Each branch goes through the full PR workflow with **per-assignment invocations** (Plan 26: each assignment gets its own agent with complexity-scaled budget; crashes are isolated). Critical gate failures (typecheck/build) block PR creation. Appends one `DispatchRound` to `state.dispatchRounds` counting **merged** PRs only, so `detectUnrecoverable()` can see a zero-output round |
 | 7 | **QA** | `qaNode` | QA Lead creates test plan -> QA Unit writes tests -> **Real test runner** parses runner output (authoritative signal; agent self-report is advisory) -> Test sufficiency gate (min counts, coverage floor, per-story coverage) -> Quality gates (deterministic build/lint/test) -> Security gates (secrets, deps, licences) -> AC coverage gate. QA crash synthesises a bug; testReports is never empty after qaNode. |
 | 8 | **Bug-fix Triage** | `bugfixTriageNode` | Runs `detectUnrecoverable()` first (halts the QA→triage→dev loop under `RUN_FAIL_POLICY=halt`); Team Leader re-assigns critical/major bugs; namespaced IDs prevent collision; `sanitizeAssignmentStoryIds()` guarantees every `storyId` references a real user story |
 | 9 | **DevOps** | `devopsNode` | Generate Dockerfiles, compose, K8s manifests; fallback Dockerfile generator when agent fails (`DEVOPS_FALLBACK_ENABLED`); always overwrite agent claims with `verifyDeployment` result; synthesise `DEPLOY-BUILD-FAILED`/`DEPLOY-UNHEALTHY` bugs |
@@ -471,7 +471,7 @@ The `ProjectState` in `src/conductor/state.ts` is a LangGraph `Annotation.Root` 
 - `pendingRerun: PhaseName | null` -- Set when HITL "enhance" is requested
 - `phaseFeedback: Record<string, string[]>` -- Accumulated user feedback per phase
 - `cancelled: boolean` -- Set on HITL "deny", budget exhaustion, or unrecoverable provider failure
-- `_stopReason: string | null` -- Why the run was stopped gracefully (`'budget-exhausted:<binding>'`, `'provider-billing'`, `'provider-auth'`, etc.). Null during normal runs. Used by `finalizeNode` for manifest status and by continue-run to surface the stop reason. Cleared on continue-run
+- `_stopReason: string | null` -- Why the run was stopped gracefully (`'budget-exhausted:<binding>'`, `'provider-billing'`, `'provider-auth'`, `'manual-kill'`, etc.). Null during normal runs. Used by `finalizeNode` for manifest status and by continue-run to surface the stop reason. Cleared on continue-run. Plan 27-G: `'manual-kill'` is set by the SIGINT/SIGTERM graceful shutdown handler
 
 ---
 
@@ -544,17 +544,18 @@ The implementation is split into focused modules under `src/conductor/pr/` (Sub-
 
 ## Key Subsystems
 
-### Tool Loop Guard (`tool-loop-guard.ts`) — Sub-Plan 08, retuned in Plan 22
+### Tool Loop Guard (`tool-loop-guard.ts`) — Sub-Plan 08, retuned in Plans 22 & 27-C
 
 Prevents agents from infinite tool-call loops with per-tool scoping and split budgets:
 - Tracks total invocations per `toolName::args` key
 - **Read-only tools** (read_file, list_dir, search_code, git tools) cache results; duplicates return `[CACHED]` (free — no budget consumed)
 - **Mutating tools** (write_file, edit_file, etc.) clear all caches (workspace changed)
 - 3rd identical call blocks ONLY that specific `(tool, args)` — other tools keep working
-- **Split budgets** (`TOOL_BUDGETS_JSON`): separate read/write/shell/turn ceilings per rank — principal 60/30/14/28, senior 50/25/12/24, junior 40/20/12/20
+- **Split budgets** (`TOOL_BUDGETS_JSON`): separate read/write/shell/turn ceilings per rank — principal 80/40/20/45, senior 70/35/18/40, junior 60/30/16/35 (Plan 27-C: raised ~2x from Plan 22)
+- **Complexity multipliers** (Plan 27-C): trivial=1.0, simple=1.0, moderate=1.0, complex=1.5, very-complex=2.0. The 0.75x penalty for trivial/simple was removed — TL complexity estimates are unreliable and the penalty was catastrophically low
 - **Turn ceiling** (Plan 22 A2): a model turn costs 1 turn regardless of how many tools it calls in parallel. The turn key comes from `config.metadata.langgraph_step`, with time-window batching as a fallback
-- **Progress bonus**: agents that produce real writes get `LOOP_GUARD_PROGRESS_BONUS` (10) extra read calls
-- **Hard ceiling**: `LOOP_GUARD_HARD_CEILING` (140) absolute stop across all categories
+- **Progress bonus**: agents that produce real writes get `LOOP_GUARD_PROGRESS_BONUS` (15) extra read calls AND half as many bonus turns (Plan 27-C: turns are the real bottleneck)
+- **Hard ceiling**: `LOOP_GUARD_HARD_CEILING` (250) absolute stop across all categories (Plan 27-C: raised from 140 to accommodate higher per-rank budgets)
 - **Budget pressure footer** (Plan 22 A3): successful tool results carry `[BUDGET: …]` above 60 % usage and `[BUDGET CRITICAL: …]` above 85 %, so the agent can plan its landing
 - **Terminal guidance**: on exhaustion, injects "return your JSON now, do not claim files you did not write"
 - **Forced termination** (Plan 22 A4): after `MAX_POST_EXHAUSTION_CALLS` (2) guidance responses, `isTerminationDemanded()` becomes true and the agent factory sets `tools: []` + `toolChoice: 'none'` on the next model call. Throwing from a tool does **not** work — LangGraph's ToolNode converts tool errors into ToolMessages and the loop continues
@@ -910,17 +911,19 @@ standard `GateOutcome`. The workspace index is built once via `buildWorkspaceInd
 All `gate:result` event emissions now include a `gate: string` discriminator field so consumers can
 identify which gate produced the event.
 
-### Plan Coverage (`plan-coverage.ts`) -- Sub-Plan 04
+### Plan Coverage (`plan-coverage.ts`) -- Sub-Plan 04, enhanced Plans 27-D/E
 
 Validates that no stories or tasks are silently dropped between planning phases:
 - `validateStoryPlan(state)` -- epics -> stories -> tasks (after PM)
-- `validateAssignmentPlan(state)` -- stories/tasks -> assignments (after TL)
-- `buildCoverageGapPrompt(violations, nextId)` -- targeted gap prompt for the TL
+- `validateAssignmentPlan(state)` -- stories/tasks -> assignments (after TL); also detects off-stack agent assignments (Plan 27-E)
+- `buildCoverageGapPrompt(ctx)` -- targeted gap prompt for the TL, accepts `GapRepairContext` with project slug, tech stack, repo contract, existing assignments, and existing branches (Plan 27-D). Legacy `(violations, nextId)` signature still supported.
+- Violation kinds: `story-without-task`, `task-without-assignment`, `story-without-assignment`, `ac-without-assignment`, `dangling-story-ref`, `dangling-task-ref`, `dangling-dependency`, `epic-without-story`, `duplicate-id`, `oversized-assignment`, `agent-overloaded`, `off-stack-agent` (Plan 27-E)
 - Controlled by `PLAN_COVERAGE_MODE` (off/warn/enforce), `PLAN_COVERAGE_REPAIR_ATTEMPTS`
 - The Team Leader now receives full acceptance criteria (`storiesWithCriteria`), has a larger
   context budget (`TEAM_LEADER_CONTEXT_MAX_CHARS`), and must fill `taskIds`/`additionalStoryIds`
   on every assignment. After the TL produces assignments, the conductor validates coverage and
-  re-invokes the TL with a gap prompt if stories/tasks are missing.
+  re-invokes the TL with an enriched gap prompt if stories/tasks are missing.
+- **Off-stack guard** (Plan 27-E): `validateAssignmentPlan` checks that junior agents' domain matches the project's tech stack. Backend-only juniors on frontend-only projects (and vice versa) are flagged as `off-stack-agent` violations. Seniors and principals are not flagged (they are cross-domain capable).
 
 ### Architecture Contract (`repo-contract.schema.ts`, `repo-contract-writer.ts`) — Sub-Plan 05
 
@@ -1028,7 +1031,8 @@ Provider billing/auth fails  ─┘    writePeriodicSnapshot()    ├─→ grap
 | **Provider billing/quota** (recoverable) | `dispatcher.ts` | `awaitProviderRecovery(createProviderProbe())` probes `/models` endpoint; on failure sets `providerFailureKind`; `developmentNode` returns `{ cancelled: true, _stopReason: 'provider-billing' }` |
 | **Provider auth/model-not-found** (fatal) | `dispatcher.ts` | Immediate stop — `providerFailureKind` set, `run:provider-stop` emitted |
 | **HITL deny** | Graph HITL interrupt | `cancelled = true` (no `_stopReason`) |
-| **Crash/SIGINT** | `run.ts` catch block | Best-effort crash snapshot with status `'crashed'` |
+| **Ctrl+C / SIGINT / SIGTERM** (Plan 27-G) | `gracefulShutdown()` in `crash-handlers.ts` | Runs `onGracefulShutdown()` hooks, saves `state.json` with `_stopReason: 'manual-kill'`, writes `invariant` ledger entry, flushes token report, exits 130/143 |
+| **Crash / uncaught exception** | `gracefulShutdown()` in `crash-handlers.ts` | Best-effort state snapshot + token report, exits with code 1 |
 
 ### Architecture
 
@@ -1246,9 +1250,15 @@ export async function someNode(state: ProjectStateType): Promise<Partial<Project
     if (budgetStop) return budgetStop;
     // 4. Rerun check (HITL enhance feedback)
     const rerunUpdate = checkRerun(state, 'some-phase', logger);
+    // 5. Update last known state for graceful shutdown (Plan 27-G)
+    setLastKnownState(state);
+    // 6. Ledger: phase start (Plan 27-F)
+    appendLedger({ kind: 'phase', phase, event: 'start' });
     // ... get API key, create agent, build context ...
     const { output, tokenUsage } = await invokeAgent(agent, userMsg, ...);
     // ... write artifact, commit/push ...
+    // 7. Ledger: phase end (Plan 27-F)
+    appendLedger({ kind: 'phase', phase, event: 'end', durationMs });
     emitRunEvent('phase:end', { phase: 'some-phase', nextPhase: '...' });
     return {
         ...rerunUpdate,
@@ -1261,7 +1271,7 @@ export async function someNode(state: ProjectStateType): Promise<Partial<Project
 }
 ```
 
-> **Invariant:** Every node except `intakeNode` and `finalizeNode` must call `shouldSkipOnContinue()`, `writePeriodicSnapshot()`, and `checkBudgetStop()` at the top. `acceptanceNode` skips the budget check (lightweight, must always run).
+> **Invariant:** Every node except `intakeNode` and `finalizeNode` must call `shouldSkipOnContinue()`, `writePeriodicSnapshot()`, and `checkBudgetStop()` at the top. `acceptanceNode` skips the budget check (lightweight, must always run). Plan 27-F adds automatic ledger entries for phase start/end. Plan 27-G adds `setLastKnownState()` for graceful shutdown recovery.
 
 ### Error Handling
 
@@ -1269,7 +1279,7 @@ export async function someNode(state: ProjectStateType): Promise<Partial<Project
 - Node functions catch agent failures and log errors but generally don't crash the pipeline
 - `invokeAgent()` includes schema validation with repair loop
 - `run.ts` catches crashes and writes best-effort state snapshots (`writeStateSnapshot` + `writeRunManifest` with `'crashed'` status)
-- Signal handlers flush token reports on unexpected exits
+- **Graceful shutdown (Plan 27-G)**: SIGINT/SIGTERM run registered `onGracefulShutdown()` hooks, save state from `RunContext.lastKnownState` with `_stopReason: 'manual-kill'`, write `invariant` ledger entry, flush token report. Use `Ctrl+C` or `kill -INT` for graceful shutdown; `kill -9` bypasses all handlers.
 - **Budget exhaustion**: `checkBudgetStop()` at the start of each node catches the `'stop'` level and routes to finalize gracefully (no exception, no crash)
 - **Provider failures**: Dispatcher sets `providerFailureKind` on the result; `developmentNode` translates this to `{ cancelled: true, _stopReason }`. Planning-phase provider failures propagate as exceptions and are caught by the `run.ts` crash path
 - **Periodic snapshots** (`writePeriodicSnapshot` at each `phase:start`) ensure the latest complete state is always on disk for continue-run recovery
@@ -1370,7 +1380,8 @@ Additional failure modes found in `pacmanclaude2` run (2026-08-17, fixed post-Pl
     for `stop_reason`, but Anthropic's LangChain adapter puts it in `additional_kwargs`. PM hit
     `max_tokens` at 32005 tokens without the system knowing. Fixed: also check `additional_kwargs.stop_reason`.
 14. **Planning token ceiling too low.** `PLANNING_MAX_OUTPUT_TOKENS=32000` was insufficient for
-    complex PM outputs (35 stories + 66 tasks for Pac-Man). Raised to 64000.
+    complex PM outputs (35 stories + 66 tasks for Pac-Man). Raised to 64000, then to 128000 (Plan 27-D)
+    after TL truncated at 64005 tokens on a 46-assignment plan.
 15. **No truncation recovery.** When `jsonrepair` salvaged truncated JSON, the last array element
     had missing required fields (e.g. `layer: undefined`). The repair loop couldn't regenerate
     32K+ tokens. Fixed: `trimTruncatedArrayTails()` trims incomplete trailing elements and accepts

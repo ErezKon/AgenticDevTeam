@@ -8,7 +8,7 @@
  * implicit scaffold dependencies are injected, and overlapping module
  * owners are serialised instead of batched.
  */
-import { MAX_CONCURRENT_DEVS, INTER_BATCH_DELAY_MS, MAX_BRANCH_WALL_MS } from '../../config';
+import { MAX_CONCURRENT_DEVS, INTER_BATCH_DELAY_MS, MAX_BRANCH_WALL_MS, SEQUENTIAL_DISPATCH, DISPATCH_HALT_POLICY } from '../../config';
 import { slugify, featureBranch } from '../../utils/branch-naming';
 import { getLogger } from '../../utils/logger';
 import { executePRWorkflow } from '../../conductor/pr-workflow';
@@ -20,6 +20,7 @@ import { gitExec, assertValidRef } from '../../utils/git-exec';
 import { classifyProviderFailure, isProviderLevelFailure } from '../../conductor/provider-failure';
 import { awaitProviderRecovery, createProviderProbe } from '../../utils/llm-throttle';
 import { emitRunEvent } from '../../utils/event-bus';
+import { writePeriodicSnapshot } from '../../utils/run-snapshot';
 import type { Assignment, FileChange, ArtifactRef, TranscriptMessage, PhaseName, PullRequest, GitContext, TechDecision, UserStory, Task } from '../_shared/base-schemas';
 import type { TokenCallRecord } from '../../utils/token-tracker';
 
@@ -486,9 +487,12 @@ export async function dispatchDevelopers(
             + `(${serialisedFeatures.reduce((n, c) => n + c.length, 0)} branches)`,
         );
 
+        // Plan 27-B: force sequential dispatch when configured
+        const effectiveConcurrency = SEQUENTIAL_DISPATCH ? 1 : MAX_CONCURRENT_DEVS;
+
         // Helper to run a batch of branches
         const runBranches = async (branches: string[]) => {
-            for (let j = 0; j < branches.length; j += MAX_CONCURRENT_DEVS) {
+            for (let j = 0; j < branches.length; j += effectiveConcurrency) {
                 // Stop dispatching if a previous branch's PR creation failed
                 if (prCreationFailed) {
                     const skipped = branches.slice(j);
@@ -524,7 +528,7 @@ export async function dispatchDevelopers(
                     });
                     break;
                 }
-                let batch = branches.slice(j, j + MAX_CONCURRENT_DEVS);
+                let batch = branches.slice(j, j + effectiveConcurrency);
 
                 // Plan 24 D3: wall-clock-aware admission control
                 const budgetStatus = getBudgetStatus();
@@ -612,6 +616,31 @@ export async function dispatchDevelopers(
                         if (prResult.pullRequest.status === 'pr-creation-failed') {
                             prCreationFailed = true;
                         }
+
+                        // Plan 27-B: halt-on-failure — check if a non-merged branch should stop dispatch
+                        if (DISPATCH_HALT_POLICY !== 'off' && !prCreationFailed) {
+                            const pr = prResult.pullRequest;
+                            const isMerged = pr.status === 'merged';
+
+                            if (!isMerged) {
+                                const branchName = pr.branchName ?? '';
+                                const branchAssigns = branchGroups.get(branchName) ?? [];
+                                const isScaffold = isScaffoldBranch(branchName, branchAssigns);
+                                const shouldHalt = DISPATCH_HALT_POLICY === 'strict'
+                                    || (DISPATCH_HALT_POLICY === 'scaffold-only' && isScaffold);
+
+                                if (shouldHalt) {
+                                    log.error(`Branch "${branchName}" failed (status: ${pr.status}) — halting dispatch per DISPATCH_HALT_POLICY=${DISPATCH_HALT_POLICY}`);
+                                    emitRunEvent('dispatch:halted', {
+                                        branchName,
+                                        status: pr.status,
+                                        policy: DISPATCH_HALT_POLICY,
+                                    });
+                                    prCreationFailed = true; // reuse existing stop flag
+                                    break;
+                                }
+                            }
+                        }
                     } else {
                         // Plan 24, A3: classify the failure — provider-level errors
                         // (billing, auth, quota) should not consume the branch's attempt.
@@ -653,7 +682,17 @@ export async function dispatchDevelopers(
                     }
                 }
 
-                if (j + MAX_CONCURRENT_DEVS < branches.length && INTER_BATCH_DELAY_MS > 0) {
+                // Plan 27-F: periodic state snapshot after each batch of branch results
+                if (outputPath) {
+                    writePeriodicSnapshot(outputPath, {
+                        phase: 'development',
+                        pullRequests,
+                        fileChanges,
+                        completedAssignmentIds: newlyCompletedIds,
+                    }, 'development');
+                }
+
+                if (j + effectiveConcurrency < branches.length && INTER_BATCH_DELAY_MS > 0) {
                     log.info(`Waiting ${INTER_BATCH_DELAY_MS}ms before next batch...`);
                     await new Promise(r => setTimeout(r, INTER_BATCH_DELAY_MS));
                 }

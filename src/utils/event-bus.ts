@@ -33,6 +33,8 @@ export type RunEventType =
     | 'branch:partial-failure'
     // Plan 26, A4: critical quality gates (typecheck/build) blocked PR creation.
     | 'branch:gates-blocked'
+    // Plan 27-B: dispatch halted by DISPATCH_HALT_POLICY when a branch fails.
+    | 'dispatch:halted'
     | 'gate:result'
     | 'acceptance:result'
     | 'plan:coverage'

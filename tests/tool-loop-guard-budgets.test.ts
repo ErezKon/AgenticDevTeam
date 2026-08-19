@@ -1,69 +1,70 @@
 /**
- * Tests for tool-loop-guard.ts budget resolution (Plan 26, B4).
+ * Tests for tool-loop-guard.ts budget resolution (Plan 26, B4; Plan 27-C).
  *
  * Validates that complexity scaling is applied correctly to resolveToolBudgets.
+ * Plan 27-C: updated for raised base budgets and removed trivial/simple penalty.
  */
 import { resolveToolBudgets, COMPLEXITY_MULTIPLIERS } from '../src/agents/_shared/tool-loop-guard';
 
 describe('resolveToolBudgets', () => {
     it('returns default principal budgets when no override or complexity', () => {
         const budgets = resolveToolBudgets('principal');
-        expect(budgets).toEqual({ reads: 60, writes: 30, shell: 14, turns: 28 });
+        expect(budgets).toEqual({ reads: 80, writes: 40, shell: 20, turns: 45 });
     });
 
     it('returns default senior budgets', () => {
         const budgets = resolveToolBudgets('senior');
-        expect(budgets).toEqual({ reads: 50, writes: 25, shell: 12, turns: 24 });
+        expect(budgets).toEqual({ reads: 70, writes: 35, shell: 18, turns: 40 });
     });
 
     it('returns default junior budgets', () => {
         const budgets = resolveToolBudgets('junior');
-        expect(budgets).toEqual({ reads: 40, writes: 20, shell: 12, turns: 20 });
+        expect(budgets).toEqual({ reads: 60, writes: 30, shell: 16, turns: 35 });
     });
 
     it('falls back to default rank when rank is unknown', () => {
         const budgets = resolveToolBudgets('intern');
-        expect(budgets).toEqual({ reads: 50, writes: 25, shell: 12, turns: 24 });
+        expect(budgets).toEqual({ reads: 70, writes: 35, shell: 18, turns: 40 });
     });
 
-    describe('complexity scaling (Plan 26, B4)', () => {
+    describe('complexity scaling (Plan 26, B4; Plan 27-C)', () => {
         it('applies 1.5x multiplier for complex assignments', () => {
             const budgets = resolveToolBudgets('principal', undefined, 'complex');
-            // turns: 28 * 1.5 = 42, writes: 30 * 1.5 = 45
-            expect(budgets.turns).toBe(42);
-            expect(budgets.writes).toBe(45);
+            // turns: 45 * 1.5 = 67.5 → 68, writes: 40 * 1.5 = 60
+            expect(budgets.turns).toBe(68);
+            expect(budgets.writes).toBe(60);
             // reads and shell stay at base
-            expect(budgets.reads).toBe(60);
-            expect(budgets.shell).toBe(14);
+            expect(budgets.reads).toBe(80);
+            expect(budgets.shell).toBe(20);
         });
 
         it('applies 2.0x multiplier for very-complex assignments', () => {
             const budgets = resolveToolBudgets('principal', undefined, 'very-complex');
-            // turns: 28 * 2.0 = 56, writes: 30 * 2.0 = 60
-            expect(budgets.turns).toBe(56);
-            expect(budgets.writes).toBe(60);
-            expect(budgets.reads).toBe(60);
-            expect(budgets.shell).toBe(14);
+            // turns: 45 * 2.0 = 90, writes: 40 * 2.0 = 80
+            expect(budgets.turns).toBe(90);
+            expect(budgets.writes).toBe(80);
+            expect(budgets.reads).toBe(80);
+            expect(budgets.shell).toBe(20);
         });
 
-        it('applies 0.75x multiplier for trivial assignments', () => {
+        it('applies 1.0x (no penalty) for trivial assignments (Plan 27-C)', () => {
             const budgets = resolveToolBudgets('principal', undefined, 'trivial');
-            // turns: 28 * 0.75 = 21, writes: 30 * 0.75 = 22.5 → 23 (rounded)
-            expect(budgets.turns).toBe(21);
-            expect(budgets.writes).toBe(23);
+            // Plan 27-C: trivial no longer penalised — stays at base
+            expect(budgets.turns).toBe(45);
+            expect(budgets.writes).toBe(40);
         });
 
-        it('applies 0.75x multiplier for simple assignments', () => {
+        it('applies 1.0x (no penalty) for simple assignments (Plan 27-C)', () => {
             const budgets = resolveToolBudgets('senior', undefined, 'simple');
-            // turns: 24 * 0.75 = 18, writes: 25 * 0.75 = 18.75 → 19 (rounded)
-            expect(budgets.turns).toBe(18);
-            expect(budgets.writes).toBe(19);
+            // Plan 27-C: simple no longer penalised — stays at base
+            expect(budgets.turns).toBe(40);
+            expect(budgets.writes).toBe(35);
         });
 
         it('applies 1.0x (no change) for moderate assignments', () => {
             const budgets = resolveToolBudgets('principal', undefined, 'moderate');
-            expect(budgets.turns).toBe(28);
-            expect(budgets.writes).toBe(30);
+            expect(budgets.turns).toBe(45);
+            expect(budgets.writes).toBe(40);
         });
 
         it('defaults to 1.0x when complexity is not provided', () => {
@@ -74,35 +75,35 @@ describe('resolveToolBudgets', () => {
 
         it('defaults to 1.0x for unknown complexity values', () => {
             const budgets = resolveToolBudgets('principal', undefined, 'unknown-complexity');
-            expect(budgets.turns).toBe(28);
-            expect(budgets.writes).toBe(30);
+            expect(budgets.turns).toBe(45);
+            expect(budgets.writes).toBe(40);
         });
     });
 
     describe('JSON override + complexity', () => {
         it('applies JSON override first, then complexity scaling', () => {
-            const json = JSON.stringify({ principal: { turns: 40, writes: 40 } });
+            const json = JSON.stringify({ principal: { turns: 50, writes: 50 } });
             const budgets = resolveToolBudgets('principal', json, 'complex');
-            // Overridden: turns=40, writes=40, then scaled by 1.5x
-            expect(budgets.turns).toBe(60);  // 40 * 1.5
-            expect(budgets.writes).toBe(60); // 40 * 1.5
+            // Overridden: turns=50, writes=50, then scaled by 1.5x
+            expect(budgets.turns).toBe(75);  // 50 * 1.5
+            expect(budgets.writes).toBe(75); // 50 * 1.5
             // reads and shell still from base (JSON didn't override them)
-            expect(budgets.reads).toBe(60);
-            expect(budgets.shell).toBe(14);
+            expect(budgets.reads).toBe(80);
+            expect(budgets.shell).toBe(20);
         });
 
         it('handles invalid JSON gracefully and still applies complexity', () => {
             const budgets = resolveToolBudgets('principal', 'not-json', 'complex');
-            expect(budgets.turns).toBe(42); // 28 * 1.5
-            expect(budgets.writes).toBe(45); // 30 * 1.5
+            expect(budgets.turns).toBe(68); // 45 * 1.5 = 67.5 → 68
+            expect(budgets.writes).toBe(60); // 40 * 1.5
         });
     });
 });
 
 describe('COMPLEXITY_MULTIPLIERS', () => {
-    it('exports the expected multipliers', () => {
-        expect(COMPLEXITY_MULTIPLIERS['trivial']).toBe(0.75);
-        expect(COMPLEXITY_MULTIPLIERS['simple']).toBe(0.75);
+    it('exports the expected multipliers (Plan 27-C: trivial/simple penalty removed)', () => {
+        expect(COMPLEXITY_MULTIPLIERS['trivial']).toBe(1.0);
+        expect(COMPLEXITY_MULTIPLIERS['simple']).toBe(1.0);
         expect(COMPLEXITY_MULTIPLIERS['moderate']).toBe(1.0);
         expect(COMPLEXITY_MULTIPLIERS['complex']).toBe(1.5);
         expect(COMPLEXITY_MULTIPLIERS['very-complex']).toBe(2.0);

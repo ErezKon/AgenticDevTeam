@@ -109,6 +109,9 @@ export class RunContext {
     /** Per-run prompt-cache breakpoint-logged set (fixes unbounded growth). */
     readonly breakpointLoggedAgents = new Set<string>();
 
+    /** Last known project state — updated at each phase entry for graceful shutdown (Plan 27-G). */
+    lastKnownState: Record<string, any> | null = null;
+
     constructor(id: string) {
         this.id = id;
     }
@@ -134,4 +137,13 @@ export function getRunContext(): RunContext | undefined {
  */
 export function runWithContext<T>(ctx: RunContext, fn: () => Promise<T>): Promise<T> {
     return _store.run(ctx, fn);
+}
+
+/**
+ * Update the last known state on the active RunContext (Plan 27-G).
+ * Called by phaseNode at each phase entry so graceful shutdown can save it.
+ */
+export function setLastKnownState(state: Record<string, any>): void {
+    const ctx = getRunContext();
+    if (ctx) ctx.lastKnownState = state;
 }

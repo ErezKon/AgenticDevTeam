@@ -32,7 +32,9 @@ import {
 } from '../context-builder';
 import type { ContextSection } from '../context-builder';
 import { emitRunEvent } from '../../utils/event-bus';
+import { appendLedger } from '../../utils/run-ledger';
 import { validateAssignmentPlan, buildCoverageGapPrompt, logPlanFunnel } from '../plan-coverage';
+import type { GapRepairContext } from '../plan-coverage';
 import { consolidateBranches } from '../branch-consolidation';
 import { projectSlugFromBranch } from '../../utils/branch-naming';
 import { phaseNode, msg, buildFeedbackSection } from './_guards';
@@ -366,10 +368,15 @@ export const teamLeaderNode = phaseNode('team-leader', tlLog, {}, async (state, 
     tlLog.info(`Assignments: ${assignments.length}`);
     if (output.coverageNote) tlLog.info(`Coverage self-check: ${output.coverageNote}`);
 
-    // ── Plan coverage validation (P9)
+    // ── Plan coverage validation (P9, enriched in Plan 27-D)
     if (PLAN_COVERAGE_MODE !== 'off') {
         const tempState = { ...state, assignments: [...state.assignments, ...assignments] };
         let violations = validateAssignmentPlan(tempState);
+
+        // Prepare context summaries once for all gap-repair attempts (Plan 27-D)
+        const gapRepairProjectSlug = projectSlug;
+        const gapRepairTechStack = summariseTechStack(state.techStack);
+        const gapRepairRepoContract = summariseRepoContract(state.repoContract);
 
         for (let attempt = 0; attempt < PLAN_COVERAGE_REPAIR_ATTEMPTS && violations.length > 0; attempt++) {
             const criticalCount = violations.filter(v => v.severity === 'critical').length;
@@ -378,7 +385,23 @@ export const teamLeaderNode = phaseNode('team-leader', tlLog, {}, async (state, 
             const nextId = assignments.length > 0
                 ? Math.max(...assignments.map((a: { id: string }) => parseInt(a.id.replace(/\D/g, '') || '0', 10))) + 1
                 : 1;
-            const gapPrompt = buildCoverageGapPrompt(violations, nextId);
+
+            // Build enriched gap-repair context (Plan 27-D)
+            const existingAssignmentSummary = assignments.map((a: any) =>
+                `${a.id}: [${a.devAgentId}] branch=${a.branchName ?? 'unset'}, tasks=${(a.taskIds ?? []).join(',')}, story=${a.storyId}`
+            ).join('\n');
+            const existingBranches = [...new Set(assignments.map((a: any) => a.branchName).filter(Boolean))] as string[];
+
+            const gapCtx: GapRepairContext = {
+                violations,
+                nextAssignmentId: nextId,
+                projectSlug: gapRepairProjectSlug,
+                techStack: gapRepairTechStack,
+                repoContract: gapRepairRepoContract,
+                existingAssignments: existingAssignmentSummary,
+                existingBranches,
+            };
+            const gapPrompt = buildCoverageGapPrompt(gapCtx);
             tlLog.info(`Plan coverage repair attempt ${attempt + 1}/${PLAN_COVERAGE_REPAIR_ATTEMPTS}: ${violations.length} violation(s), ${criticalCount} critical`);
 
             try {
@@ -397,6 +420,18 @@ export const teamLeaderNode = phaseNode('team-leader', tlLog, {}, async (state, 
 
         const funnelState = { ...state, assignments: [...state.assignments, ...assignments] };
         logPlanFunnel(funnelState);
+
+        // Plan 27-F: plan-funnel ledger entry for post-mortem diagnostics
+        appendLedger({
+            kind: 'plan-funnel',
+            epics: (state.epics ?? []).length,
+            stories: (state.userStories ?? []).length,
+            criteria: (state.userStories ?? []).reduce((s: number, st: any) => s + (st.acceptanceCriteria?.length ?? 0), 0),
+            tasks: (state.tasks ?? []).length,
+            assignments: assignments.length,
+            unassignedStories: violations.filter(v => v.kind === 'story-without-assignment').map(v => v.id),
+            unassignedTasks: violations.filter(v => v.kind === 'task-without-assignment').map(v => v.id),
+        });
 
         if (violations.length > 0) {
             const criticalCount = violations.filter(v => v.severity === 'critical').length;

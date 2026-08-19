@@ -105,10 +105,11 @@ describe('buildStrongFixerAgent', () => {
         buildStrongFixerAgent('test-key', '/tmp/workspace');
 
         const cfg = mockBuildAgent.mock.calls[0][1];
-        // principal defaults are { reads: 60, writes: 30, shell: 14 }
-        expect(cfg.toolBudgets.reads).toBe(80);
-        expect(cfg.toolBudgets.writes).toBe(40);
-        expect(cfg.toolBudgets.shell).toBe(20);
+        // principal defaults are { reads: 80, writes: 40, shell: 20 } (Plan 27-C)
+        // strong fixer adds +20/+10/+6 headroom
+        expect(cfg.toolBudgets.reads).toBe(100);
+        expect(cfg.toolBudgets.writes).toBe(50);
+        expect(cfg.toolBudgets.shell).toBe(26);
     });
 
     it('uses temperature 0.2', () => {
@@ -283,8 +284,9 @@ describe('buildDevAgent', () => {
     });
 
     it('has lower tool budgets than the strong fixer', () => {
+        // Plan 27-C: principal turns raised to 45, so fixer needs > 45 to stay above
         const { buildDevAgent, buildStrongFixerAgent } = loadBuilder({
-            STRONG_FIXER_MAX_TOOL_CALLS: 40,
+            STRONG_FIXER_MAX_TOOL_CALLS: 60,
         });
         const entry = {
             id: 'principal-backend', rank: 'principal' as const,

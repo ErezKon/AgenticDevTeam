@@ -448,21 +448,25 @@ When a run stops — due to a crash, error, budget exhaustion, provider failure,
 
 ### Graceful Shutdown
 
-Budget exhaustion and provider failures are handled gracefully rather than crashing the process. Every pipeline node writes a **periodic state snapshot** at entry, ensuring a recent recovery point is always available.
+Budget exhaustion, provider failures, and manual kills (Ctrl+C) are handled gracefully rather than crashing the process. Every pipeline node writes a **periodic state snapshot** at entry and updates the `RunContext.lastKnownState` for SIGINT recovery, ensuring a recent recovery point is always available.
 
 ```mermaid
 flowchart TD
     BUDGET[Budget limit<br/>reached] -->|shouldStopRun| CHECK[checkBudgetStop<br/>in next node]
     PROVIDER[Provider billing<br/>or auth error] -->|awaitProviderRecovery<br/>fails| DISPATCH[Dispatcher sets<br/>providerFailureKind]
+    SIGINT[SIGINT / SIGTERM<br/>Ctrl+C] -->|gracefulShutdown| HOOKS[Run shutdown hooks<br/>save state + ledger]
     CHECK --> CANCEL[cancelled = true<br/>_stopReason set]
     DISPATCH --> DEVNODE[developmentNode<br/>reads providerFailureKind]
     DEVNODE --> CANCEL
+    HOOKS --> EXIT[process.exit<br/>130 / 143]
     CANCEL --> FIN[finalizeNode<br/>manifest: budget-exhausted]
     FIN --> STATE[state.json saved<br/>with _stopReason]
     STATE --> CONTINUE[Continue Run<br/>resumes from<br/>stopped phase]
+    EXIT --> CONTINUE
 
     style BUDGET fill:#f59e0b,color:#fff
     style PROVIDER fill:#ef4444,color:#fff
+    style SIGINT fill:#ef4444,color:#fff
     style CANCEL fill:#ef4444,color:#fff
     style CONTINUE fill:#22c55e,color:#fff
 ```
@@ -473,7 +477,10 @@ flowchart TD
 | Provider billing / quota error | Dispatcher recovery probe (`/models` endpoint) | `awaitProviderRecovery()` retries with backoff; on failure, `developmentNode` sets `cancelled` + `_stopReason` |
 | Provider auth / model-not-found | Dispatcher error classification | Immediate stop, `run:provider-stop` emitted |
 | HITL deny | Graph HITL interrupt | `cancelled = true` (standard cancel, no `_stopReason`) |
-| Crash / SIGINT | `run.ts` catch block | Best-effort crash snapshot with status `'crashed'` |
+| Ctrl+C / `kill -INT` | `gracefulShutdown()` in `crash-handlers.ts` | Runs registered shutdown hooks, saves `state.json` with `_stopReason: 'manual-kill'`, flushes ledger + token report, exits with code 130 |
+| `kill -TERM` | `gracefulShutdown()` in `crash-handlers.ts` | Same as SIGINT but exits with code 143 |
+| `kill -9` | Not interceptable | **No graceful shutdown** -- use `Ctrl+C` or `kill -INT` instead |
+| Crash / uncaught exception | `gracefulShutdown()` in `crash-handlers.ts` | Best-effort state snapshot + token report, exits with code 1 |
 
 ### How It Works
 

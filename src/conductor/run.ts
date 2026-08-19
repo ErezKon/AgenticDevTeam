@@ -10,7 +10,8 @@ import { writeStateSnapshot, writeRunManifest } from '../utils/run-snapshot';
 import { appendLedger } from '../utils/run-ledger';
 import { collectRunState, reconstructState, reconcileGitState } from './continue';
 import { rehydrateSingletons } from './continue/singleton-rehydration';
-import { RunContext, runWithContext } from '../utils/run-context';
+import { RunContext, runWithContext, getRunContext } from '../utils/run-context';
+import { onGracefulShutdown } from '../utils/crash-handlers';
 import type { RepoTarget, PhaseName } from '../agents/_shared/base-schemas';
 import type { ProjectStateType } from './state';
 
@@ -208,6 +209,20 @@ export async function runAutonomous(opts: RunOptions): Promise<ProjectStateType>
     return runWithContext(ctx, async () => {
         log.info(`Starting autonomous run for "${opts.systemName}"...`);
 
+        // Plan 27-G: register graceful shutdown hook for this run
+        onGracefulShutdown(() => {
+            const runCtx = getRunContext();
+            if (runCtx?.lastKnownState?.outputPath) {
+                try {
+                    writeStateSnapshot(runCtx.lastKnownState.outputPath, {
+                        ...runCtx.lastKnownState,
+                        cancelled: true,
+                        _stopReason: 'manual-kill',
+                    });
+                } catch { /* best-effort */ }
+            }
+        });
+
         const conductor = createConductor({ mode: 'autonomous' });
         const config = { configurable: { thread_id: threadId } };
 
@@ -244,6 +259,20 @@ export async function runHumanInTheLoop(opts: RunOptions): Promise<RunSession> {
 
     return runWithContext(ctx, async () => {
         log.info(`Starting HITL run for "${opts.systemName}"...`);
+
+        // Plan 27-G: register graceful shutdown hook for this run
+        onGracefulShutdown(() => {
+            const runCtx = getRunContext();
+            if (runCtx?.lastKnownState?.outputPath) {
+                try {
+                    writeStateSnapshot(runCtx.lastKnownState.outputPath, {
+                        ...runCtx.lastKnownState,
+                        cancelled: true,
+                        _stopReason: 'manual-kill',
+                    });
+                } catch { /* best-effort */ }
+            }
+        });
 
         const conductor = createConductor({ mode: 'human' });
         const config = { configurable: { thread_id: threadId } };
@@ -350,6 +379,20 @@ export async function continueRun(
                 );
             }
         }
+
+        // Plan 27-G: register graceful shutdown hook for the continued run
+        onGracefulShutdown(() => {
+            const runCtx = getRunContext();
+            if (runCtx?.lastKnownState?.outputPath) {
+                try {
+                    writeStateSnapshot(runCtx.lastKnownState.outputPath, {
+                        ...runCtx.lastKnownState,
+                        cancelled: true,
+                        _stopReason: 'manual-kill',
+                    });
+                } catch { /* best-effort */ }
+            }
+        });
 
         // ── 4. Build the graph and invoke ────────────────────────────────────
         const resolvedMode = opts.mode ?? 'autonomous';

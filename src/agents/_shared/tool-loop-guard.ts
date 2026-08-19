@@ -155,6 +155,10 @@ export interface ToolBudgets {
 
 /**
  * Plan 22 A1: retuned for models that batch tool calls.
+ * Plan 27-C: raised aggressively — turns were the binding constraint in 100%
+ * of 40+ budget exhaustion events. Claude batches 9-11 tool calls per turn,
+ * so 35 turns ≈ 350 tool calls. The old 20 turns = ~200 tool calls was barely
+ * enough for read→plan→write→test on a 5-file assignment.
  *
  * Reads are the cheap, batched category and were the binding constraint in the
  * pacmanclaude run (28 reads / 1 write in a 26-call flat ceiling).  Writes are
@@ -162,22 +166,25 @@ export interface ToolBudgets {
  * reconnaissance can no longer drain.  `turns` is the real cost driver.
  */
 const DEFAULT_BUDGETS: Record<string, Required<ToolBudgets>> = {
-    principal: { reads: 60, writes: 30, shell: 14, turns: 28 },
-    senior:    { reads: 50, writes: 25, shell: 12, turns: 24 },
-    junior:    { reads: 40, writes: 20, shell: 12, turns: 20 },
-    default:   { reads: 50, writes: 25, shell: 12, turns: 24 },
+    principal: { reads: 80, writes: 40, shell: 20, turns: 45 },
+    senior:    { reads: 70, writes: 35, shell: 18, turns: 40 },
+    junior:    { reads: 60, writes: 30, shell: 16, turns: 35 },
+    default:   { reads: 70, writes: 35, shell: 18, turns: 40 },
 };
 
 /**
  * Plan 26, B4: complexity multipliers for budget scaling.
+ * Plan 27-C: removed the 0.75x penalty for trivial/simple — the TL's complexity
+ * estimates are unreliable, and a "simple" assignment still needs turns for reading
+ * context, writing code, running tests, and fixing issues. The 0.75x multiplier
+ * cut junior turns from 20→15 in Plan 26, which was catastrophically low.
  *
- * Trivial/simple assignments get a smaller budget (they should need fewer turns),
- * complex/very-complex get proportionally more so the agent can finish without
+ * Complex/very-complex get proportionally more so the agent can finish without
  * exhausting its budget and requiring a costly respawn.
  */
 export const COMPLEXITY_MULTIPLIERS: Record<string, number> = {
-    'trivial': 0.75,
-    'simple': 0.75,
+    'trivial': 1.0,
+    'simple': 1.0,
     'moderate': 1.0,
     'complex': 1.5,
     'very-complex': 2.0,
@@ -331,7 +338,8 @@ export function withLoopGuard(
     let maxReads = budgets?.reads ?? Infinity;
     let maxWrites = budgets?.writes ?? Infinity;
     let maxShell = budgets?.shell ?? Infinity;
-    const maxTurns = options.maxTurns ?? budgets?.turns ?? Infinity;
+    // Plan 27-C: mutable — progress bonus can extend turns (the real bottleneck)
+    let maxTurns = options.maxTurns ?? budgets?.turns ?? Infinity;
 
     // ── Loop detection state ─────────────────────────────────────────────
     const callCounts = new Map<string, number>();
@@ -592,14 +600,18 @@ export function withLoopGuard(
 
             // ── Budget check (per-category) ──────────────────────────────
             if (budgets) {
-                // Progress bonus: if agent has written files recently, extend read budget
+                // Progress bonus: if agent has written files recently, extend read AND turn budget
+                // Plan 27-C: also extend turns by half the bonus (turns are the real bottleneck)
                 if (recentWriteCount > 0 && bonusGranted < progressBonus) {
                     const bonus = Math.min(progressBonus - bonusGranted, progressBonus);
                     maxReads += bonus;
+                    const turnBonus = Math.ceil(bonus / 2);
+                    maxTurns += turnBonus;
                     bonusGranted += bonus;
                     recentWriteCount = 0;
                     guardLog.info(
-                        `${agentId}: progress detected (writes) — granting ${bonus} bonus read calls (total reads budget: ${maxReads})`,
+                        `${agentId}: progress detected (writes) — granting ${bonus} bonus read calls `
+                        + `and ${turnBonus} bonus turns (reads: ${maxReads}, turns: ${maxTurns})`,
                     );
                 }
 
