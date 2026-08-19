@@ -925,10 +925,16 @@ Starts the orchestrator and Playwright MCP server in containers.
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `GET` | `/api/agents` | List all 20 agents with metadata |
+| `GET` | `/api/events` | Recent run events (ring-buffer backfill; `?limit=N`, default 100) |
+| `GET` | `/api/runs` | List all active HITL sessions |
 | `POST` | `/api/run` | Start a new run (body: see below) |
-| `GET` | `/api/run/:id` | Get current state of a run |
+| `GET` | `/api/run/:id` | Get current state of a run (redacted) |
+| `POST` | `/api/run/:id/approve` | Approve/deny/enhance a HITL phase (body: `{ decision, feedback? }`) |
+| `GET` | `/api/run/:id/artifact/:agentId` | Get a single artifact with content |
+| `GET` | `/api/run/:id/artifacts` | List all artifacts with content |
 | `GET` | `/api/run/:id/prs` | List all pull requests for a run |
-| `POST` | `/api/run/:id/approve` | Approve/deny a HITL phase (body: `{ approved, feedback? }`) |
+| `GET` | `/api/runs/stoppable` | List runs that can be continued (Plan 23) |
+| `POST` | `/api/run/continue` | Continue a stopped run (body: `{ outputPath, mode?, threadId? }`) |
 
 #### `POST /api/run` Body
 
@@ -955,15 +961,42 @@ Starts the orchestrator and Playwright MCP server in containers.
 
 ### WebSocket Events
 
-Connect to `ws://localhost:3000/ws` for real-time updates:
+Connect to `ws://localhost:3000/ws` for real-time updates. Events are grouped by prefix:
 
-| Event | Payload | When |
-|-------|---------|------|
-| `run:started` | `{ systemName, mode, threadId? }` | Run begins |
-| `run:phase-complete` | `{ threadId, phase }` | A phase finishes |
-| `run:complete` | `{ systemName, state }` | Run finishes successfully |
-| `run:error` | `{ systemName, error }` | Run fails |
-| `agent:respawn` | `{ agentId, generation, files }` | A dev agent is respawned with a fresh context |
+| Event | Payload (key fields) | When |
+|-------|---------------------|------|
+| **Run lifecycle** | | |
+| `run:started` | `systemName, mode, threadId?` | Run begins |
+| `run:phase-complete` | `threadId, phase, decision` | A HITL phase decision is processed |
+| `run:complete` | `systemName, state, status, blockers` | Run finishes |
+| `run:error` | `systemName, error` | Run fails |
+| `run:budget-stop` | `reason, phase` | Run halted due to budget |
+| **Phase** | | |
+| `phase:start` | `phase` | A pipeline phase begins |
+| `phase:end` | `phase, nextPhase?` | A pipeline phase completes |
+| **Agent** | | |
+| `agent:start` | `agentId, phase, model` | An agent invocation begins |
+| `agent:end` | `agentId, phase, tokens, duration` | An agent invocation completes |
+| `agent:respawn` | `agentId, generation, files` | A dev agent is respawned with fresh context |
+| **PR workflow** | | |
+| `pr:opened` | `prNumber, title, branch` | A PR is created |
+| `pr:merged` | `prNumber, branch` | A PR is merged |
+| `pr:blocked` | `prNumber, blockers` | A PR cannot be merged |
+| `pr:reviewed` | `prNumber, reviewerId, status` | A reviewer completes a review |
+| `pr:conflict` | `branch, baseBranch` | Merge conflict detected |
+| `pr:strong-fixer` | `prNumber, model, branch` | Strong fixer pass started |
+| `pr:salvage` | `branch, salvageDir, reason` | Branch salvaged to worktree |
+| **Gates** | | |
+| `gate:result` | `gate, passed, ...` | A quality/assembly/product gate finishes |
+| `acceptance:result` | `status, blockers` | Acceptance gate result |
+| **HITL** | | |
+| `hitl:waiting` | `threadId, phase, systemName` | Dashboard should prompt user for decision |
+| **Observability** | | |
+| `tokens:update` | `totalTokens, totalCalls` | Token usage counter update |
+| `transcript` | `agentId, phase, message` | Agent transcript message |
+| `traceability:update` | `stories, coverage` | Test traceability updated |
+| `e2e:status` | `status, mode?` | E2E test result |
+| `branch:pushed` | `branchName, commit` | A branch was pushed |
 
 ---
 
@@ -971,9 +1004,13 @@ Connect to `ws://localhost:3000/ws` for real-time updates:
 
 A modern dark-themed Angular 19 standalone app with:
 
-- **Dashboard page** — agent roster grid with color-coded tags + live WebSocket event feed
-- **New Run page** — form to start autonomous or HITL runs
-- **Real-time updates** — WebSocket connection auto-reconnects
+- **Dashboard page** — agent roster grid, active runs, live WebSocket event feed with history backfill
+- **New Run page** — form to start autonomous or HITL runs (greenfield or maintain)
+- **Run Session page** — phase timeline stepper, HITL approve/deny/enhance controls, agent mission report viewer (markdown), code changes & PR list, tabbed state viewer (architecture, tech stack, epics, stories, tasks, assignments, DB design, test reports, bugs, DevOps, raw JSON), acceptance status badge, transcript log, and live events
+- **Real-time updates** — WebSocket connection with exponential backoff reconnect and visible "Disconnected" indicator
+- **Shared components** — `<app-event-log>`, `<app-file-changes-table>`, `<app-pr-badge>` eliminate duplication
+
+> **Note:** The Docker image serves only the API. To include the dashboard, either build it separately (`cd dashboard && npm run build`) and let the Express server serve the static files, or run `npm start` locally with a pre-built dashboard.
 
 ### Development
 

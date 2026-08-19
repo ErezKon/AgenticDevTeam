@@ -57,15 +57,6 @@
   <!-- Live Events -->
   <section class="card">
     <h2 style="margin-bottom: 1rem;">Live Events ({{ events.length }})</h2>
-    <div class="event-log">
-      <div *ngFor="let msg of events; trackBy: trackByEvent" class="event-entry">
-        <span class="event-time">{{ msg.timestamp | date:'HH:mm:ss' }}</span>
-        <span class="event-type badge" [ngClass]="eventBadgeClass(msg.event)">{{ msg.event }}</span>
-        <span class="event-data">{{ msg.data | json }}</span>
-      </div>
-      <div *ngIf="events.length === 0" class="empty-state">
-        No events yet. Start a new run to see live updates.
-      </div>
-    </div>
+    <app-event-log [events]="events" emptyMessage="No events yet. Start a new run to see live updates."></app-event-log>
   </section>
 </div>

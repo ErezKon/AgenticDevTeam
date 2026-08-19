@@ -88,7 +88,7 @@ src/
     pr-workflow.ts                 # Backward-compatible re-export shim (~80 lines)
     pr/                            # PR workflow modules (Sub-Plan 26-08)
       index.ts                     # Barrel re-export
-      orchestrator.ts              # Top-level PR lifecycle orchestrator (~300 lines)
+      orchestrator.ts              # Top-level PR lifecycle orchestrator (~620 lines)
       worktree.ts                  # Worktree creation, disposal, salvage, eviction
       pr-github.ts                 # Octokit wrapper, PR creation/retry/merge, postComment
       pr-body.ts                   # PR title & description builders (pure, testable)
@@ -219,11 +219,17 @@ src/
 
 dashboard/                         # Angular 19 standalone web UI
   src/app/
-    app.component.ts               # Root shell with routing
-    app.routes.ts                  # Dashboard + New Run routes
-    pages/dashboard/               # Agent roster + live event feed
+    app.component.ts               # Root shell with routing + WebSocket disconnect indicator
+    app.routes.ts                  # Dashboard + New Run + Run Session routes
+    components/
+      markdown-viewer/             # Markdown renderer (marked + DOMPurify + mermaid, ViewEncapsulation.None)
+      event-log/                   # Shared <app-event-log> component
+      file-changes-table/          # Shared <app-file-changes-table> component
+      pr-badge/                    # Shared <app-pr-badge> component
+    pages/dashboard/               # Agent roster + active runs + live event feed (with history backfill)
     pages/new-run/                 # Start run form
-    services/api.service.ts        # HTTP + WebSocket client
+    pages/run-session/             # Phase timeline, HITL controls, mission report, tabbed state viewer
+    services/api.service.ts        # HTTP + WebSocket client (exponential backoff reconnect)
 
 tests/                             # Jest test suite (ts-jest)
   setup.ts                         # Polyfill crypto, load env, validate vars

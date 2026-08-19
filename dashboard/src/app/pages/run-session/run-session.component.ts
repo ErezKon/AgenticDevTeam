@@ -5,6 +5,9 @@ import { ActivatedRoute, RouterLink } from '@angular/router';
 import { Subscription } from 'rxjs';
 import { ApiService, WsMessage } from '../../services/api.service';
 import { MarkdownViewerComponent } from '../../components/markdown-viewer/markdown-viewer.component';
+import { EventLogComponent } from '../../components/event-log/event-log.component';
+import { FileChangesTableComponent } from '../../components/file-changes-table/file-changes-table.component';
+import { PrBadgeComponent } from '../../components/pr-badge/pr-badge.component';
 
 interface PhaseStep {
   id: string;
@@ -29,7 +32,7 @@ const PIPELINE_PHASES: PhaseStep[] = [
 @Component({
   selector: 'app-run-session',
   standalone: true,
-  imports: [CommonModule, FormsModule, RouterLink, MarkdownViewerComponent],
+  imports: [CommonModule, FormsModule, RouterLink, MarkdownViewerComponent, EventLogComponent, FileChangesTableComponent, PrBadgeComponent],
   templateUrl: './run-session.component.html',
   styleUrls: ['./run-session.component.scss'],
   changeDetection: ChangeDetectionStrategy.OnPush,
@@ -308,8 +311,19 @@ export class RunSessionComponent implements OnInit, OnDestroy {
   trackByTab(_i: number, tab: { id: string }): string { return tab.id; }
   trackByIndex(i: number): number { return i; }
   trackByFilePath(_i: number, item: any): string { return item.filePath ?? _i; }
-  trackByEvent(_i: number, msg: WsMessage): number { return msg.timestamp ?? _i; }
+  trackByEvent(_i: number, msg: WsMessage): string | number { return msg.timestamp ?? _i; }
   trackById(_i: number, item: any): string { return item.id ?? _i; }
+
+  acceptanceStatusClass(): string {
+    const status = this.state?.acceptance?.status;
+    switch (status) {
+      case 'accepted': return 'status-ok';
+      case 'partial': return 'status-partial';
+      case 'inconclusive': return 'status-inconclusive';
+      case 'failed': return 'status-failed';
+      default: return '';
+    }
+  }
 
   budgetLevelClass(): string {
     switch (this.budgetLevel) {
@@ -320,15 +334,4 @@ export class RunSessionComponent implements OnInit, OnDestroy {
     }
   }
 
-  eventBadgeClass(eventType: string): string {
-    if (eventType.startsWith('phase:')) return 'badge-purple';
-    if (eventType.startsWith('agent:')) return 'badge-blue';
-    if (eventType.startsWith('pr:')) return 'badge-green';
-    if (eventType.startsWith('gate:')) return 'badge-yellow';
-    if (eventType.startsWith('budget:')) return 'badge-red';
-    if (eventType.startsWith('tokens:')) return 'badge-cyan';
-    if (eventType.startsWith('hitl:')) return 'badge-purple';
-    if (eventType.startsWith('run:')) return 'badge-green';
-    return 'badge-blue';
-  }
 }

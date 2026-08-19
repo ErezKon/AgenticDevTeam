@@ -10,6 +10,10 @@
           {{ state?.input?.runType || 'greenfield' }}
         </span>
         <span *ngIf="state?.cancelled" class="badge badge-red">Cancelled</span>
+        <span *ngIf="state?.acceptance?.status" class="acceptance-badge"
+              [ngClass]="acceptanceStatusClass()">
+          {{ state.acceptance.status }}
+        </span>
       </div>
     </div>
     <div class="header-right">
@@ -89,12 +93,7 @@
       <div *ngIf="state.pullRequests?.length" class="pr-section">
         <h3>Pull Requests ({{ state.pullRequests.length }})</h3>
         <div *ngFor="let pr of state.pullRequests; trackBy: trackByIndex" class="pr-entry">
-          <span class="badge"
-            [ngClass]="{
-              'badge-green': pr.status === 'merged',
-              'badge-yellow': pr.status === 'open',
-              'badge-red': pr.status === 'closed'
-            }">{{ pr.status }}</span>
+          <app-pr-badge [status]="pr.status"></app-pr-badge>
           <span class="pr-title">
             <a *ngIf="pr.url" [href]="pr.url" target="_blank" rel="noopener">#{{ pr.number }} {{ pr.title }}</a>
             <span *ngIf="!pr.url">#{{ pr.number }} {{ pr.title }}</span>
@@ -105,22 +104,7 @@
 
       <div *ngIf="state.fileChanges?.length" class="file-changes-section">
         <h3>File Changes ({{ state.fileChanges.length }})</h3>
-        <table class="data-table">
-          <thead><tr><th>File Path</th><th>Action</th></tr></thead>
-          <tbody>
-            <tr *ngFor="let fc of state.fileChanges; trackBy: trackByFilePath">
-              <td><code>{{ fc.filePath }}</code></td>
-              <td>
-                <span class="badge"
-                  [ngClass]="{
-                    'badge-green': fc.action === 'add',
-                    'badge-blue': fc.action === 'modify',
-                    'badge-red': fc.action === 'delete'
-                  }">{{ fc.action }}</span>
-              </td>
-            </tr>
-          </tbody>
-        </table>
+        <app-file-changes-table [changes]="state.fileChanges"></app-file-changes-table>
       </div>
     </section>
 
@@ -335,22 +319,7 @@
 
         <!-- File Changes Tab -->
         <div *ngIf="activeTab === 'fileChanges'">
-          <table class="data-table">
-            <thead><tr><th>File Path</th><th>Action</th></tr></thead>
-            <tbody>
-              <tr *ngFor="let fc of state.fileChanges; trackBy: trackByFilePath">
-                <td><code>{{ fc.filePath }}</code></td>
-                <td>
-                  <span class="badge"
-                    [ngClass]="{
-                      'badge-green': fc.action === 'add',
-                      'badge-blue': fc.action === 'modify',
-                      'badge-red': fc.action === 'delete'
-                    }">{{ fc.action }}</span>
-                </td>
-              </tr>
-            </tbody>
-          </table>
+          <app-file-changes-table [changes]="state.fileChanges"></app-file-changes-table>
         </div>
 
         <!-- Test Reports Tab -->
@@ -396,14 +365,7 @@
               <tr *ngFor="let pr of state.pullRequests; trackBy: trackByIndex">
                 <td>{{ pr.number }}</td>
                 <td>{{ pr.title }}</td>
-                <td>
-                  <span class="badge"
-                    [ngClass]="{
-                      'badge-green': pr.status === 'merged',
-                      'badge-yellow': pr.status === 'open',
-                      'badge-red': pr.status === 'closed'
-                    }">{{ pr.status }}</span>
-                </td>
+                <td><app-pr-badge [status]="pr.status"></app-pr-badge></td>
                 <td><code>{{ pr.branch }}</code></td>
               </tr>
             </tbody>
@@ -461,16 +423,7 @@
     <!-- WebSocket Events Log -->
     <section class="card">
       <h2 style="margin-bottom: 0.75rem;">Live Events ({{ events.length }})</h2>
-      <div class="event-log">
-        <div *ngFor="let msg of recentEvents; trackBy: trackByEvent" class="event-entry">
-          <span class="event-time">{{ msg.timestamp | date:'HH:mm:ss' }}</span>
-          <span class="event-type badge" [ngClass]="eventBadgeClass(msg.event)">{{ msg.event }}</span>
-          <span class="event-data">{{ msg.data | json }}</span>
-        </div>
-        <div *ngIf="events.length === 0" class="empty-state">
-          Waiting for WebSocket events...
-        </div>
-      </div>
+      <app-event-log [events]="recentEvents" emptyMessage="Waiting for WebSocket events..."></app-event-log>
     </section>
   </div>
 </div>

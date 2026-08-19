@@ -18,6 +18,12 @@ RUN npm ci
 COPY tsconfig.json ./
 COPY src/ ./src/
 
+# Note: The dashboard is not included in this image (API-only).
+# To serve the dashboard, build it separately:
+#   cd dashboard && npm run build
+# Then copy dashboard/dist/dashboard/browser/ into the container,
+# or run the Express server locally with a pre-built dashboard.
+
 RUN mkdir -p /app/outputs /app/generated-projects
 
 # TLS: Use NODE_EXTRA_CA_CERTS for corporate CAs instead of disabling validation.

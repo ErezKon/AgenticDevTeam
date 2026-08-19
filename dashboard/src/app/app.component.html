@@ -6,6 +6,7 @@
   <div class="nav-links">
     <a routerLink="/" class="nav-link">Dashboard</a>
     <a routerLink="/new-run" class="nav-link">New Run</a>
+    <span *ngIf="(connected$ | async) === false" class="ws-disconnected">Disconnected</span>
   </div>
 </nav>
 <main class="main-content">
