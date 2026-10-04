@@ -11,6 +11,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { getLogger } from './logger';
 import { appendOutputLine } from './artifact-writer';
+import { trace } from './debug-trace';
 import { RUN_LEDGER_ENABLED } from '../config';
 import type { PhaseName } from '../agents/_shared/schemas/phase.schema';
 import type { AcceptanceStatus } from '../conductor/gate-types';
@@ -64,6 +65,7 @@ export function initLedger(outputPath: string): void {
 
 /** Append a single entry to the ledger JSONL file. Never throws. */
 export function appendLedger(entry: DistributiveOmit<LedgerEntry, 't'>): void {
+    trace({ kind: 'ledger', entry });
     const outPath = _activeOutputPath();
     if (!RUN_LEDGER_ENABLED || !outPath) return;
     const full = { t: new Date().toISOString(), ...entry };

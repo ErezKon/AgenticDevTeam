@@ -1,6 +1,8 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { color256, LogColors } from './log-colors.util';
+import { DEBUG_MODE } from '../config';
+import { traceLog } from './debug-trace';
 
 /**
  * Per-agent tagged, colored logger.
@@ -60,6 +62,7 @@ function appendToRunLog(line: string): void {
 export function logToolAction(line: string): void {
     console.log(line);
     appendToRunLog(stripAnsi(line));
+    traceLog('TOOL', '', stripAnsi(line));
 }
 
 /**
@@ -76,12 +79,13 @@ export function getLogger(tag: string, colorCode: number): AgentLogger {
         const line = `${timestamp} ${coloredTag} ${level} ${message}`;
         console.log(line);
         appendToRunLog(`${timestamp} ${tag} ${level} ${message}`);
+        traceLog(level, tag, message);
     };
 
     return {
         info: (msg) => log('INFO', msg),
         warn: (msg) => log('WARN', msg),
         error: (msg) => log('ERROR', msg),
-        debug: (msg) => log('DEBUG', msg),
+        debug: (msg) => { if (DEBUG_MODE) log('DEBUG', msg); },
     };
 }

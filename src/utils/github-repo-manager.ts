@@ -6,10 +6,11 @@
  * Uses @octokit/rest (already a project dependency).
  */
 import { Octokit } from '@octokit/rest';
-import { execFileSync } from 'child_process';
 import { GIT_USER_NAME, GIT_USER_EMAIL } from '../config';
 import { getLogger } from './logger';
 import { GITHUB_MODE } from './github-local';
+import { execFileSync } from './shell-exec';
+import { traceOctokit } from './debug-trace';
 
 const logger = getLogger('[RepoManager]', 33);
 
@@ -56,7 +57,7 @@ export async function createGitHubRepo(
         };
     }
 
-    const octokit = new Octokit({ auth: token });
+    const octokit = traceOctokit(new Octokit({ auth: token }), 'github');
 
     // Determine if the owner is the authenticated user or an org
     const { data: authedUser } = await octokit.users.getAuthenticated();
@@ -113,7 +114,7 @@ export async function validateGitHubRepo(
         };
     }
 
-    const octokit = new Octokit({ auth: token });
+    const octokit = traceOctokit(new Octokit({ auth: token }), 'github');
 
     logger.info(`Validating repo: ${owner}/${repoName}`);
 

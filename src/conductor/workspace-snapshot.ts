@@ -9,8 +9,8 @@
  */
 import * as fs from 'fs';
 import * as path from 'path';
-import { execSync } from 'child_process';
 import { getLogger } from '../utils/logger';
+import { execSync } from '../utils/shell-exec';
 
 const log = getLogger('[workspace-snapshot]', 178);
 

@@ -14,6 +14,7 @@ import { refreshTokenReport } from './token-report';
 import { writeStateSnapshot } from './run-snapshot';
 import { appendLedger } from './run-ledger';
 import { getRunContext } from './run-context';
+import { trace, serializeError, writeDebugSummary } from './debug-trace';
 
 /**
  * Best-effort flush of the token report.
@@ -56,6 +57,9 @@ function gracefulShutdown(signal: string, logFn: (msg: string) => void): void {
     _shuttingDown = true;
 
     logFn(`\n${signal} received — performing graceful shutdown...`);
+    if (signal === 'SIGINT' || signal === 'SIGTERM') {
+        trace({ kind: 'crash', event: 'signal', signal }, { processLevel: true });
+    }
 
     // 1. Run registered shutdown hooks (state snapshot, ledger flush, etc.)
     for (const hook of _shutdownHooks) {
@@ -91,6 +95,7 @@ function gracefulShutdown(signal: string, logFn: (msg: string) => void): void {
 
     // 4. Flush token report
     flushTokenReportOnExit(signal, logFn);
+    writeDebugSummary({ processLevel: true });
 
     logFn(`Graceful shutdown complete. Use 'continue-run' to resume.`);
     process.exit(signal === 'SIGINT' ? 130 : signal === 'SIGTERM' ? 143 : 1);
@@ -110,10 +115,12 @@ export function installProcessHandlers(
     process.on('SIGTERM', () => gracefulShutdown('SIGTERM', logFn));
     process.on('uncaughtException', (err) => {
         logFn(`Uncaught exception: ${err.message}`);
+        trace({ kind: 'crash', event: 'uncaughtException', error: serializeError(err) }, { processLevel: true });
         gracefulShutdown('uncaughtException', logFn);
     });
     process.on('unhandledRejection', (reason) => {
         logFn(`Unhandled rejection: ${reason}`);
+        trace({ kind: 'crash', event: 'unhandledRejection', error: serializeError(reason) }, { processLevel: true });
         gracefulShutdown('unhandledRejection', logFn);
     });
 }

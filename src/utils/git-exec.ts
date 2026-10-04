@@ -5,7 +5,6 @@
  * Centralised here so every caller uses the same env-var isolation,
  * timeout, and error-return convention.
  */
-import { execFileSync } from 'child_process';
 import * as path from 'path';
 import * as fs from 'fs';
 import {
@@ -14,6 +13,8 @@ import {
     GIT_NETWORK_TIMEOUT_MS,
 } from '../config';
 import { GITHUB_MODE } from './github-local';
+import { execFileSync } from './shell-exec';
+import { redactSecrets } from './redact';
 import type { GitContext } from '../agents/_shared/base-schemas';
 
 // ─── Core helpers ───────────────────────────────────────────────────────────
@@ -97,29 +98,6 @@ export function assertValidRef(ref: string): void {
     if (ref.endsWith('.lock')) throw new Error(`Invalid git ref "${ref}": must not end with '.lock'`);
     if (ref.endsWith('.')) throw new Error(`Invalid git ref "${ref}": must not end with '.'`);
     if (ref.startsWith('.')) throw new Error(`Invalid git ref "${ref}": must not start with '.'`);
-}
-
-// ─── Secret redaction ───────────────────────────────────────────────────────
-
-/** Patterns that match tokens / PATs / secrets in git output. */
-const SECRET_PATTERNS: RegExp[] = [
-    /x-access-token:[^@]*@/g,
-    /ghp_\w+/g,
-    /github_pat_\w+/g,
-    /gho_\w+/g,
-    /Authorization:\s*(?:Basic|Bearer)\s+\S+/gi,
-];
-
-/**
- * Replace known secret patterns in text with a redacted placeholder.
- * Safe to call on any string — returns input unchanged if no secrets found.
- */
-export function redactSecrets(text: string): string {
-    let result = text;
-    for (const pattern of SECRET_PATTERNS) {
-        result = result.replace(pattern, '***REDACTED***');
-    }
-    return result;
 }
 
 /**

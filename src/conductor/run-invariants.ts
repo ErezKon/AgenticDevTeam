@@ -13,6 +13,7 @@
 import { getLogger } from '../utils/logger';
 import { RUN_INVARIANTS_MODE } from '../config';
 import { appendLedger } from '../utils/run-ledger';
+import { execSync } from '../utils/shell-exec';
 import type { PhaseName } from '../agents/_shared/schemas/phase.schema';
 import type { ProjectStateType } from './state';
 
@@ -75,8 +76,7 @@ const INVARIANTS: InvariantCheck[] = [
             if (!state.workspacePath) return null;
             // Check if workspace has any source files beyond boilerplate
             try {
-                const gitLsFiles = require('child_process')
-                    .execSync('git ls-files', { cwd: state.workspacePath, encoding: 'utf-8' })
+                const gitLsFiles = execSync('git ls-files', { cwd: state.workspacePath, encoding: 'utf-8' })
                     .split('\n')
                     .filter(Boolean);
                 const sourceFiles = gitLsFiles.filter((f: string) =>

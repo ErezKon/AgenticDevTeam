@@ -14,11 +14,11 @@
  * It has standalone product value: today the system cannot run at all without
  * a GitHub account and a PAT.
  */
-import { execSync } from 'child_process';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
 import { getLogger } from './logger';
+import { execSync } from './shell-exec';
 
 const log = getLogger('[github-local]', 183);
 

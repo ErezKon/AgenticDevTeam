@@ -6,7 +6,8 @@
  * correctly and do not regress.
  */
 import * as path from 'path';
-import { shellSplit, assertValidRef, redactSecrets } from '../src/utils/git-exec';
+import { shellSplit, assertValidRef } from '../src/utils/git-exec';
+import { redactSecrets, redactValues } from '../src/utils/redact';
 
 // ─── shellSplit ─────────────────────────────────────────────────────────────
 
@@ -128,6 +129,50 @@ describe('redactSecrets', () => {
     it('returns input unchanged when no secrets found', () => {
         const input = 'fatal: could not read from remote';
         expect(redactSecrets(input)).toBe(input);
+    });
+
+    it('redacts the "token" Authorization scheme used by the curl PR fallback', () => {
+        const input = 'curl -H "Authorization: token ghx_notAPatternMatch12345" https://api.github.com';
+        expect(redactSecrets(input)).not.toContain('ghx_notAPatternMatch12345');
+        expect(redactSecrets(input)).toContain('***REDACTED***');
+    });
+
+    it('redacts GitHub app/user/refresh tokens (ghs_ / ghu_ / ghr_)', () => {
+        const token = `ghs_${'a1B2'.repeat(9)}`;
+        expect(redactSecrets(`token=${token}`)).not.toContain(token);
+    });
+
+    it('does not mangle ordinary identifiers that merely contain "ghs_"', () => {
+        expect(redactSecrets('const laughs_count = 1;')).toBe('const laughs_count = 1;');
+    });
+
+    it('redacts credentials embedded in URLs', () => {
+        const result = redactSecrets('remote: https://deploy:s3cr3tP4ss@git.example.com/repo.git');
+        expect(result).not.toContain('s3cr3tP4ss');
+        expect(result).toContain('https://***REDACTED***@git.example.com/repo.git');
+    });
+
+    it('redacts OpenAI / Anthropic / Google API keys', () => {
+        const keys = [
+            `sk-proj-${'x'.repeat(24)}`,
+            `sk-ant-api03-${'y'.repeat(24)}`,
+            `AIza${'z'.repeat(35)}`,
+        ];
+        for (const key of keys) {
+            expect(redactSecrets(`key: ${key}`)).not.toContain(key);
+        }
+    });
+});
+
+describe('redactValues', () => {
+    it('scrubs every occurrence of a configured secret value', () => {
+        const secret = 'my-unusual-secret-value';
+        const result = redactValues(`a ${secret} b ${secret}`, [secret]);
+        expect(result).toBe('a ***REDACTED*** b ***REDACTED***');
+    });
+
+    it('ignores short or empty values to avoid false positives', () => {
+        expect(redactValues('abc main dev', ['', 'main', 'dev'])).toBe('abc main dev');
     });
 });
 

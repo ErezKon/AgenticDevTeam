@@ -28,6 +28,7 @@ import { checkInvariants } from '../run-invariants';
 import { generateRunReport } from '../../utils/ledger-report';
 import { generateRunDiagnosis } from '../../utils/run-diagnosis';
 import { generateTokenReport } from '../../utils/token-report';
+import { writeDebugSummary } from '../../utils/debug-trace';
 import { mdTable } from '../../utils/markdown-table';
 import {
     RUN_FAIL_POLICY, DEVOPS_TEARDOWN, TRACEABILITY_JSON,
@@ -519,6 +520,13 @@ export async function finalizeNode(state: ProjectStateType): Promise<Partial<Pro
         : `Run finished: ${finalStatus.toUpperCase()}`;
 
     emitRunEvent('phase:end', { phase: 'finalize', totalTokens: usageSummary.totalTokens, totalCalls: usageSummary.totalCalls, status: finalStatus });
+
+    // ── Debug trace summary (DEBUG_MODE) — best-effort, never throws
+    const debugSummary = writeDebugSummary();
+    if (debugSummary) {
+        finalLog.info(`Debug trace: ${path.dirname(debugSummary.file)} (${debugSummary.records} records, ${debugSummary.failures} failure records)`);
+    }
+
     return {
         phase: 'finalize' as PhaseName,
         tokenUsage: usageSnapshot,

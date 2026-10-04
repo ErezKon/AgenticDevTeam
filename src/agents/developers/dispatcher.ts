@@ -20,6 +20,7 @@ import { gitExec, assertValidRef } from '../../utils/git-exec';
 import { classifyProviderFailure, isProviderLevelFailure } from '../../conductor/provider-failure';
 import { awaitProviderRecovery, createProviderProbe } from '../../utils/llm-throttle';
 import { emitRunEvent } from '../../utils/event-bus';
+import { withTraceContext } from '../../utils/debug-trace';
 import { writePeriodicSnapshot } from '../../utils/run-snapshot';
 import type { Assignment, FileChange, ArtifactRef, TranscriptMessage, PhaseName, PullRequest, GitContext, TechDecision, UserStory, Task } from '../_shared/base-schemas';
 import type { TokenCallRecord } from '../../utils/token-tracker';
@@ -578,7 +579,7 @@ export async function dispatchDevelopers(
                         `${reviewerIds.length} reviewer(s), type=${taskType}` +
                         (effectiveBaseBranch !== baseBranch ? `, base=${effectiveBaseBranch} (scaffold fallback)` : ''));
 
-                    return executePRWorkflow({
+                    return withTraceContext({ branch: branchName }, () => executePRWorkflow({
                         branchName,
                         baseBranch: effectiveBaseBranch,
                         assignments: branchAssignments,
@@ -594,7 +595,7 @@ export async function dispatchDevelopers(
                         tasks,
                         isMaintainMode,
                         outputPath,
-                    });
+                    }));
                 });
 
                 const results = await Promise.allSettled(promises);

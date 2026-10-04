@@ -8,7 +8,7 @@
 import { BaseCallbackHandler } from '@langchain/core/callbacks/base';
 import type { LLMResult } from '@langchain/core/outputs';
 import { tokenTracker } from './token-tracker';
-import { normaliseUsage, sumUsageMetadata } from './token-usage-extractor';
+import { usageFromLLMResult } from './token-usage-extractor';
 import { getLogger } from './logger';
 import { SANITY_ASSERT_CACHE, SANITY_ASSERT_CACHE_AFTER, ANTHROPIC_PROMPT_CACHE_ENABLED } from '../config';
 
@@ -103,23 +103,7 @@ export class TokenUsageCallbackHandler extends BaseCallbackHandler {
      * Reading only tier 1 left `MAX_RUN_COST_USD` unenforceable for a whole run.
      */
     handleLLMEnd(output: LLMResult): void {
-        // Tier 1 — provider-level llmOutput.
-        let totals = normaliseUsage(
-            output.llmOutput?.tokenUsage
-            ?? output.llmOutput?.token_usage
-            ?? output.llmOutput?.usage
-            ?? output.llmOutput?.estimatedTokenUsage,
-        );
-
-        // Tier 2 — per-generation usage_metadata. Only consulted when tier 1 is
-        // absent, so providers that populate both are never double-counted.
-        if (!totals) {
-            const messages = (output.generations ?? [])
-                .flat()
-                .map((g: any) => g?.message)
-                .filter(Boolean);
-            totals = sumUsageMetadata(messages);
-        }
+        const totals = usageFromLLMResult(output);
 
         if (!totals) {
             // Was DEBUG. A silent zero here disables the run cost ceiling for the

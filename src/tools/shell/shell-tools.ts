@@ -16,9 +16,9 @@
  */
 import { tool } from '@langchain/core/tools';
 import { z } from 'zod';
-import { exec } from 'child_process';
 import { LogColors, color256 } from '../../utils/log-colors.util';
 import { logToolAction } from '../../utils/logger';
+import { execCapture } from '../../utils/shell-exec';
 import {
     GIT_USER_NAME, GIT_USER_EMAIL,
     SHELL_ALLOW_HOST, SHELL_DEFAULT_TIMEOUT_S, SHELL_MAX_TIMEOUT_S,
@@ -105,17 +105,9 @@ function safeShellEnv(): NodeJS.ProcessEnv {
 }
 
 function runShell(command: string, cwd: string, timeoutMs: number): Promise<ShellResult> {
-    return new Promise((resolve) => {
-        exec(command, {
-            cwd, timeout: timeoutMs, maxBuffer: 1024 * 1024 * 5,
-            env: safeShellEnv(),
-        }, (error, stdout, stderr) => {
-            resolve({
-                stdout: stdout?.toString() ?? '',
-                stderr: stderr?.toString() ?? '',
-                exitCode: error?.code ?? (error ? 1 : 0),
-            });
-        });
+    return execCapture(command, {
+        cwd, timeout: timeoutMs, maxBuffer: 1024 * 1024 * 5,
+        env: safeShellEnv(),
     });
 }
 

@@ -4,8 +4,8 @@
  */
 import * as path from 'path';
 import * as fs from 'fs';
-import { execSync } from 'child_process';
 import { getLogger } from '../../utils/logger';
+import { execSync } from '../../utils/shell-exec';
 import { getAccessToken } from '../../utils/oauth-auth.util';
 import { createQaLeadAgent, createQaUnitAgent } from '../../agents/qa/qa.agents';
 import { writeArtifact } from '../../agents/_shared/artifact';

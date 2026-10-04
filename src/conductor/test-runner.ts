@@ -9,12 +9,8 @@
  */
 import * as fs from 'fs';
 import * as path from 'path';
-import { execFile } from 'child_process';
-import { promisify } from 'util';
 import { getLogger } from '../utils/logger';
-import { safeChildEnv } from '../utils/shell-exec';
-
-const execFileAsync = promisify(execFile);
+import { safeChildEnv, execFileAsync } from '../utils/shell-exec';
 import type { StackRoot } from './quality-gates';
 
 const log = getLogger('[TestRunner]', 199);

@@ -9,6 +9,7 @@ import type { BaseCheckpointSaver } from '@langchain/langgraph';
 import { ProjectState } from './state';
 import { RUN_MODE, E2E_BUGFIX_ENABLED, RUN_FAIL_POLICY, CHECKPOINT_PERSIST } from '../config';
 import { FileCheckpointer } from './file-checkpointer';
+import { traceNode, traceRoute } from './graph-trace';
 import { getEffectiveLimits } from '../utils/run-budget';
 import {
     intakeNode,
@@ -163,67 +164,67 @@ export function buildConductorGraph(opts: ConductorOptions = {}) {
 
     const graph = new StateGraph(ProjectState)
         // Add all nodes
-        .addNode('intake', intakeNode)
-        .addNode('codebase-analyzer', codebaseAnalyzerNode)
-        .addNode('architect', architectNode)
-        .addNode('product-manager', productManagerNode)
-        .addNode('dba', dbaNode)
-        .addNode('team-leader', teamLeaderNode)
-        .addNode('development', developmentNode)
-        .addNode('qa', qaNode)
-        .addNode('bugfix-triage', bugfixTriageNode)
-        .addNode('devops', devopsNode)
-        .addNode('e2e', e2eNode)
-        .addNode('acceptance-gate', acceptanceNode)
-        .addNode('finalize', finalizeNode)
+        .addNode('intake', traceNode('intake', intakeNode))
+        .addNode('codebase-analyzer', traceNode('codebase-analyzer', codebaseAnalyzerNode))
+        .addNode('architect', traceNode('architect', architectNode))
+        .addNode('product-manager', traceNode('product-manager', productManagerNode))
+        .addNode('dba', traceNode('dba', dbaNode))
+        .addNode('team-leader', traceNode('team-leader', teamLeaderNode))
+        .addNode('development', traceNode('development', developmentNode))
+        .addNode('qa', traceNode('qa', qaNode))
+        .addNode('bugfix-triage', traceNode('bugfix-triage', bugfixTriageNode))
+        .addNode('devops', traceNode('devops', devopsNode))
+        .addNode('e2e', traceNode('e2e', e2eNode))
+        .addNode('acceptance-gate', traceNode('acceptance-gate', acceptanceNode))
+        .addNode('finalize', traceNode('finalize', finalizeNode))
 
         // Linear edges for the main pipeline
         .addEdge('__start__', 'intake')
 
         // After intake: route to analyzer (maintain) or architect (greenfield)
-        .addConditionalEdges('intake', afterIntakeRouter, {
+        .addConditionalEdges('intake', traceRoute('intake', afterIntakeRouter), {
             'codebase-analyzer': 'codebase-analyzer',
             'architect': 'architect',
         })
 
         // Phases with rerun support — use conditional edges so "enhance" can loop back
-        .addConditionalEdges('codebase-analyzer', rerunRouter('codebase-analyzer', 'architect'), {
+        .addConditionalEdges('codebase-analyzer', traceRoute('codebase-analyzer', rerunRouter('codebase-analyzer', 'architect')), {
             'codebase-analyzer': 'codebase-analyzer',
             'architect': 'architect',
             'finalize': 'finalize',
         })
-        .addConditionalEdges('architect', rerunRouter('architect', 'product-manager'), {
+        .addConditionalEdges('architect', traceRoute('architect', rerunRouter('architect', 'product-manager')), {
             'architect': 'architect',
             'product-manager': 'product-manager',
             'finalize': 'finalize',
         })
-        .addConditionalEdges('product-manager', rerunRouter('product-manager', 'dba'), {
+        .addConditionalEdges('product-manager', traceRoute('product-manager', rerunRouter('product-manager', 'dba')), {
             'product-manager': 'product-manager',
             'dba': 'dba',
             'finalize': 'finalize',
         })
-        .addConditionalEdges('dba', rerunRouter('dba', 'team-leader'), {
+        .addConditionalEdges('dba', traceRoute('dba', rerunRouter('dba', 'team-leader')), {
             'dba': 'dba',
             'team-leader': 'team-leader',
             'finalize': 'finalize',
         })
-        .addConditionalEdges('team-leader', rerunRouter('team-leader', 'development'), {
+        .addConditionalEdges('team-leader', traceRoute('team-leader', rerunRouter('team-leader', 'development')), {
             'team-leader': 'team-leader',
             'development': 'development',
             'finalize': 'finalize',
         })
-        .addConditionalEdges('development', rerunRouter('development', 'qa'), {
+        .addConditionalEdges('development', traceRoute('development', rerunRouter('development', 'qa')), {
             'development': 'development',
             'qa': 'qa',
             'finalize': 'finalize',
         })
 
         // Conditional: after QA, either bugfix, devops, or acceptance (includes cancel + rerun)
-        .addConditionalEdges('qa', (state: ProjectStateType) => {
+        .addConditionalEdges('qa', traceRoute('qa', (state: ProjectStateType) => {
             if (state.cancelled) return 'finalize';
             if (state.pendingRerun === 'qa') return 'qa';
             return afterQaRouter(state);
-        }, {
+        }), {
             'qa': 'qa',
             'bugfix-triage': 'bugfix-triage',
             'devops': 'devops',
@@ -235,18 +236,18 @@ export function buildConductorGraph(opts: ConductorOptions = {}) {
         .addEdge('bugfix-triage', 'development')
 
         // After devops — rerun support + route to e2e
-        .addConditionalEdges('devops', rerunRouter('devops', 'e2e'), {
+        .addConditionalEdges('devops', traceRoute('devops', rerunRouter('devops', 'e2e')), {
             'devops': 'devops',
             'e2e': 'e2e',
             'finalize': 'finalize',
         })
 
         // After E2E: either bugfix (if enabled and failures) or acceptance (includes cancel + rerun)
-        .addConditionalEdges('e2e', (state: ProjectStateType) => {
+        .addConditionalEdges('e2e', traceRoute('e2e', (state: ProjectStateType) => {
             if (state.cancelled) return 'finalize';
             if (state.pendingRerun === 'e2e') return 'e2e';
             return afterE2eRouter(state);
-        }, {
+        }), {
             'e2e': 'e2e',
             'bugfix-triage': 'bugfix-triage',
             'acceptance-gate': 'acceptance-gate',
@@ -254,7 +255,7 @@ export function buildConductorGraph(opts: ConductorOptions = {}) {
         })
 
         // After acceptance gate: either bugfix-triage (if budget remains and not accepted) or finalize
-        .addConditionalEdges('acceptance-gate', afterAcceptanceRouter, {
+        .addConditionalEdges('acceptance-gate', traceRoute('acceptance-gate', afterAcceptanceRouter), {
             'bugfix-triage': 'bugfix-triage',
             'finalize': 'finalize',
         })

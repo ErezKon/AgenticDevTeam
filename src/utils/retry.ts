@@ -7,6 +7,7 @@
  */
 import { LLM_RETRY_ATTEMPTS, LLM_RETRY_INITIAL_MS, LLM_RETRY_MAX_MS } from '../config';
 import { getLogger } from './logger';
+import { trace, serializeError } from './debug-trace';
 
 const log = getLogger('[retry]', 226);
 
@@ -81,9 +82,17 @@ export async function retryWithBackoff<T>(
                     `${label}: ${isTransient ? 'transient error' : 'rate-limited'} (attempt ${attempt}/${attempts}), ` +
                     `retrying in ${(delay / 1000).toFixed(1)}s... [${err?.message?.slice(0, 100) ?? 'unknown'}]`,
                 );
+                trace({
+                    kind: 'retry', event: 'attempt', label, attempt, maxAttempts: attempts,
+                    delayMs: delay, transient: isTransient, error: serializeError(err),
+                });
                 await new Promise(r => setTimeout(r, delay));
                 continue;
             }
+            trace({
+                kind: 'retry', event: 'giveup', label, attempt, maxAttempts: attempts,
+                retryable: isRetryableError(err), error: serializeError(err),
+            });
             throw err;
         }
     }

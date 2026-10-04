@@ -24,6 +24,7 @@
 import type { StructuredToolInterface } from '@langchain/core/tools';
 import { tool } from '@langchain/core/tools';
 import { getLogger } from '../../utils/logger';
+import { traceToolCall } from '../../utils/debug-trace';
 import { MAX_TURN_TOOL_RESULT_CHARS, SHELL_READ_MAX_FILES } from '../../config';
 import {
     branchReadCacheHit,
@@ -693,7 +694,7 @@ export function withLoopGuard(
             return withFooter(budgeted);
         };
 
-        return tool(wrappedFn, {
+        return tool(traceToolCall(agentId, originalTool.name, wrappedFn, usage), {
             name: originalTool.name,
             description: originalTool.description,
             schema: (originalTool as any).schema,

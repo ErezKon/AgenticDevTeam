@@ -14,6 +14,7 @@
 import { EventEmitter } from 'node:events';
 import { EVENT_BUFFER_SIZE, EVENT_PRIORITY_BUFFER_SIZE } from '../config';
 import { getLogger } from './logger';
+import { trace } from './debug-trace';
 
 const log = getLogger('[EventBus]', 214);
 
@@ -143,6 +144,8 @@ export function emitRunEvent(type: RunEventType, payload: Record<string, unknown
             bus.priorityBuffer.push(event);
         }
     }
+
+    trace({ kind: 'event', type, payload });
 
     // Notify listeners (never throw)
     try {

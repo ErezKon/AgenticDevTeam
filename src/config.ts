@@ -782,6 +782,26 @@ export const FULL_RESPONSE_LOG_MAX_CHARS =
 export const RUN_INVARIANTS_MODE =
     envEnum('RUN_INVARIANTS_MODE', ['off', 'warn', 'strict'] as const, 'warn');
 
+// ─── Debug Mode ─────────────────────────────────────────────────────────────
+
+/**
+ * Verbose diagnostics for root-cause analysis (default: false).
+ *
+ * When true, `logger.debug()` lines are emitted and a structured, redacted,
+ * chronological trace is written to `outputs/<run>/debug/`: every LLM
+ * request/response, agent tool call, git/shell/docker/GitHub operation,
+ * graph node, routing decision, retry and crash. When false nothing extra
+ * is written and every trace hook is a pass-through.
+ */
+export const DEBUG_MODE =
+    envBool('DEBUG_MODE', false);
+
+/** Per-field character cap for debug-trace payloads (stdout/stderr, tool
+ *  results, message content). Longer strings keep their head and tail
+ *  around an explicit elision marker. 0 = unlimited. */
+export const DEBUG_TRACE_MAX_FIELD_CHARS =
+    envInt('DEBUG_TRACE_MAX_FIELD_CHARS', 20000);
+
 // ─── Requirements Traceability (Sub-Plan 10) ────────────────────────────────
 
 /** Minimum verified AC coverage % for the AC_COVERAGE acceptance criterion.

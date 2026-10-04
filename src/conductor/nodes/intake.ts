@@ -1,4 +1,3 @@
-import { execSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 
@@ -9,6 +8,8 @@ import { GITHUB_MODE } from '../../utils/github-local';
 import { createGitHubRepo, initializeRepoLocally, validateGitHubRepo } from '../../utils/github-repo-manager';
 import { getLogger, setRunLogPath } from '../../utils/logger';
 import { initResponseLog } from '../../utils/response-log';
+import { execSync } from '../../utils/shell-exec';
+import { initDebugTrace } from '../../utils/debug-trace';
 import { appendLedger, initLedger } from '../../utils/run-ledger';
 import { startRunBudget } from '../../utils/run-budget';
 import { refreshTokenReport } from '../../utils/token-report';
@@ -62,6 +63,12 @@ export async function intakeNode(state: ProjectStateType): Promise<Partial<Proje
     setRunLogPath(path.join(outputPath, 'run.log'));
     initLedger(outputPath);
     initResponseLog(outputPath);
+    const debugDir = initDebugTrace(outputPath, {
+        systemName: state.input.systemName,
+        runType: state.input.runType,
+        mode: state.input.mode,
+    });
+    if (debugDir) intakeLog.info(`DEBUG_MODE on — verbose trace (secrets redacted, prompts/code included): ${debugDir}`);
     appendLedger({ kind: 'phase', phase: 'intake', event: 'start' });
 
     tokenTracker.enablePersistence(outputPath, state.input.systemName);

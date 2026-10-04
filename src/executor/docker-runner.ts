@@ -7,6 +7,10 @@ import Dockerode from 'dockerode';
 import * as path from 'path';
 import { DOCKER_HOST } from '../config';
 import { getLogger } from '../utils/logger';
+import { isDebugMode, trace, scrubText, serializeError } from '../utils/debug-trace';
+
+/** Build output keeps 80 % of its trace budget for the tail, where the failing step prints. */
+const LOG_HEAD_RATIO = 0.2;
 
 const log = getLogger('[DockerRunner]', 33);
 
@@ -53,6 +57,9 @@ export async function buildImage(
     const docker = createDocker();
     const contextPath = workspacePath;
     const relDockerfile = path.relative(workspacePath, path.resolve(workspacePath, dockerfilePath));
+    const startedAt = Date.now();
+    const chunks: string[] = [];
+    const traceFields = { kind: 'docker' as const, op: 'build', image: imageName, dockerfile: relDockerfile, context: contextPath };
 
     log.info(`Building image "${imageName}" from ${relDockerfile}...`);
 
@@ -63,7 +70,6 @@ export async function buildImage(
         );
 
         const logs = await new Promise<string>((resolve, reject) => {
-            const chunks: string[] = [];
             docker.modem.followProgress(
                 stream,
                 (err: any, _output: any) => {
@@ -78,9 +84,18 @@ export async function buildImage(
         });
 
         log.info(`Image "${imageName}" built successfully`);
+        if (isDebugMode()) {
+            trace({ ...traceFields, event: 'end', durationMs: Date.now() - startedAt, logs: scrubText(logs, LOG_HEAD_RATIO) });
+        }
         return { imageName, success: true, logs };
     } catch (err: any) {
         log.error(`Build failed for "${imageName}": ${err.message}`);
+        if (isDebugMode()) {
+            trace({
+                ...traceFields, event: 'error', durationMs: Date.now() - startedAt,
+                logs: scrubText(chunks.join(''), LOG_HEAD_RATIO), error: serializeError(err),
+            });
+        }
         return { imageName, success: false, logs: '', error: err.message };
     }
 }
@@ -97,6 +112,11 @@ export async function runContainer(
 ): Promise<RunResult> {
     const docker = createDocker();
     log.info(`Starting container "${containerName}" from image "${imageName}"...`);
+    const startedAt = Date.now();
+    const traceFields = {
+        kind: 'docker' as const, op: 'run', image: imageName, container: containerName,
+        ports: portBindings, network, envKeys: (envVars ?? []).map(e => e.split('=')[0]),
+    };
 
     try {
         // Build ExposedPorts and PortBindings
@@ -125,6 +145,7 @@ export async function runContainer(
         // Grab a few lines of initial logs
         const logStream = await container.logs({ stdout: true, stderr: true, tail: 30 });
         const logText = logStream.toString('utf-8').slice(0, 3000);
+        trace({ ...traceFields, event: 'end', containerId: container.id, durationMs: Date.now() - startedAt, logs: logText });
 
         return {
             containerId: container.id,
@@ -135,6 +156,7 @@ export async function runContainer(
         };
     } catch (err: any) {
         log.error(`Run failed for "${containerName}": ${err.message}`);
+        trace({ ...traceFields, event: 'error', durationMs: Date.now() - startedAt, error: serializeError(err) });
         return {
             containerId: '',
             containerName,
@@ -160,8 +182,11 @@ export async function healthCheck(
         let lastError = '';
         let healthy = false;
         let statusCode: number | undefined;
+        let attempts = 0;
+        const startedAt = Date.now();
 
         for (let attempt = 0; attempt < retries; attempt++) {
+            attempts += 1;
             try {
                 const resp = await fetch(check.url, { signal: AbortSignal.timeout(5000) });
                 statusCode = resp.status;
@@ -179,6 +204,11 @@ export async function healthCheck(
         }
 
         log.info(`Health check ${check.service}: ${healthy ? 'healthy' : 'unhealthy'}`);
+        trace({
+            kind: 'docker', event: 'end', op: 'health', service: check.service, url: check.url,
+            ok: healthy, statusCode, attempts, durationMs: Date.now() - startedAt,
+            ...(healthy ? {} : { error: lastError }),
+        });
         results.push({
             service: check.service,
             url: check.url,
@@ -196,12 +226,19 @@ export async function healthCheck(
  */
 export async function stopContainer(containerName: string): Promise<void> {
     const docker = createDocker();
+    const startedAt = Date.now();
+    const ignoredErrors: unknown[] = [];
     try {
         const container = docker.getContainer(containerName);
-        await container.stop().catch(() => {});
-        await container.remove().catch(() => {});
+        await container.stop().catch((e: unknown) => { ignoredErrors.push(e); });
+        await container.remove().catch((e: unknown) => { ignoredErrors.push(e); });
         log.info(`Stopped and removed container "${containerName}"`);
+        trace({
+            kind: 'docker', event: 'end', op: 'stop', container: containerName, durationMs: Date.now() - startedAt,
+            ...(ignoredErrors.length > 0 ? { ignoredErrors: ignoredErrors.map(e => serializeError(e)) } : {}),
+        });
     } catch (err: any) {
         log.warn(`Could not stop container "${containerName}": ${err.message}`);
+        trace({ kind: 'docker', event: 'error', op: 'stop', container: containerName, durationMs: Date.now() - startedAt, error: serializeError(err) });
     }
 }

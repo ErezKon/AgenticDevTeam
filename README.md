@@ -18,6 +18,7 @@
 - [Continue Run](#continue-run)
 - [Context Compaction & Token Optimization](#context-compaction--token-optimization)
 - [Provider Transport & Token Accounting](#provider-transport--token-accounting)
+- [Debug Mode & Verbose Tracing](#debug-mode--verbose-tracing)
 - [Project Structure](#project-structure)
 - [Prerequisites](#prerequisites)
 - [Installation & Setup](#installation--setup)
@@ -705,6 +706,40 @@ Provider errors during development dispatch are classified by severity. Fatal er
 
 ---
 
+## Debug Mode & Verbose Tracing
+
+Set `DEBUG_MODE=true` in `.env` to record everything a run does — in order — so a failure can be root-caused later (by you or by an AI) without re-running it. With the flag off nothing extra is written and every trace hook is a pass-through.
+
+When enabled:
+
+- `logger.debug()` lines are printed and written to `run.log` (they are hidden otherwise).
+- `outputs/<run>/debug/` receives a structured trace:
+
+```
+outputs/<run>/debug/
+├── README.md          # record schema, correlation keys, analysis workflow + a ready-to-paste AI prompt
+├── environment.json   # runtime, app version + git commit, run metadata, effective config (secrets masked)
+├── trace.jsonl        # the complete chronological timeline — one JSON record per line
+├── errors.jsonl       # every failure record (same seq as trace.jsonl) — start here
+└── summary.json       # counts, failures, slowest operations, LLM stats per agent, command stats per program
+```
+
+| Record kind | What it captures |
+|-------------|------------------|
+| `llm` | The exact request each model call received after history compaction (messages de-duplicated per agent instance, params, tool names/schemas), the response (text, tool calls, thinking), usage incl. cache tokens, stop reason, served model, duration; provider errors with status, body and request-id |
+| `tool` | Every agent tool call: agent, tool, `toolCallId` (joins the LLM's `tool_calls`), arguments, the result exactly as the agent saw it (incl. loop-guard `[CACHED]` / `[BLOCKED]` / budget markers) and the budget usage |
+| `exec` | Every child process — git, shell, npm/test runners, docker, curl: command, cwd, exit code, signal, stdout/stderr (tail-weighted), duration and the calling `file:line` |
+| `http` / `docker` | GitHub API calls (live Octokit or the local stand-in) and Dockerode build/run/health/stop operations |
+| `node` / `route` | Graph node entry/exit (state vitals in, update summary out) and every conditional-edge decision |
+| `retry` / `crash` / `run` | Retry attempts and give-ups with full errors, uncaught exceptions, signals, run crashes and session starts |
+| `event` / `ledger` / `response` / `log` | Mirrors of the event bus, `ledger.jsonl`, the `full-responses/` index (pointer to the full conversation) and every log line |
+
+Every record carries `seq`, `t`, `runId`, `kind`, `event` and — when known — `phase`, `branch` and `agentId`. Continue-run appends a new session to the same files.
+
+**Privacy and size.** Credentials are redacted everywhere (token/key patterns, auth headers, URL credentials and the exact values of configured secrets), but prompts, requirements, source code and tool output are captured by design — treat the folder as confidential before sharing it. Strings longer than `DEBUG_TRACE_MAX_FIELD_CHARS` (default 20,000) keep their head and tail around an elision marker; expect tens of MB per run. Debug mode uses synchronous appends so records stay ordered and survive a crash, which is why it is meant for diagnosis runs rather than always-on use.
+
+---
+
 ## Project Structure
 
 ```
@@ -726,6 +761,7 @@ AgenticDevTeam/
 │   │   ├── graph.ts                        # StateGraph wiring + HITL interrupts
 │   │   ├── pr-workflow.ts                  # Backward-compatible re-export shim
 │   │   ├── pr/                             # PR workflow modules (14 focused files)
+│   │   ├── graph-trace.ts                  # DEBUG_MODE node + routing-decision tracing (wired in graph.ts)
 │   │   ├── agent-respawn.ts                # Deterministic handoff summary for fresh-context respawn
 │   │   ├── provider-failure.ts             # Provider error classification + ProviderRecoveryFailedError
 │   │   └── run.ts                          # Autonomous & HITL run helpers + handleRunCrash + makeSession
@@ -787,6 +823,10 @@ AgenticDevTeam/
 │   │   ├── ledger-report.ts                # Produces outputs/<run>/run-report.md from ledger data
 │   │   ├── run-diagnosis.ts                # Automated failure-cause summary (run-diagnosis.md)
 │   │   ├── response-log.ts                 # Full-response dump per agent invocation (outputs/<run>/full-responses/)
+│   │   ├── debug-trace.ts                  # DEBUG_MODE trace writer (outputs/<run>/debug/): redaction, clipping, per-run state
+│   │   ├── debug-llm-callback.ts           # DEBUG_MODE LangChain callback: exact LLM requests/responses (de-duplicated)
+│   │   ├── debug-environment.ts            # DEBUG_MODE environment.json (runtime, git commit, masked config)
+│   │   ├── redact.ts                       # Secret redaction (patterns + configured secret values)
 │   │   ├── structured-output.ts            # JSON extraction, repair, Zod validation, content-block handling
 │   │   ├── git-exec.ts                     # Centralized git command execution (execFileSync, shellSplit, assertValidRef)
 │   │   ├── github-local.ts                 # Local GitHub stand-in backed by bare git repo
@@ -800,14 +840,15 @@ AgenticDevTeam/
 │   │   ├── fs-walk.ts                      # Shared filesystem walker (walkDir, collectFiles, isTestFile)
 │   │   ├── source-graph.ts                 # Import extraction, graph building, transitive reachability
 │   │   ├── markdown-table.ts               # Shared mdTable() + mdSection() with pipe-escaping
-│   │   ├── shell-exec.ts                   # Shared ExecFn, safeChildEnv, defaultExec, isToolAvailable
+│   │   ├── shell-exec.ts                   # Shared ExecFn, safeChildEnv, defaultExec, isToolAvailable + traced child_process drop-ins (the only child_process importer)
 │   │   ├── branch-naming.ts                # Canonical slugify, systemBranch, featureBranch, isSystemBranch
 │   │   ├── artifact-writer.ts              # writeOutputFile + appendOutputLine for output-dir artifacts
 │   │   ├── workspace-index.ts              # buildWorkspaceIndex() — pre-built file index passed to all gates
 │   │   └── crash-handlers.ts               # flushTokenReportOnExit + installProcessHandlers (shared)
 │   │
 │   ├── templates/
-│   │   └── codebase-analysis.template.ts   # Markdown renderer for CodebaseAnalysis
+│   │   ├── codebase-analysis.template.ts   # Markdown renderer for CodebaseAnalysis
+│   │   └── debug-trace-readme.template.ts  # README written into outputs/<run>/debug/ (trace schema for AI analysis)
 │   │
 │   └── types/
 │       └── shims.d.ts                      # Module declarations (pdf-parse, mammoth)
@@ -1211,6 +1252,9 @@ See [`.env.example`](.env.example) for the full template.
 | `FULL_RESPONSE_LOG_DIR_NAME` | `full-responses` | Directory name for the dumps under the run output dir |
 | `FULL_RESPONSE_LOG_MAX_CHARS` | `0` | Max characters per dump file (0 = unlimited) |
 | `RUN_INVARIANTS_MODE` | `warn` | Run-invariant enforcement: off/warn/strict |
+| **Debug Mode** | | |
+| `DEBUG_MODE` | `false` | Verbose diagnostics: prints `logger.debug()` lines and writes a structured, redacted trace of every LLM call, tool call, git/shell/docker/GitHub operation, graph node, routing decision, retry and crash to `outputs/<run>/debug/` (see [Debug Mode & Verbose Tracing](#debug-mode--verbose-tracing)) |
+| `DEBUG_TRACE_MAX_FIELD_CHARS` | `20000` | Per-field character cap for debug-trace payloads (head + tail kept around an elision marker). 0 = unlimited |
 
 ### New variables (Plan 16)
 
@@ -1276,6 +1320,7 @@ outputs/<system-name>-<timestamp>/
 ├── full-responses/         # Verbatim agent responses — see below
 │   ├── index.jsonl         # One summary line per invocation (flow at a glance)
 │   └── 001-architect-architect.json
+├── debug/                  # (DEBUG_MODE=true only) trace.jsonl, errors.jsonl, summary.json, environment.json, README.md
 ├── codebase-analysis.md    # (maintain mode) Snapshot of the analysis for this run
 ├── state.json              # Final ProjectState snapshot (also written periodically at each phase start)
 ├── latest-phase.json       # Marker file indicating the most recent phase snapshot

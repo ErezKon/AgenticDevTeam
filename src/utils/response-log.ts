@@ -26,6 +26,7 @@ import {
     FULL_RESPONSE_LOG_DIR_NAME,
 } from '../config';
 import { extractAgentText } from './structured-output';
+import { trace } from './debug-trace';
 
 const log = getLogger('[ResponseLog]', 141);
 
@@ -212,6 +213,16 @@ export function logAgentResponse(meta: ResponseLogMeta, result: unknown): string
             clipped,
         };
         fs.appendFileSync(path.join(state.dir!, 'index.jsonl'), JSON.stringify(entry) + '\n', 'utf-8');
+        trace({
+            kind: 'response', event: 'logged',
+            file: path.join(FULL_RESPONSE_LOG_DIR_NAME, file),
+            agentId: meta.agentId, phase: meta.phase, model: meta.model,
+            invocationId: meta.invocationId, threadId: meta.threadId,
+            responseKind: kind, attempt: meta.attempt,
+            messageCount: entry.messageCount, textSource: entry.textSource,
+            textChars: entry.textChars, truncatedByTokenLimit: entry.truncatedByTokenLimit,
+            ok: entry.textSource !== 'none',
+        });
         return filePath;
     } catch (err: any) {
         log.warn(`Full-response log write failed: ${err.message}`);

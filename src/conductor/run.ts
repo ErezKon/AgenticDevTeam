@@ -12,6 +12,7 @@ import { collectRunState, reconstructState, reconcileGitState } from './continue
 import { rehydrateSingletons } from './continue/singleton-rehydration';
 import { RunContext, runWithContext, getRunContext } from '../utils/run-context';
 import { onGracefulShutdown } from '../utils/crash-handlers';
+import { trace, serializeError, writeDebugSummary } from '../utils/debug-trace';
 import type { RepoTarget, PhaseName } from '../agents/_shared/base-schemas';
 import type { ProjectStateType } from './state';
 
@@ -52,6 +53,8 @@ export async function handleRunCrash(
 ): Promise<never> {
     tokenTracker.setRunStatus('failed');
     try { refreshTokenReport(); } catch { /* best-effort */ }
+    trace({ kind: 'run', event: 'crash', context, error: serializeError(err) });
+    writeDebugSummary();
 
     try {
         const snapshot = await conductor.getState(config);
@@ -103,11 +106,18 @@ export interface RunSession {
  *
  * Extracted to eliminate the duplicated getState/resume closures that were
  * copy-pasted between runHumanInTheLoop() and continueRun() HITL mode.
+ *
+ * `getState()` / `resume()` are invoked later by the CLI and REST handlers,
+ * outside the AsyncLocalStorage scope the session was created in, so both
+ * re-enter the run's RunContext explicitly. Without this every per-run
+ * singleton (run.log, ledger, response log, token tracker, debug trace)
+ * fell back to its uninitialised module default after the first approval.
  */
 function makeSession(
     conductor: ReturnType<typeof createConductor>,
     threadId: string,
     sessionLog: { info: (msg: string) => void; warn: (msg: string) => void; error: (msg: string) => void },
+    ctx: RunContext,
 ): RunSession {
     const config = { configurable: { thread_id: threadId } };
 
@@ -193,7 +203,12 @@ function makeSession(
         }
     }
 
-    return { threadId, conductor, getState, resume };
+    return {
+        threadId,
+        conductor,
+        getState: () => runWithContext(ctx, getState),
+        resume: (decision, feedback) => runWithContext(ctx, () => resume(decision, feedback)),
+    };
 }
 
 // ─── Autonomous run ─────────────────────────────────────────────────────────
@@ -296,7 +311,7 @@ export async function runHumanInTheLoop(opts: RunOptions): Promise<RunSession> {
             return handleRunCrash(conductor, config, err, log, 'HITL run failed during initial invoke');
         }
 
-        return makeSession(conductor, threadId, log);
+        return makeSession(conductor, threadId, log, ctx);
     });
 }
 
@@ -437,6 +452,6 @@ export async function continueRun(
             return handleRunCrash(conductor, config, err, continueLog, 'Continued HITL run failed during initial invoke');
         }
 
-        return makeSession(conductor, threadId, continueLog);
+        return makeSession(conductor, threadId, continueLog, ctx);
     });
 }

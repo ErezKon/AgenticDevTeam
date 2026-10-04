@@ -3,10 +3,11 @@
  *
  * Extracted from pr-workflow.ts (Sub-Plan 25-08).
  */
-import { execSync } from 'child_process';
 import { Octokit } from '@octokit/rest';
 import { getLogger } from '../../utils/logger';
 import { emitRunEvent } from '../../utils/event-bus';
+import { execSync } from '../../utils/shell-exec';
+import { traceOctokit } from '../../utils/debug-trace';
 import { GITHUB_TOKEN, GITHUB_OWNER, GITHUB_REPO } from '../../config';
 import { GITHUB_MODE, createLocalGitHub } from '../../utils/github-local';
 import { classifyPrFailure, isFatalPrFailure } from '../pr-failure';
@@ -26,13 +27,13 @@ export function getOctokit(gitContext?: GitContext | null): Octokit {
     if (GITHUB_MODE === 'local') {
         // Return a local GitHub stand-in backed by a bare repo
         const bareRepoPath = _localBareRepoPath ?? gitContext?.repo ?? '';
-        return createLocalGitHub(bareRepoPath) as unknown as Octokit;
+        return traceOctokit(createLocalGitHub(bareRepoPath), 'github-local') as unknown as Octokit;
     }
     const token = gitContext?.token ?? GITHUB_TOKEN;
     if (!token) {
         throw new Error('GITHUB_TOKEN is not set. Cannot perform GitHub API operations.');
     }
-    return new Octokit({ auth: token });
+    return traceOctokit(new Octokit({ auth: token }), 'github');
 }
 
 /**

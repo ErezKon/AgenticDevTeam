@@ -2,13 +2,11 @@
  * Git helpers used by pipeline nodes — branch detection, commit+push,
  * lockfile sync, and Dockerfile SSL patching.
  */
-import { execSync, execFile } from 'child_process';
-import { promisify } from 'util';
 import * as path from 'path';
 import * as fs from 'fs';
 
-const execFileAsync = promisify(execFile);
 import { getLogger } from '../../utils/logger';
+import { execSync, execFileAsync } from '../../utils/shell-exec';
 import { gitExec, gitPush, findGitRoot } from '../../utils/git-exec';
 import { syncWorkspaceToBranch } from '../workspace-sync';
 import { GIT_DEFAULT_BRANCH } from '../../config';

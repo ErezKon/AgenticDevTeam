@@ -18,9 +18,9 @@ import {
     isToolMessage,
     type BaseMessage,
 } from '@langchain/core/messages';
-import { execSync } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
+import { execSync } from '../utils/shell-exec';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 

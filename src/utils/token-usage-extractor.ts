@@ -13,6 +13,7 @@
  * per-call and per-invocation paths cannot drift (Plan 21, D).
  */
 import { AIMessage } from '@langchain/core/messages';
+import type { LLMResult } from '@langchain/core/outputs';
 import type { TokenCallRecord } from './token-tracker';
 
 // ─── Shared normalisation helpers ───────────────────────────────────────────
@@ -109,6 +110,30 @@ export function sumUsageMetadata(messages: any[] | undefined): UsageTotals | nul
     return found
         ? { inputTokens, outputTokens, totalTokens, cacheReadTokens, cacheCreationTokens }
         : null;
+}
+
+/**
+ * Token usage of a single LLM call, from the `LLMResult` a callback receives.
+ *
+ * Two-tier lookup (Plan 21, D) — no single field covers every provider:
+ *   1. provider-level `llmOutput` (`tokenUsage`, `token_usage`, `usage`, `estimatedTokenUsage`);
+ *   2. per-generation `message.usage_metadata` (streaming Anthropic, Google Gemini).
+ * Tier 2 is only consulted when tier 1 is absent, so providers that populate
+ * both are never double-counted. Shared by token-callback.ts and the debug trace.
+ */
+export function usageFromLLMResult(output: LLMResult): UsageTotals | null {
+    const providerLevel = normaliseUsage(
+        output.llmOutput?.tokenUsage
+        ?? output.llmOutput?.token_usage
+        ?? output.llmOutput?.usage
+        ?? output.llmOutput?.estimatedTokenUsage,
+    );
+    if (providerLevel) return providerLevel;
+    const messages = (output.generations ?? [])
+        .flat()
+        .map((g: any) => g?.message)
+        .filter(Boolean);
+    return sumUsageMetadata(messages);
 }
 
 // ─── Per-invocation aggregation ─────────────────────────────────────────────

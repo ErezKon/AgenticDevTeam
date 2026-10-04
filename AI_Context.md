@@ -34,7 +34,7 @@
 
 13. **No shell injection.** Never pass LLM-controlled or user-controlled strings to `execSync('cmd ' + arg)`. Always use `execFileSync(cmd, [arg1, arg2])` or the shared `gitExec()`/`defaultExec()`. Validate refs with `assertValidRef()`. Plan 25 found ~20 shell injection sinks via string concatenation in git commands.
 
-14. **No secrets in URLs, logs, or LLM context.** Never embed tokens in git remote URLs. Never return unredacted state from API endpoints. Never expose `process.env` keys to LLM-authored shell commands. Use `redactSecrets()` on all git output. Use `safeChildEnv()` (allowlisted env) for all child processes — never `{ ...process.env }`. Plan 25 found the GitHub PAT in every generated project's `.git/config`, in API responses, and in LLM tool output.
+14. **No secrets in URLs, logs, or LLM context.** Never embed tokens in git remote URLs. Never return unredacted state from API endpoints. Never expose `process.env` keys to LLM-authored shell commands. Use `redactSecrets()` (`src/utils/redact.ts`) on all git output. Use `safeChildEnv()` (allowlisted env) for all child processes — never `{ ...process.env }`. Plan 25 found the GitHub PAT in every generated project's `.git/config`, in API responses, and in LLM tool output.
 
 15. **No process-wide TLS disable.** Never set `NODE_TLS_REJECT_UNAUTHORIZED=0` globally. Use `NODE_EXTRA_CA_CERTS` for corporate CAs. Gate any `strict-ssl false` behind an explicit opt-in flag. Plan 25 found TLS disabled in 6 locations across the codebase.
 
@@ -127,7 +127,8 @@ src/
 
   conductor/                       # LangGraph orchestration layer
     state.ts                       # ProjectState (Annotation + reducers, incl. _stopReason)
-    graph.ts                       # StateGraph wiring + conditional edges + HITL
+    graph.ts                       # StateGraph wiring + conditional edges + HITL; every node/router wrapped by graph-trace at registration
+    graph-trace.ts                 # DEBUG_MODE: traceNode (node start/end/error + state vitals) and traceRoute (conditional-edge decisions); identity when off
     nodes/                         # Phase node functions (split into focused modules)
       index.ts                     # Barrel re-export of all 13 node functions
       _invoke.ts                   # invokeAgent<S>() (generic over Zod schema), getModelForAgent()
@@ -142,7 +143,7 @@ src/
       e2e.ts                       # e2eNode (Phase 9b, Playwright + smoke fallback)
       acceptance.ts                # acceptanceNode (Phase 10)
       finalize.ts                  # finalizeNode (Phase 11, reporting + teardown)
-    run.ts                         # Autonomous & HITL run helpers + continueRun + handleRunCrash + makeSession
+    run.ts                         # Autonomous & HITL run helpers + continueRun + handleRunCrash + makeSession (session getState/resume re-enter the run's RunContext)
     pr-workflow.ts                 # Backward-compatible re-export shim (~80 lines)
     pr/                            # PR workflow modules (Sub-Plan 25-08)
       index.ts                     # Barrel re-export
@@ -237,7 +238,7 @@ src/
     docker-runner.ts               # Dockerode build/run/healthcheck
 
   utils/
-    logger.ts                      # Per-agent colored console + file logger
+    logger.ts                      # Per-agent colored console + file logger; debug() only prints when DEBUG_MODE=true; every line mirrored into the debug trace
     oauth-auth.util.ts             # OAuth2 client-credentials token cache
     workspace.ts                   # Project workspace + output dir creation
     retry.ts                       # Exponential backoff + jitter for LLM calls
@@ -248,15 +249,19 @@ src/
     run-budget.ts                  # Graceful degradation on budget limits + shouldStopRun()
     structured-output.ts           # JSON extraction + Zod validation + repair + content-block text extraction
     response-log.ts                # Full-response dumps (outputs/<run>/full-responses/*.json + index.jsonl)
+    debug-trace.ts                 # DEBUG_MODE trace writer (outputs/<run>/debug/): trace(), withTraceContext(), traceSync/traceAsync, traceToolCall, traceOctokit, serializeError, writeDebugSummary; redaction + clipping; per-run via RunContext
+    debug-llm-callback.ts          # DEBUG_MODE LangChain callback (_awaitHandler): exact post-compaction LLM requests (messages de-duplicated per agent instance), responses, usage, provider errors
+    debug-environment.ts           # DEBUG_MODE environment.json: runtime, app version + git commit (read via fs), masked config snapshot
+    redact.ts                      # Dependency-free secret redaction: redactSecrets() patterns + redactValues() exact configured-secret scrub
     run-context.ts                 # Per-run AsyncLocalStorage context (RunContext class + lastKnownState + setLastKnownState); makes all singletons safe for concurrent server runs; Plan 27-G: lastKnownState updated at each phase entry for graceful shutdown
     event-bus.ts                   # Typed event bus (17 event types, incl. run:budget-stop, run:provider-stop, branch:partial-failure, branch:gates-blocked, dispatch:halted); context-aware via RunContext
     token-tracker.ts               # Token consumption tracker; context-aware via RunContext Proxy; Plan 25-11: appends JSONL per call (O(1)), debounces full JSON flush every 10s
     token-callback.ts              # LangChain callback for token recording (two-tier provider lookup)
-    token-usage-extractor.ts       # Shared usage normalisation (normaliseUsage/sumUsageMetadata) + per-invocation aggregation
+    token-usage-extractor.ts       # Shared usage normalisation (normaliseUsage/sumUsageMetadata/usageFromLLMResult) + per-invocation aggregation
     token-report.ts                # HTML + JSON token usage report generator
     cost.ts                        # USD cost estimation per model
     run-snapshot.ts                # state.json + run-manifest.json writer + writePeriodicSnapshot(); Plan 25-11: debounced full snapshots (30s min interval) + immediate latest-phase.json marker
-    git-exec.ts                    # Centralized git command execution (execFileSync, shellSplit, assertValidRef, redactSecrets)
+    git-exec.ts                    # Centralized git command execution (gitExec/gitExecVerbose/gitPush via shell-exec's traced execFileSync, shellSplit, assertValidRef)
     coding-conventions.ts          # Convention file resolution + deployment
     traceability.ts                # Requirements traceability matrix
     codebase-analysis-writer.ts    # Write analysis markdown
@@ -264,7 +269,7 @@ src/
     fs-walk.ts                     # Shared filesystem walker (PRUNE_DIRS, SOURCE_EXTENSIONS, walkDir, collectFiles, isTestFile)
     source-graph.ts                # Import extraction + resolution + graph building + transitive reachability
     markdown-table.ts              # Shared mdTable() + mdSection() with automatic pipe-escaping
-    shell-exec.ts                  # Shared ExecFn type, safeChildEnv, defaultExec/isToolAvailable; Plan 25-11: async AsyncExecFn, defaultExecAsync, isToolAvailableAsync (execFile + promises)
+    shell-exec.ts                  # Shared ExecFn type, safeChildEnv, defaultExec/isToolAvailable; Plan 25-11: async AsyncExecFn, defaultExecAsync, isToolAvailableAsync (execFile + promises); traced child_process drop-ins (execSync, execFileSync, execFileAsync, execCapture) — the ONLY module that imports child_process
     branch-naming.ts               # Canonical slugify, systemBranch, featureBranch, projectSlugFromBranch, isSystemBranch
     artifact-writer.ts             # writeOutputFile + appendOutputLine for output-dir artifacts
     workspace-index.ts             # buildWorkspaceIndex() — pre-built file index passed to all gates
@@ -277,6 +282,7 @@ src/
 
   templates/
     codebase-analysis.template.ts  # Markdown renderer for CodebaseAnalysis
+    debug-trace-readme.template.ts # README written into outputs/<run>/debug/ (record schema + AI analysis guide)
 
   types/
     shims.d.ts                     # Module declarations (pdf-parse, mammoth)
@@ -303,6 +309,7 @@ tests/                             # Jest test suite (ts-jest)
     state-factory.ts               # makeState(overrides?) — canonical ProjectStateType fixture
     tmp.ts                         # makeTempDir(), withTempDir() — temp dir lifecycle
     git.ts                         # git(), createTestRepo() — isolated git helpers
+    jsonl.ts                       # readJsonl(file) — parse JSONL artifacts (debug/trace.jsonl, errors.jsonl)
   *.test.ts                        # 87 test files (Sub-Plan 25-13 + Plan 26)
   # Notable new test files (Sub-Plan 25-13):
   # provider-failure.test.ts        — classifyProviderFailure, isProviderLevelFailure, ProviderRecoveryFailedError
@@ -313,6 +320,9 @@ tests/                             # Jest test suite (ts-jest)
   # workspace.test.ts               — resolveWorkspacePath (security-critical path resolution)
   # pr-body.test.ts                 — buildPRTitle, buildPRDescription (pure functions)
   # acceptance-gate.regression.test.ts — (renamed from regression-plan19.test.ts, tautological tests removed)
+  # Debug mode: debug-trace, shell-exec-trace, debug-llm-callback, graph-trace, tool-trace, logger-debug-gating
+  #   (enable via jest.mock('../src/config', () => ({ ...jest.requireActual('../src/config'), DEBUG_MODE: true })))
+  # run-session-context.test.ts     — HITL getState()/resume() re-enter the run's RunContext
 
 Plans/                             # Historical plan documents (01 … 21) + implementation reports
 specs/
@@ -969,6 +979,33 @@ invocation, including repair attempts) write `outputs/<run>/full-responses/<seq>
 with `{ meta, user_message, model_request: { messages, structuredResponse? } }`, plus one
 summary line per invocation in `index.jsonl`. Never throws; a write failure is a warning.
 
+### Debug Trace (`debug-trace.ts`) — `DEBUG_MODE`
+
+Opt-in (`DEBUG_MODE=true`) verbose diagnostics meant to be handed to an AI for root-cause
+analysis. `initDebugTrace(outputPath)` (intake + `rehydrateSingletons` for continue-run) opens
+`outputs/<run>/debug/` and writes `README.md` (schema, from `templates/debug-trace-readme.template.ts`)
+and `environment.json` (`debug-environment.ts`). Records go to `trace.jsonl`; failures are also copied
+to `errors.jsonl` (same `seq`); `writeDebugSummary()` (finalize, `handleRunCrash`, graceful shutdown)
+writes `summary.json`.
+
+| Hook | Where | Records |
+|------|-------|---------|
+| LangChain model callback (`DebugTraceCallbackHandler`, `_awaitHandler: true`) | `buildAgent()` in `agent-factory.ts` | `llm` start/end/error — exact post-compaction request, messages de-duplicated per agent instance by hash (`{ ref }` after first sight), response, usage, stop reason, provider errors |
+| `traceToolCall()` around each guarded tool fn | `withLoopGuard()` in `tool-loop-guard.ts` | `tool` end/error — args, result as the agent saw it, budget usage; sets `agentId` context for nested commands |
+| Traced `child_process` drop-ins | `shell-exec.ts` (`execSync`, `execFileSync`, `execFileAsync`, `execCapture`) | `exec` — program, command, cwd, exit code, signal, stdout/stderr (tail-weighted), duration, calling `file:line`; `probe: true` for expected non-zero exits |
+| `traceNode()` / `traceRoute()` | `graph.ts` registration (`graph-trace.ts`) | `node` start/end/error with state vitals + update summary; `route` decisions; sets `phase` context |
+| `withTraceContext({ branch })` | `executePRWorkflow` call in `dispatcher.ts` | `branch` attribution for everything a branch workflow does |
+| `traceOctokit()` | `getOctokit()` (`pr-github.ts`), `github-repo-manager.ts` | `http` — GitHub API calls (Octokit `hook.wrap`, or a Proxy for the local stand-in) |
+| Direct `trace()` calls | `docker-runner.ts`, `retry.ts`, `run.ts` (`handleRunCrash`), `crash-handlers.ts` | `docker`, `retry`, `run`/crash, `crash` (uncaught/unhandled/signal) |
+| Mirrors | `logger.ts`, `event-bus.ts`, `run-ledger.ts`, `response-log.ts` | `log`, `event`, `ledger`, `response` (pointer to the full-responses dump) |
+
+Invariants (do not break):
+- **Off = identical behaviour.** Every hook returns the original function/object or calls straight through, and nothing is written. Config is read lazily; `undefined` (partial `jest.mock('../src/config')`) counts as off.
+- **On = observe only.** Same arguments, same return values, the *same* thrown error objects. A LangChain `wrapToolCall` middleware was rejected on purpose: with one registered, ToolNode re-raises tool exceptions instead of converting them to ToolMessages.
+- **Never throws**; write failures are reported once via `console.error`. `debug-trace.ts` must not import `logger`, `artifact-writer` or `git-exec` (import cycle) — redaction lives in the dependency-free `redact.ts`.
+- **Every string is redacted, then clipped** (`DEBUG_TRACE_MAX_FIELD_CHARS`, head/tail + marker): secret patterns plus exact configured secret values (GitHub tokens incl. their base64 `x-access-token` form, provider API keys, OAuth client secret). Prompts and code are intentionally captured.
+- **Per-run state** (`DebugTraceState` on `RunContext`, `_active()` pattern); records traced before init are buffered (bounded) and flushed; process-level crash records fall back to the most recently initialised run. Appends are synchronous (like `run-ledger.ts`) for ordering and crash safety — debug mode only.
+
 ---
 
 ## Run Modes
@@ -1130,6 +1167,7 @@ tests/continue-integration.test.ts  # Integration tests (full flow, singletons, 
 - `traceability.json` -- Requirements traceability matrix (machine-readable, if `TRACEABILITY_JSON=true`)
 - `codebase-analysis.md` -- (Maintain mode) Snapshot of codebase analysis
 - `checkpoints.json` -- (If `CHECKPOINT_PERSIST=true`) LangGraph checkpoints
+- `debug/` -- (If `DEBUG_MODE=true`) `trace.jsonl`, `errors.jsonl`, `summary.json`, `environment.json`, `README.md`
 
 ### Per Project (`generated-projects/<name>/` or existing project)
 - `docs/agents/*.md` -- Mission reports from each agent
@@ -1338,7 +1376,9 @@ When referenced in code comments, these plans are cited as "fixes A1", "fixes A2
 12. **Only `source: 'executed'` test reports count toward coverage and routing** — agent self-reported (`claimed`) test results are advisory only and do not drive pipeline decisions.
 13. **`completed` now means accepted by the acceptance gate** — never a false positive. The `finalStatus` is one of `completed`, `failed`, `partial`, or `inconclusive`, determined by the deterministic acceptance gate.
 14. **`.agent/` is gitignored in generated projects** — the `repo-contract.json` and other machine-generated files live there and must not be committed.
-15. **Singletons are per-run in server mode** — `token-tracker`, `event-bus`, `run-budget`, `run-ledger`, `response-log`, `logger`, `run-snapshot`, `history-compactor` memo/stats, and `prompt-cache` breakpoint set are scoped per-run via `RunContext` + `AsyncLocalStorage` (Plan 25-14). Module-level globals remain as CLI-mode defaults. New singletons must follow the `_active()` pattern or use `RunContext` to avoid cross-run contamination.
+15. **Singletons are per-run in server mode** — `token-tracker`, `event-bus`, `run-budget`, `run-ledger`, `response-log`, `logger`, `run-snapshot`, `debug-trace`, `history-compactor` memo/stats, and `prompt-cache` breakpoint set are scoped per-run via `RunContext` + `AsyncLocalStorage` (Plan 25-14). Module-level globals remain as CLI-mode defaults. New singletons must follow the `_active()` pattern or use `RunContext` to avoid cross-run contamination. Code invoked later from outside the run's async scope (HITL `session.getState()` / `session.resume()`) must re-enter it with `runWithContext(ctx, …)` — `makeSession()` does; before it did, every per-run singleton went dark after the first HITL approval.
+16. **Spawn child processes only through `shell-exec.ts`** (`execSync`, `execFileSync`, `execFileAsync`, `execCapture`) or the higher-level `gitExec()` / `defaultExec()` / `defaultExecAsync()` — never import `child_process` directly. These drop-ins are what make `DEBUG_MODE` traces complete; a direct import is invisible to the trace. They resolve `child_process` at call time, so `jest.mock('child_process')` / `jest.spyOn` keep working.
+17. **`logger.debug()` is gated by `DEBUG_MODE`** — debug lines are dropped unless `DEBUG_MODE=true`. Use `info` for anything a normal run must show.
 
 ---
 

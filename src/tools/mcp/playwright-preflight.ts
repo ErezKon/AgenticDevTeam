@@ -5,8 +5,8 @@
  * Sub-Plan 11: the retroboard3 failure was `Connection closed` with no
  * diagnostic retained. This preflight provides actionable errors.
  */
-import { execSync } from 'child_process';
 import { getLogger } from '../../utils/logger';
+import { execSync } from '../../utils/shell-exec';
 import {
     PLAYWRIGHT_MCP_STARTUP_TIMEOUT_MS,
     PLAYWRIGHT_MCP_CONNECT_RETRIES,

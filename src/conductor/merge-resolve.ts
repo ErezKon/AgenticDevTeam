@@ -6,10 +6,10 @@
  * `unresolved` list so the caller can hand them to a dev agent or
  * report a blocker (Sub-Plan 06 SS5c).
  */
-import { execSync } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import { getLogger } from '../utils/logger';
+import { execSync } from '../utils/shell-exec';
 
 const log = getLogger('[MergeResolve]', 135);
 

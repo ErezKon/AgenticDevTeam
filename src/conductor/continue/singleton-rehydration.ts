@@ -21,10 +21,12 @@ import { tokenTracker } from '../../utils/token-tracker';
 import { refreshTokenReport } from '../../utils/token-report';
 import { initLedger } from '../../utils/run-ledger';
 import { initResponseLog } from '../../utils/response-log';
+import { initDebugTrace } from '../../utils/debug-trace';
 import { startRunBudget } from '../../utils/run-budget';
 import { GITHUB_MODE } from '../../utils/github-local';
 import { setLocalBareRepoPath } from '../pr-workflow';
-import { gitExec, redactSecrets } from '../../utils/git-exec';
+import { gitExec } from '../../utils/git-exec';
+import { redactSecrets } from '../../utils/redact';
 import type { CollectedRunState } from './state-collector';
 
 const log = getLogger('[SingletonRehydration]', 177);
@@ -73,6 +75,15 @@ export function rehydrateSingletons(
     // from 0 but that's fine — the index.jsonl is also append-only.
     initResponseLog(outputPath);
     log.info('Response log initialised');
+
+    // ── 3b. Debug trace (DEBUG_MODE) — appends a new session to debug/trace.jsonl
+    const debugDir = initDebugTrace(outputPath, {
+        continuation: true,
+        systemName: state.input?.systemName,
+        runType: state.input?.runType,
+        stopReason: state._stopReason ?? null,
+    });
+    if (debugDir) log.info(`DEBUG_MODE on — verbose trace (secrets redacted, prompts/code included): ${debugDir}`);
 
     // ── 4. Token tracker ─────────────────────────────────────────────────
     // Restore previous token usage so budget calculations account for

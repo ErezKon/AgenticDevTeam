@@ -14,6 +14,8 @@ import { withLoopGuard, type ToolBudgets } from './tool-loop-guard';
 import { compactHistory, recordCompaction, sanitizeStreamingContentBlocks, normaliseAIMessageForState } from './history-compactor';
 import { withSystemCacheBreakpoint, withMessageCacheBreakpoints, MAX_CACHE_BREAKPOINTS } from './prompt-cache';
 import { TokenUsageCallbackHandler } from '../../utils/token-callback';
+import { DebugTraceCallbackHandler } from '../../utils/debug-llm-callback';
+import { isDebugMode } from '../../utils/debug-trace';
 import { createChatModel, detectProvider } from './llm-provider';
 import { getLogger } from '../../utils/logger';
 
@@ -81,6 +83,7 @@ export function buildAgent(apiKey: string, cfg: AgentConfig) {
     const modelName = cfg.model ?? LLM_MODEL;
     const provider = detectProvider(modelName);
     const tokenCallback = new TokenUsageCallbackHandler(cfg.id, modelName, cfg.phase ?? cfg.id);
+    const debugCallback = isDebugMode() ? new DebugTraceCallbackHandler(cfg.id, modelName, cfg.phase ?? cfg.id) : null;
 
     // Enable JSON mode when a response schema is set AND the agent has no tools
     // (tool-using agents produce intermediate non-JSON responses during the ReAct loop).
@@ -117,7 +120,7 @@ export function buildAgent(apiKey: string, cfg: AgentConfig) {
         temperature: cfg.temperature ?? 0.3,
         maxTokens: cfg.maxOutputTokens ?? LLM_MAX_OUTPUT_TOKENS,
         timeout: cfg.timeout ?? LLM_REQUEST_TIMEOUT_MS,
-        callbacks: [tokenCallback],
+        callbacks: debugCallback ? [tokenCallback, debugCallback] : [tokenCallback],
         // OpenAI-specific options (ignored by Anthropic/Google)
         apiKey: effectiveApiKey,
         baseURL: LLM_BASE_URL,
@@ -278,7 +281,10 @@ export function buildAgent(apiKey: string, cfg: AgentConfig) {
          *  reads it from here to record both halves of the conversation. */
         systemPromptText: prompt,
         /** Tag all subsequent LLM calls with an invocation ID for per-invocation attribution. */
-        setInvocationId: (id: string | undefined) => tokenCallback.setInvocationId(id),
+        setInvocationId: (id: string | undefined) => {
+            tokenCallback.setInvocationId(id);
+            debugCallback?.setInvocationId(id);
+        },
     });
 }
 

@@ -6,7 +6,7 @@
  * as fallback defaults when no context is active (backward-compatible CLI mode).
  *
  * Each singleton module (token-tracker, event-bus, run-budget, run-ledger,
- * response-log, logger, run-snapshot) checks `getRunContext()` and uses
+ * response-log, logger, run-snapshot, debug-trace) checks `getRunContext()` and uses
  * the per-run instance if found, otherwise falls back to its module-level
  * default.
  *
@@ -66,6 +66,31 @@ export class RunSnapshotState {
     snapshotTimer: ReturnType<typeof setTimeout> | null = null;
 }
 
+/** Aggregates behind `debug/summary.json` — maintained by debug-trace.ts. */
+export interface DebugTraceStats {
+    records: number;
+    failures: number;
+    byKind: Record<string, number>;
+    failuresByKind: Record<string, number>;
+    llmByAgent: Record<string, { calls: number; errors: number; inputTokens: number; outputTokens: number; totalMs: number }>;
+    execByProgram: Record<string, { count: number; failures: number; totalMs: number }>;
+    slowest: Array<{ seq: number; kind: string; label: string; durationMs: number }>;
+    firstFailures: Array<{ seq: number; kind: string; label: string }>;
+}
+
+/** Per-run debug-trace state — mirrors debug-trace.ts module-level variables. */
+export class DebugTraceState {
+    dir: string | null = null;
+    seq = 0;
+    /** Records traced before `initDebugTrace()` ran — flushed on init (bounded). */
+    pending: Array<{ line: string; failure: boolean }> = [];
+    droppedPending = 0;
+    readonly stats: DebugTraceStats = {
+        records: 0, failures: 0, byKind: {}, failuresByKind: {},
+        llmByAgent: {}, execByProgram: {}, slowest: [], firstFailures: [],
+    };
+}
+
 /** Cumulative compaction stats shape — mirrors history-compactor.ts accumulator. */
 export interface CompactionStatsAccumulator {
     invocations: number;
@@ -97,6 +122,7 @@ export class RunContext {
     readonly responseLog = new ResponseLogState();
     readonly logger = new LoggerState();
     readonly snapshot = new RunSnapshotState();
+    readonly debugTrace = new DebugTraceState();
 
     /** Per-run compaction memo (fixes history-compactor single-slot global). */
     readonly compactionMemo = new Map<string, string>();
