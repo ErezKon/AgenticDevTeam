@@ -1,0 +1,831 @@
+[
+  {
+    "id": "ASSIGN-001",
+    "storyId": "US-035",
+    "additionalStoryIds": [],
+    "taskIds": [
+      "TASK-068"
+    ],
+    "acIndexes": [],
+    "devAgentId": "principal-frontend",
+    "rank": "principal",
+    "priority": "critical",
+    "complexity": "moderate",
+    "estimate": "4h",
+    "description": "SCAFFOLD (Config & Entry Points). Create package.json (scripts: start/build/test per repo contract), angular.json (standalone component build config, bundle budgets enforcing <2MB per US-034), tsconfig.json, index.html, and src/main.ts (MOD-MAIN) bootstrapping the root AppComponent with provideRouter/provideAnimations as needed. Do NOT implement game logic here — just the build pipeline and bootstrap entry. src/main.ts and angular.json become FROZEN after this; all later assignments must not modify them.",
+    "dependsOn": [],
+    "branchName": "claudeopus5/chore/scaffold",
+    "reviewerAgentIds": [
+      "principal-backend"
+    ],
+    "taskType": "chore",
+    "moduleIds": [
+      "MOD-MAIN"
+    ]
+  },
+  {
+    "id": "ASSIGN-002",
+    "storyId": "US-001",
+    "additionalStoryIds": [
+      "US-017",
+      "US-018"
+    ],
+    "taskIds": [
+      "TASK-001",
+      "TASK-005",
+      "TASK-039",
+      "TASK-042",
+      "TASK-067"
+    ],
+    "acIndexes": [],
+    "devAgentId": "senior-frontend",
+    "rank": "senior",
+    "priority": "critical",
+    "complexity": "moderate",
+    "estimate": "6h",
+    "description": "SCAFFOLD (Type Definitions & Frozen Data). Create src/app/shared/types.ts (MOD-SHARED-TYPES: Direction, Tile, GhostName, GhostState, Mode, GameScreen, HighScoreEntry, Fruit, GhostCollisionResult) — this file becomes FROZEN after creation. Create src/app/game/maze/maze.model.ts (MOD-MAZE: MAZE_LAYOUT static tile grid, getTileAt, isWalkable, Maze interface) with unit tests maze.model.spec.ts. Create src/app/game/levels/level-config.ts (MOD-LEVEL-CONFIG: getLevelConfig, LevelConfig interface) covering 20+ levels with difficulty scaling capping at level 20, plus level-config.spec.ts. Also scaffold ngsw-config.json and register ServiceWorkerModule for offline precaching (app shell, assets, audio) per @angular/service-worker.",
+    "dependsOn": [
+      "ASSIGN-001"
+    ],
+    "branchName": "claudeopus5/chore/scaffold",
+    "reviewerAgentIds": [
+      "principal-frontend",
+      "principal-backend"
+    ],
+    "taskType": "chore",
+    "moduleIds": [
+      "MOD-SHARED-TYPES",
+      "MOD-MAZE",
+      "MOD-LEVEL-CONFIG"
+    ]
+  },
+  {
+    "id": "ASSIGN-003",
+    "storyId": "US-035",
+    "additionalStoryIds": [],
+    "taskIds": [
+      "TASK-004"
+    ],
+    "acIndexes": [],
+    "devAgentId": "junior-angular",
+    "rank": "junior",
+    "priority": "critical",
+    "complexity": "moderate",
+    "estimate": "3h",
+    "description": "[STUBS] SCAFFOLD (Module Stubs). Create placeholder stub files (throw new Error('not implemented') or minimal empty-shell components/services) for every remaining module path so parallel feature branches compile: AppComponent, StartScreenComponent, CountdownComponent, GameplayComponent, HudComponent, TouchControlsComponent, PauseOverlayComponent, LevelCompleteComponent, GameOverComponent, HighScoreEntryComponent, GameStateService, GameEngineService, PacMan, Ghost, ghost-ai.ts, CollisionService, InputService, AudioService, RendererService, ScoreStorageService, SettingsStorageService. These are intentional placeholders to be replaced by real implementations in feature branches — tag all stub files with a `// [STUB]` comment.",
+    "dependsOn": [
+      "ASSIGN-002"
+    ],
+    "branchName": "claudeopus5/chore/scaffold",
+    "reviewerAgentIds": [
+      "senior-frontend",
+      "principal-frontend"
+    ],
+    "taskType": "chore",
+    "moduleIds": []
+  },
+  {
+    "id": "ASSIGN-004",
+    "storyId": "US-001",
+    "additionalStoryIds": [
+      "US-002",
+      "US-003"
+    ],
+    "taskIds": [
+      "TASK-003",
+      "TASK-006",
+      "TASK-009"
+    ],
+    "acIndexes": [],
+    "devAgentId": "principal-frontend",
+    "rank": "principal",
+    "priority": "critical",
+    "complexity": "complex",
+    "estimate": "10h",
+    "description": "Implement GameEngineService (MOD-GAME-ENGINE, src/app/game/engine/game-engine.service.ts): fixed-timestep loop using requestAnimationFrame decoupled from variable frame rate, advancing entity positions each tick, consuming the InputService direction stream (stub initially, wired fully once InputService lands), and triggering collision checks each tick. Write game-engine.service.spec.ts verifying update counts over a timed interval are frame-rate independent. Owns and will be the canonical home for level/scared/scatter-chase timers added by later branches (TASK-016/017/040/041) — keep the public API extensible via simple methods other services can call.",
+    "dependsOn": [
+      "ASSIGN-003"
+    ],
+    "branchName": "claudeopus5/feature/us-001-engine-rendering-core",
+    "reviewerAgentIds": [
+      "principal-backend"
+    ],
+    "taskType": "feature",
+    "moduleIds": [
+      "MOD-GAME-ENGINE"
+    ]
+  },
+  {
+    "id": "ASSIGN-005",
+    "storyId": "US-001",
+    "additionalStoryIds": [
+      "US-004"
+    ],
+    "taskIds": [
+      "TASK-002",
+      "TASK-010"
+    ],
+    "acIndexes": [],
+    "devAgentId": "senior-frontend",
+    "rank": "senior",
+    "priority": "critical",
+    "complexity": "moderate",
+    "estimate": "8h",
+    "description": "Implement RendererService (MOD-RENDERER, src/app/game/render/renderer.service.ts) drawing the maze (walls/corridors/dots/power pellets/tunnel/ghost house) from MAZE_LAYOUT onto an HTML5 canvas, plus Pac-Man with chomp open/close animation and directional sprite orientation matching travel direction (freezes when stationary). Ensure cross-browser rendering (Chrome/Firefox/Safari/Edge) with no artifacts. This module will be extended later by ghost rendering (TASK-018), scared/eyes states (TASK-026), fruit (TASK-036), and colorblind palette (TASK-061) — keep draw methods modular (drawMaze, drawPacman, etc.) for easy extension.",
+    "dependsOn": [
+      "ASSIGN-003"
+    ],
+    "branchName": "claudeopus5/feature/us-001-engine-rendering-core",
+    "reviewerAgentIds": [
+      "principal-frontend",
+      "principal-backend"
+    ],
+    "taskType": "feature",
+    "moduleIds": [
+      "MOD-RENDERER"
+    ]
+  },
+  {
+    "id": "ASSIGN-006",
+    "storyId": "US-003",
+    "additionalStoryIds": [
+      "US-005"
+    ],
+    "taskIds": [
+      "TASK-007",
+      "TASK-008",
+      "TASK-011",
+      "TASK-012"
+    ],
+    "acIndexes": [],
+    "devAgentId": "senior-frontend",
+    "rank": "senior",
+    "priority": "high",
+    "complexity": "moderate",
+    "estimate": "8h",
+    "description": "Implement InputService (MOD-INPUT, src/app/game/input/input.service.ts) normalizing keyboard arrow keys/WASD into a single direction RxJS stream within one animation frame, with input.service.spec.ts. Implement PacMan entity (MOD-PACMAN, src/app/game/entities/pacman.ts): moves in last chosen direction until blocked by a wall tile (using isWalkable from MOD-MAZE), stops exactly at wall boundaries without jitter/pass-through, with pacman.spec.ts covering movement and wall collision. Touch/swipe input will extend this service later (TASK-063) — expose the direction stream as a shared Subject consumable by multiple input sources.",
+    "dependsOn": [
+      "ASSIGN-003"
+    ],
+    "branchName": "claudeopus5/feature/us-001-engine-rendering-core",
+    "reviewerAgentIds": [
+      "principal-frontend",
+      "principal-backend"
+    ],
+    "taskType": "feature",
+    "moduleIds": [
+      "MOD-PACMAN",
+      "MOD-INPUT"
+    ]
+  },
+  {
+    "id": "ASSIGN-007",
+    "storyId": "US-006",
+    "additionalStoryIds": [
+      "US-007",
+      "US-008"
+    ],
+    "taskIds": [
+      "TASK-013",
+      "TASK-014",
+      "TASK-015",
+      "TASK-016",
+      "TASK-017",
+      "TASK-019",
+      "TASK-020",
+      "TASK-018"
+    ],
+    "acIndexes": [],
+    "devAgentId": "principal-frontend",
+    "rank": "principal",
+    "priority": "critical",
+    "complexity": "very-complex",
+    "estimate": "16h",
+    "description": "Implement Ghost entity (MOD-GHOST, src/app/game/entities/ghost.ts) and ghost AI (MOD-GHOST-AI, src/app/game/ai/ghost-ai.ts): blinkyTarget (direct chase of Pac-Man tile), pinkyTarget (ambush tile ahead of Pac-Man facing), inkyTarget (flank using Blinky+Pac-Man vectors), clydeTarget (chase-or-scatter-corner by distance threshold), and chooseTarget dispatcher selecting among them by Mode. Implement scatter/chase timer alternation per level config (reads MOD-LEVEL-CONFIG) and ghost-house release sequencing (one ghost released initially, others after configured delays, with timestamped release events) — these timers hook into GameEngineService's tick (modify src/app/game/engine/game-engine.service.ts created in us-001 branch; pull latest first, add timer-check calls without altering its public tick contract). Also render ghosts with color/state visuals in renderer.service.ts (extends MOD-RENDERER, add drawGhost method). Write ghost-ai.spec.ts and timer/release spec files.",
+    "dependsOn": [
+      "ASSIGN-003",
+      "ASSIGN-004"
+    ],
+    "branchName": "claudeopus5/feature/us-006-ghost-ai-behavior",
+    "reviewerAgentIds": [
+      "principal-backend"
+    ],
+    "taskType": "feature",
+    "moduleIds": [
+      "MOD-GHOST",
+      "MOD-GHOST-AI"
+    ]
+  },
+  {
+    "id": "ASSIGN-008",
+    "storyId": "US-009",
+    "additionalStoryIds": [
+      "US-010",
+      "US-011",
+      "US-012"
+    ],
+    "taskIds": [
+      "TASK-021",
+      "TASK-022",
+      "TASK-023",
+      "TASK-024",
+      "TASK-025",
+      "TASK-026",
+      "TASK-027"
+    ],
+    "acIndexes": [],
+    "devAgentId": "senior-frontend",
+    "rank": "senior",
+    "priority": "critical",
+    "complexity": "complex",
+    "estimate": "14h",
+    "description": "Implement CollisionService (MOD-COLLISION, src/app/game/physics/collision.service.ts): dot/power-pellet consumption detection, Pac-Man/ghost collision outcomes (death vs eat-ghost per GhostCollisionResult), tunnel wraparound, fruit pickup. On power pellet eaten: flip all four ghosts to scared state same-frame, reverse their current direction, reduce speed (modify ghost.ts owned by us-006 branch — pull latest, add setScared()/setEyes() methods without breaking existing API). Implement scared-duration flashing in the final 2 seconds (visual flag consumed by renderer) and revert-to-normal timing. Implement eaten-ghost 'eyes' state pathfinding back to ghost house then regenerate/re-release. Implement escalating ghost-eat scoring (200/400/800/1600, reset to 200 on new pellet). Add corresponding scared/flashing/eyes rendering in renderer.service.ts (extends MOD-RENDERER, pull latest from us-001 branch). Write collision.service.spec.ts covering all outcomes.",
+    "dependsOn": [
+      "ASSIGN-007",
+      "ASSIGN-005"
+    ],
+    "branchName": "claudeopus5/feature/us-009-collision-scoring-hud",
+    "reviewerAgentIds": [
+      "principal-frontend",
+      "principal-backend"
+    ],
+    "taskType": "feature",
+    "moduleIds": [
+      "MOD-COLLISION"
+    ]
+  },
+  {
+    "id": "ASSIGN-009",
+    "storyId": "US-013",
+    "additionalStoryIds": [
+      "US-014",
+      "US-015"
+    ],
+    "taskIds": [
+      "TASK-028",
+      "TASK-029",
+      "TASK-030",
+      "TASK-031",
+      "TASK-033"
+    ],
+    "acIndexes": [],
+    "devAgentId": "senior-frontend",
+    "rank": "senior",
+    "priority": "high",
+    "complexity": "complex",
+    "estimate": "10h",
+    "description": "Implement GameStateService core observables (MOD-GAME-STATE, src/app/game/state/game-state.service.ts): score/lives/level counters as BehaviorSubjects. Wire scoring updates from CollisionService events (dot +10, pellet +50, fruit level-specific, ghost-eat escalating). Implement Pac-Man death sequence (brief death animation, decrement lives, reset level with Pac-Man/ghosts at start positions while previously eaten dots remain eaten). Implement extra-life award at first crossing of 10,000 points (once per threshold, plays extra-life sound trigger event). Write game-state.service.spec.ts for scoring and lives logic.",
+    "dependsOn": [
+      "ASSIGN-004",
+      "ASSIGN-008"
+    ],
+    "branchName": "claudeopus5/feature/us-009-collision-scoring-hud",
+    "reviewerAgentIds": [
+      "principal-frontend",
+      "principal-backend"
+    ],
+    "taskType": "feature",
+    "moduleIds": [
+      "MOD-GAME-STATE"
+    ]
+  },
+  {
+    "id": "ASSIGN-010",
+    "storyId": "US-013",
+    "additionalStoryIds": [],
+    "taskIds": [
+      "TASK-032"
+    ],
+    "acIndexes": [
+      0
+    ],
+    "devAgentId": "junior-angular",
+    "rank": "junior",
+    "priority": "medium",
+    "complexity": "simple",
+    "estimate": "3h",
+    "description": "Build HudComponent (MOD-HUD, src/app/screens/gameplay/hud/hud.component.ts) as an Angular standalone component displaying score, lives, and level, subscribed to GameStateService observables. Keep it a pure display component with OnPush change detection.",
+    "dependsOn": [
+      "ASSIGN-009"
+    ],
+    "branchName": "claudeopus5/feature/us-009-collision-scoring-hud",
+    "reviewerAgentIds": [
+      "senior-frontend",
+      "principal-frontend"
+    ],
+    "taskType": "feature",
+    "moduleIds": [
+      "MOD-HUD"
+    ]
+  },
+  {
+    "id": "ASSIGN-011",
+    "storyId": "US-016",
+    "additionalStoryIds": [],
+    "taskIds": [
+      "TASK-034",
+      "TASK-035",
+      "TASK-036",
+      "TASK-037",
+      "TASK-038"
+    ],
+    "acIndexes": [],
+    "devAgentId": "senior-frontend",
+    "rank": "senior",
+    "priority": "high",
+    "complexity": "moderate",
+    "estimate": "8h",
+    "description": "Implement bonus fruit spawn logic (triggered near ~70 and ~170 dots eaten, appearing near ghost house) — add to game-engine.service.ts (pull latest from us-001 branch, add fruit-spawn tick check) and level-specific fruit type/points from MOD-LEVEL-CONFIG. Implement fruit auto-disappear timeout. Add fruit pickup collision and scoring to collision.service.ts (pull latest from us-009 branch). Render bonus fruit sprite in renderer.service.ts (pull latest from us-001 branch). Write fruit.spec.ts covering spawn, timeout, and scoring.",
+    "dependsOn": [
+      "ASSIGN-008",
+      "ASSIGN-004",
+      "ASSIGN-005"
+    ],
+    "branchName": "claudeopus5/feature/us-016-fruit-level-progression",
+    "reviewerAgentIds": [
+      "principal-frontend",
+      "principal-backend"
+    ],
+    "taskType": "feature",
+    "moduleIds": []
+  },
+  {
+    "id": "ASSIGN-012",
+    "storyId": "US-017",
+    "additionalStoryIds": [
+      "US-018"
+    ],
+    "taskIds": [
+      "TASK-040",
+      "TASK-041"
+    ],
+    "acIndexes": [],
+    "devAgentId": "senior-frontend",
+    "rank": "senior",
+    "priority": "high",
+    "complexity": "moderate",
+    "estimate": "6h",
+    "description": "Implement level-complete detection (all dots/pellets eaten triggers GameStateService screen transition to level-complete, modify game-state.service.ts from us-009 branch) and level-advance transition applying the next level's difficulty from getLevelConfig (increased ghost speed, shorter scared duration, more chase-heavy timers) in game-engine.service.ts (us-001 branch). Confirm behavior caps correctly beyond level 20 per MOD-LEVEL-CONFIG already implemented in scaffold.",
+    "dependsOn": [
+      "ASSIGN-004",
+      "ASSIGN-009"
+    ],
+    "branchName": "claudeopus5/feature/us-016-fruit-level-progression",
+    "reviewerAgentIds": [
+      "principal-frontend",
+      "principal-backend"
+    ],
+    "taskType": "feature",
+    "moduleIds": []
+  },
+  {
+    "id": "ASSIGN-013",
+    "storyId": "US-019",
+    "additionalStoryIds": [],
+    "taskIds": [
+      "TASK-043"
+    ],
+    "acIndexes": [],
+    "devAgentId": "junior-angular",
+    "rank": "junior",
+    "priority": "medium",
+    "complexity": "simple",
+    "estimate": "4h",
+    "description": "Build StartScreenComponent (MOD-START-SCREEN, src/app/screens/start-screen/start-screen.component.ts): displays game title and all-time high score loaded from ScoreStorageService (stub until us-027 lands fully — wire against stub interface for now). Start control (button + keyboard Enter/Space + touch tap) emits an event/calls GameStateService to transition to countdown. Ensure visible focus outline on the start control.",
+    "dependsOn": [
+      "ASSIGN-009"
+    ],
+    "branchName": "claudeopus5/feature/us-019-screen-flow",
+    "reviewerAgentIds": [
+      "senior-frontend",
+      "principal-frontend"
+    ],
+    "taskType": "feature",
+    "moduleIds": [
+      "MOD-START-SCREEN"
+    ]
+  },
+  {
+    "id": "ASSIGN-014",
+    "storyId": "US-020",
+    "additionalStoryIds": [],
+    "taskIds": [
+      "TASK-044"
+    ],
+    "acIndexes": [],
+    "devAgentId": "junior-angular",
+    "rank": "junior",
+    "priority": "medium",
+    "complexity": "simple",
+    "estimate": "3h",
+    "description": "Build CountdownComponent (MOD-COUNTDOWN, src/app/screens/countdown/countdown.component.ts): displays 3, 2, 1, GO in sequence with timed delays, then transitions GameStateService to the playing screen. Ensure gameplay/entity movement does not begin until countdown completes (coordinate via GameStateService screen state, no direct engine coupling).",
+    "dependsOn": [
+      "ASSIGN-009"
+    ],
+    "branchName": "claudeopus5/feature/us-019-screen-flow",
+    "reviewerAgentIds": [
+      "senior-frontend",
+      "principal-frontend"
+    ],
+    "taskType": "feature",
+    "moduleIds": [
+      "MOD-COUNTDOWN"
+    ]
+  },
+  {
+    "id": "ASSIGN-015",
+    "storyId": "US-021",
+    "additionalStoryIds": [],
+    "taskIds": [
+      "TASK-045"
+    ],
+    "acIndexes": [],
+    "devAgentId": "junior-angular",
+    "rank": "junior",
+    "priority": "medium",
+    "complexity": "simple",
+    "estimate": "4h",
+    "description": "Build PauseOverlayComponent (MOD-PAUSE-OVERLAY, src/app/screens/pause-overlay/pause-overlay.component.ts) and pause/resume logic: triggering pause freezes all entity movement/timers/animations (coordinate with GameStateService + GameEngineService pause flag) and shows a 'Paused' overlay; resume restores exactly from frozen state with no lost progress.",
+    "dependsOn": [
+      "ASSIGN-009"
+    ],
+    "branchName": "claudeopus5/feature/us-019-screen-flow",
+    "reviewerAgentIds": [
+      "senior-frontend",
+      "principal-frontend"
+    ],
+    "taskType": "feature",
+    "moduleIds": [
+      "MOD-PAUSE-OVERLAY"
+    ]
+  },
+  {
+    "id": "ASSIGN-016",
+    "storyId": "US-022",
+    "additionalStoryIds": [],
+    "taskIds": [
+      "TASK-046"
+    ],
+    "acIndexes": [],
+    "devAgentId": "junior-angular",
+    "rank": "junior",
+    "priority": "medium",
+    "complexity": "simple",
+    "estimate": "3h",
+    "description": "Build LevelCompleteComponent (MOD-LEVEL-COMPLETE, src/app/screens/level-complete/level-complete.component.ts): brief transition screen shown upon level completion displaying the completed level number, then auto-advances to the next level's countdown via GameStateService.",
+    "dependsOn": [
+      "ASSIGN-009"
+    ],
+    "branchName": "claudeopus5/feature/us-019-screen-flow",
+    "reviewerAgentIds": [
+      "senior-frontend",
+      "principal-frontend"
+    ],
+    "taskType": "feature",
+    "moduleIds": [
+      "MOD-LEVEL-COMPLETE"
+    ]
+  },
+  {
+    "id": "ASSIGN-017",
+    "storyId": "US-023",
+    "additionalStoryIds": [],
+    "taskIds": [
+      "TASK-047",
+      "TASK-048"
+    ],
+    "acIndexes": [],
+    "devAgentId": "junior-angular",
+    "rank": "junior",
+    "priority": "medium",
+    "complexity": "moderate",
+    "estimate": "5h",
+    "description": "Build GameOverComponent (MOD-GAME-OVER, src/app/screens/game-over/game-over.component.ts) displaying final score when lives reach zero, and HighScoreEntryComponent (MOD-HIGH-SCORE-ENTRY, src/app/screens/high-score-entry/high-score-entry.component.ts) shown only if score qualifies for top-10, allowing 3-letter initials entry before returning to start screen. Ensure both are fully keyboard operable with visible focus indicators.",
+    "dependsOn": [
+      "ASSIGN-009"
+    ],
+    "branchName": "claudeopus5/feature/us-019-screen-flow",
+    "reviewerAgentIds": [
+      "senior-frontend",
+      "principal-frontend"
+    ],
+    "taskType": "feature",
+    "moduleIds": [
+      "MOD-GAME-OVER",
+      "MOD-HIGH-SCORE-ENTRY"
+    ]
+  },
+  {
+    "id": "ASSIGN-018",
+    "storyId": "US-019",
+    "additionalStoryIds": [
+      "US-020",
+      "US-021",
+      "US-022",
+      "US-023"
+    ],
+    "taskIds": [
+      "TASK-049",
+      "TASK-050"
+    ],
+    "acIndexes": [],
+    "devAgentId": "senior-frontend",
+    "rank": "senior",
+    "priority": "high",
+    "complexity": "complex",
+    "estimate": "8h",
+    "description": "Implement GameStateService screen state machine (extend MOD-GAME-STATE game-state.service.ts from us-009 branch, pull latest first): start -> countdown -> playing -> paused -> level-complete -> game-over, exposed as an observable consumed by all screen components built in this branch (StartScreenComponent, CountdownComponent, PauseOverlayComponent, LevelCompleteComponent, GameOverComponent, HighScoreEntryComponent). Write game-state.service.spec.ts covering screen transitions.",
+    "dependsOn": [
+      "ASSIGN-009",
+      "ASSIGN-013",
+      "ASSIGN-014",
+      "ASSIGN-015",
+      "ASSIGN-016",
+      "ASSIGN-017"
+    ],
+    "branchName": "claudeopus5/feature/us-019-screen-flow",
+    "reviewerAgentIds": [
+      "principal-frontend",
+      "principal-backend"
+    ],
+    "taskType": "feature",
+    "moduleIds": []
+  },
+  {
+    "id": "ASSIGN-019",
+    "storyId": "US-024",
+    "additionalStoryIds": [
+      "US-025"
+    ],
+    "taskIds": [
+      "TASK-051",
+      "TASK-052",
+      "TASK-053",
+      "TASK-055"
+    ],
+    "acIndexes": [],
+    "devAgentId": "senior-frontend",
+    "rank": "senior",
+    "priority": "high",
+    "complexity": "complex",
+    "estimate": "10h",
+    "description": "Implement AudioService (MOD-AUDIO, src/app/game/audio/audio.service.ts) wrapping Web Audio API: distinct sound effects for dot-eat, pellet, ghost-eat, death, fruit, extra-life, startup jingle. Implement looping background siren with dynamic pitch (playbackRate/detune) tied to remaining dot count, playing only during active gameplay and stopping when paused/non-playing. Wire game events from CollisionService/GameStateService (us-009 branch) to AudioService triggers with no noticeable delay. Write audio.service.spec.ts for mute and trigger logic (mute itself implemented in us-027 branch's SettingsStorageService — expose a setMuted()/isMuted() hook here).",
+    "dependsOn": [
+      "ASSIGN-008",
+      "ASSIGN-011"
+    ],
+    "branchName": "claudeopus5/feature/us-024-audio-system",
+    "reviewerAgentIds": [
+      "principal-frontend",
+      "principal-backend"
+    ],
+    "taskType": "feature",
+    "moduleIds": [
+      "MOD-AUDIO"
+    ]
+  },
+  {
+    "id": "ASSIGN-020",
+    "storyId": "US-026",
+    "additionalStoryIds": [],
+    "taskIds": [
+      "TASK-054",
+      "TASK-059"
+    ],
+    "acIndexes": [],
+    "devAgentId": "junior-angular",
+    "rank": "junior",
+    "priority": "medium",
+    "complexity": "simple",
+    "estimate": "4h",
+    "description": "Implement SettingsStorageService (MOD-SETTINGS-STORE, src/app/core/storage/settings-storage.service.ts) wrapping localStorage for mute and colorblind-mode preferences. Implement global mute toggle: activating mute silences AudioService (call into audio.service.ts from us-024 branch, pull latest) immediately and persists the preference across reloads via this service.",
+    "dependsOn": [
+      "ASSIGN-002"
+    ],
+    "branchName": "claudeopus5/feature/us-024-audio-system",
+    "reviewerAgentIds": [
+      "senior-frontend",
+      "principal-frontend"
+    ],
+    "taskType": "feature",
+    "moduleIds": [
+      "MOD-SETTINGS-STORE"
+    ]
+  },
+  {
+    "id": "ASSIGN-021",
+    "storyId": "US-027",
+    "additionalStoryIds": [],
+    "taskIds": [
+      "TASK-056",
+      "TASK-057",
+      "TASK-058"
+    ],
+    "acIndexes": [],
+    "devAgentId": "junior-angular",
+    "rank": "junior",
+    "priority": "high",
+    "complexity": "moderate",
+    "estimate": "5h",
+    "description": "Implement ScoreStorageService (MOD-SCORE-STORE, src/app/core/storage/score-storage.service.ts) wrapping localStorage for top-10 high score list (initials + score) and all-time high score. Integrate save/load flow: after a qualifying game-over, append new score+initials, persist, and re-read on StartScreenComponent load (wire into start-screen.component.ts from us-019 branch, pull latest). Write score-storage.service.spec.ts for persistence.",
+    "dependsOn": [
+      "ASSIGN-009"
+    ],
+    "branchName": "claudeopus5/feature/us-027-storage-accessibility-integration",
+    "reviewerAgentIds": [
+      "senior-frontend",
+      "principal-frontend"
+    ],
+    "taskType": "feature",
+    "moduleIds": [
+      "MOD-SCORE-STORE"
+    ]
+  },
+  {
+    "id": "ASSIGN-022",
+    "storyId": "US-028",
+    "additionalStoryIds": [],
+    "taskIds": [
+      "TASK-060",
+      "TASK-062"
+    ],
+    "acIndexes": [],
+    "devAgentId": "junior-angular",
+    "rank": "junior",
+    "priority": "medium",
+    "complexity": "simple",
+    "estimate": "4h",
+    "description": "Add keyboard focus indicators (CSS :focus-visible outlines) and correct tab order across all screen components (start, countdown, pause, level-complete, game-over, high-score-entry — modify existing component templates/styles from us-019 branch, pull latest first). Add accessibility smoke tests verifying Tab/Shift+Tab/Enter/Space operate every interactive control without a mouse.",
+    "dependsOn": [
+      "ASSIGN-018"
+    ],
+    "branchName": "claudeopus5/feature/us-027-storage-accessibility-integration",
+    "reviewerAgentIds": [
+      "senior-frontend",
+      "principal-frontend"
+    ],
+    "taskType": "feature",
+    "moduleIds": []
+  },
+  {
+    "id": "ASSIGN-023",
+    "storyId": "US-029",
+    "additionalStoryIds": [],
+    "taskIds": [
+      "TASK-061"
+    ],
+    "acIndexes": [],
+    "devAgentId": "junior-angular",
+    "rank": "junior",
+    "priority": "medium",
+    "complexity": "moderate",
+    "estimate": "4h",
+    "description": "Implement colorblind-friendly ghost palette toggle: add an alternate color palette and immediate switch logic in renderer.service.ts (modify MOD-RENDERER from us-001 branch, pull latest), controlled by a preference read/written via SettingsStorageService (us-024 branch, pull latest) so it persists across sessions.",
+    "dependsOn": [
+      "ASSIGN-005",
+      "ASSIGN-020"
+    ],
+    "branchName": "claudeopus5/feature/us-027-storage-accessibility-integration",
+    "reviewerAgentIds": [
+      "senior-frontend",
+      "principal-frontend"
+    ],
+    "taskType": "feature",
+    "moduleIds": []
+  },
+  {
+    "id": "ASSIGN-024",
+    "storyId": "US-030",
+    "additionalStoryIds": [
+      "US-031"
+    ],
+    "taskIds": [
+      "TASK-063",
+      "TASK-064",
+      "TASK-066"
+    ],
+    "acIndexes": [],
+    "devAgentId": "junior-angular",
+    "rank": "junior",
+    "priority": "medium",
+    "complexity": "moderate",
+    "estimate": "6h",
+    "description": "Implement swipe gesture detection (Touch Events API) feeding into InputService's shared direction stream (modify MOD-INPUT input.service.ts from us-001 branch, pull latest, add touch handler alongside keyboard handler). Build TouchControlsComponent (MOD-TOUCH-CONTROLS, src/app/screens/gameplay/touch-controls/touch-controls.component.ts): on-screen directional buttons visible on touch/mobile viewports, positioned so they do not obstruct the visible maze. Write swipe-gesture.spec.ts for direction mapping.",
+    "dependsOn": [
+      "ASSIGN-006"
+    ],
+    "branchName": "claudeopus5/feature/us-027-storage-accessibility-integration",
+    "reviewerAgentIds": [
+      "senior-frontend",
+      "principal-frontend"
+    ],
+    "taskType": "feature",
+    "moduleIds": [
+      "MOD-TOUCH-CONTROLS"
+    ]
+  },
+  {
+    "id": "ASSIGN-025",
+    "storyId": "US-032",
+    "additionalStoryIds": [],
+    "taskIds": [
+      "TASK-065"
+    ],
+    "acIndexes": [],
+    "devAgentId": "senior-frontend",
+    "rank": "senior",
+    "priority": "medium",
+    "complexity": "moderate",
+    "estimate": "6h",
+    "description": "Implement responsive canvas/layout scaling from 375px to 2560px viewport widths: add resize handling to renderer.service.ts / gameplay layout CSS (modify MOD-RENDERER from us-001 branch and relevant screen component styles) so canvas and HUD scale proportionally while maintaining aspect ratio, with no clipping/overflow at tested breakpoints.",
+    "dependsOn": [
+      "ASSIGN-005"
+    ],
+    "branchName": "claudeopus5/feature/us-027-storage-accessibility-integration",
+    "reviewerAgentIds": [
+      "principal-frontend",
+      "principal-backend"
+    ],
+    "taskType": "feature",
+    "moduleIds": []
+  },
+  {
+    "id": "ASSIGN-026",
+    "storyId": "US-033",
+    "additionalStoryIds": [
+      "US-034"
+    ],
+    "taskIds": [
+      "TASK-069",
+      "TASK-070"
+    ],
+    "acIndexes": [],
+    "devAgentId": "principal-frontend",
+    "rank": "principal",
+    "priority": "high",
+    "complexity": "moderate",
+    "estimate": "6h",
+    "description": "Audit and compress audio/image assets to help keep production bundle under 2MB (budgets configured in angular.json from scaffold). Manually verify the production build (`ng build --configuration production`) and offline playability by disabling network after first load and confirming all required assets (app shell, scripts, audio) are precached via the service worker configured in us-001 scaffold branch.",
+    "dependsOn": [
+      "ASSIGN-001"
+    ],
+    "branchName": "claudeopus5/feature/us-027-storage-accessibility-integration",
+    "reviewerAgentIds": [
+      "principal-backend"
+    ],
+    "taskType": "chore",
+    "moduleIds": []
+  },
+  {
+    "id": "ASSIGN-027",
+    "storyId": "US-035",
+    "additionalStoryIds": [],
+    "taskIds": [
+      "TASK-004",
+      "TASK-071",
+      "TASK-072",
+      "TASK-073"
+    ],
+    "acIndexes": [],
+    "devAgentId": "principal-frontend",
+    "rank": "principal",
+    "priority": "critical",
+    "complexity": "very-complex",
+    "estimate": "12h",
+    "description": "FINAL INTEGRATION. Implement AppComponent root screen switcher (MOD-APP-COMPONENT, src/app/app.component.ts) switching between start/countdown/gameplay/pause/level-complete/game-over/high-score-entry screens based on GameStateService's screen observable. Implement/finish GameplayComponent (MOD-GAMEPLAY, src/app/screens/gameplay/gameplay.component.ts) wiring the canvas host element to GameEngineService (tick loop) and RendererService (draw calls), composing HudComponent, TouchControlsComponent, and PauseOverlayComponent, and instantiating/activating GameEngineService, InputService, AudioService, RendererService, CollisionService, ScoreStorageService, and SettingsStorageService so a full playthrough (start -> countdown -> gameplay -> pause/resume -> level-complete or game-over -> high-score-entry if applicable) works end-to-end with no further code changes. Perform a manual end-to-end playthrough verification checklist covering every acceptance criterion across all 35 stories.",
+    "dependsOn": [
+      "ASSIGN-004",
+      "ASSIGN-005",
+      "ASSIGN-006",
+      "ASSIGN-007",
+      "ASSIGN-008",
+      "ASSIGN-009",
+      "ASSIGN-010",
+      "ASSIGN-011",
+      "ASSIGN-012",
+      "ASSIGN-013",
+      "ASSIGN-014",
+      "ASSIGN-015",
+      "ASSIGN-016",
+      "ASSIGN-017",
+      "ASSIGN-018",
+      "ASSIGN-019",
+      "ASSIGN-020",
+      "ASSIGN-021",
+      "ASSIGN-022",
+      "ASSIGN-023",
+      "ASSIGN-024",
+      "ASSIGN-025",
+      "ASSIGN-026"
+    ],
+    "branchName": "claudeopus5/feature/us-027-storage-accessibility-integration",
+    "reviewerAgentIds": [
+      "principal-backend"
+    ],
+    "taskType": "feature",
+    "moduleIds": [
+      "MOD-APP-COMPONENT",
+      "MOD-GAMEPLAY"
+    ]
+  }
+]

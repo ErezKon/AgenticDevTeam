@@ -36,7 +36,7 @@ export interface OctokitLike {
     pulls: {
         create: (params: { owner: string; repo: string; title: string; body: string; head: string; base: string }) => Promise<{ data: { number: number; html_url: string; node_id: string } }>;
         merge: (params: { owner: string; repo: string; pull_number: number; merge_method?: string }) => Promise<{ data: { merged: boolean; sha: string } }>;
-        get: (params: { owner: string; repo: string; pull_number: number }) => Promise<{ data: { number: number; state: string; merged: boolean; title: string; html_url: string } }>;
+        get: (params: { owner: string; repo: string; pull_number: number }) => Promise<{ data: { number: number; state: string; merged: boolean; title: string; html_url: string; head: { ref: string; sha: string } } }>;
         list: (params: { owner: string; repo: string; head?: string; state?: string }) => Promise<{ data: Array<{ number: number; html_url: string; node_id: string; state: string; title: string }> }>;
     };
     issues: {
@@ -206,6 +206,10 @@ export function createLocalGitHub(bareRepoPath: string): OctokitLike {
             async get({ pull_number }) {
                 const pr = prs.get(pull_number);
                 if (!pr) throw new Error(`PR #${pull_number} not found`);
+                // Plan 30-02: like GitHub, report the commit the PR would merge — the
+                // merge guard compares it with the worktree HEAD. '' once the head
+                // branch is gone (e.g. deleted after the merge).
+                const headSha = gitLocal(bareRepoPath, `rev-parse --verify refs/heads/${pr.head}`);
                 return {
                     data: {
                         number: pr.number,
@@ -213,6 +217,7 @@ export function createLocalGitHub(bareRepoPath: string): OctokitLike {
                         merged: pr.merged,
                         title: pr.title,
                         html_url: `local://pr/${pr.number}`,
+                        head: { ref: pr.head, sha: headSha.startsWith('Error:') ? '' : headSha },
                     },
                 };
             },

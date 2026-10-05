@@ -57,6 +57,7 @@ import {
 
 import { readLedger } from '../src/utils/run-ledger';
 import { readResponseLogIndex } from '../src/utils/response-log';
+import { gitExec } from '../src/utils/git-exec';
 import type { LedgerEntry } from '../src/utils/run-ledger';
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -330,6 +331,37 @@ describe('State Collector', () => {
             expect(result.prBranchStatus.find(b => b.branch === 'feature/a')?.status).toBe('merged');
             expect(result.prBranchStatus.find(b => b.branch === 'feature/b')?.status).toBe('open');
             expect(result.prBranchStatus.find(b => b.branch === 'feature/c')?.status).toBe('failed-salvaged');
+        });
+
+        it('classifies blocked/open/deferred branches still on the remote as resumable (Plan 30-02)', () => {
+            const workspaceDir = path.join(tmpDir, 'workspace');
+            fs.mkdirSync(path.join(workspaceDir, '.git'), { recursive: true });
+            writeJson(tmpDir, 'state.json', makeStateSnapshot({
+                workspacePath: workspaceDir,
+                pullRequests: [
+                    { branchName: 'feature/b', status: 'blocked' },
+                    { branchName: 'feature/c', status: 'open' },
+                    { branchName: 'feature/d', status: 'deferred' },
+                    { branchName: 'feature/e', status: 'deferred' },
+                ],
+                salvageBranches: ['feature/b'],
+            }));
+            (readLedger as jest.Mock).mockReturnValue([]);
+            (readResponseLogIndex as jest.Mock).mockReturnValue([]);
+            const remotes = '  origin/HEAD -> origin/main\n  origin/main\n  origin/feature/b\n  origin/feature/d';
+            (gitExec as jest.Mock).mockImplementation((_cwd: string, args: string) =>
+                args.startsWith('branch --remotes') ? remotes : 'Error: not a git repo');
+            try {
+                const status = Object.fromEntries(collectRunState(tmpDir).prBranchStatus.map(b => [b.branch, b.status]));
+                expect(status).toEqual({
+                    'feature/b': 'resumable',        // blocked and salvaged, but its head is on the remote
+                    'feature/c': 'open',             // open, never pushed
+                    'feature/d': 'resumable',        // deferred, pushed
+                    'feature/e': 'failed-salvaged',  // deferred, gone from the remote and from local
+                });
+            } finally {
+                (gitExec as jest.Mock).mockReset().mockReturnValue('Error: not a git repo');
+            }
         });
 
         it('collects agent artifacts from workspace docs/agents/', () => {

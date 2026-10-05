@@ -4,7 +4,7 @@
  *
  * Sub-Plan 08 §3: tests confirm the new loop guard behaviour.
  */
-import { tool } from '@langchain/core/tools';
+import { tool, type StructuredToolInterface } from '@langchain/core/tools';
 import { z } from 'zod';
 import { withLoopGuard, resolveToolBudgets } from '../src/agents/_shared/tool-loop-guard';
 
@@ -241,6 +241,97 @@ describe('Tool Loop Guard', () => {
         const { tools, isCeilingReached } = withLoopGuard([], 'test-agent');
         expect(tools).toEqual([]);
         expect(isCeilingReached()).toBe(false);
+    });
+});
+
+// ─── Plan 30-06: soft landing ───────────────────────────────────────────────
+
+describe('requestTermination (Plan 30-06 soft landing)', () => {
+    it('demands termination and answers every later tool call with the terminal guidance', async () => {
+        const readFile = makeMockTool('read_file', 'content');
+        const guard = withLoopGuard([readFile.tool], 'junior-angular', { budgets: { reads: 50, writes: 50, shell: 50, turns: 50 } });
+        expect(guard.isTerminationDemanded()).toBe(false);
+
+        guard.requestTermination('the invocation has spent its input budget');
+
+        expect(guard.isTerminationDemanded()).toBe(true);
+        const reply = JSON.parse(await guard.tools[0].invoke({ path: 'a' }) as string);
+        expect(reply.error).toContain('BUDGET EXHAUSTED: the invocation has spent its input budget');
+        expect(reply.error).toContain('Return your JSON output now');
+        expect(readFile.getExecCount()).toBe(0);
+        // A soft landing is not a tool-budget exhaustion — nothing respawns
+        expect(guard.isCeilingReached()).toBe(false);
+    });
+
+    it('is a no-op for an agent without tools', () => {
+        const guard = withLoopGuard([], 'architect');
+        guard.requestTermination('spent');
+        expect(guard.isTerminationDemanded()).toBe(false);
+    });
+});
+
+// ─── Plan 30-07: read cache per agent instance, visibility-aware ────────────
+
+describe('read cache (Plan 30-07)', () => {
+    /** Invoke as ToolNode does: a tool call with an id, in model turn `step`. Returns the result text. */
+    async function call(t: StructuredToolInterface, id: string, args: Record<string, unknown>, step: number): Promise<string> {
+        const message = await t.invoke({ id, name: t.name, args, type: 'tool_call' }, { metadata: { langgraph_step: step } });
+        return String((message as { content: unknown }).content);
+    }
+    const budgets = { reads: 50, writes: 50, shell: 50, turns: 50 };
+
+    it('two agent instances do not share the read cache', async () => {
+        const readFile = makeMockTool('read_file', 'file-a body');
+        const first = withLoopGuard([readFile.tool], 'junior-angular', { budgets });
+        const second = withLoopGuard([readFile.tool], 'junior-angular', { budgets });
+
+        expect(await call(first.tools[0], 't1', { path: 'src/a.ts' }, 1)).toBe('file-a body');
+        // Same agent id, new instance (a respawn, the next assignment): it gets the content
+        expect(await call(second.tools[0], 't2', { path: 'src/a.ts' }, 1)).toBe('file-a body');
+        expect(readFile.getExecCount()).toBe(2);
+    });
+
+    it('a repeated read still visible in the history gets a one-line pointer, free', async () => {
+        const readFile = makeMockTool('read_file', 'file-a body');
+        const { tools } = withLoopGuard([readFile.tool], 'dev', { budgets });
+
+        await call(tools[0], 't1', { path: 'src/a.ts' }, 1);
+        const repeat = await call(tools[0], 't2', { path: 'src/a.ts' }, 2);
+
+        expect(repeat).toBe('[UNCHANGED — identical to your read at turn 1, still visible above]');
+        expect(readFile.getExecCount()).toBe(1);
+    });
+
+    it('a read the compactor stubbed can be read again — content, never BLOCKED or a CACHED stub', async () => {
+        const readFile = makeMockTool('read_file', 'file-a body');
+        const guard = withLoopGuard([readFile.tool], 'dev', { budgets });
+        const read = (id: string, step: number) => call(guard.tools[0], id, { path: 'src/a.ts' }, step);
+
+        await read('t1', 1);
+        await read('t2', 2);                                   // pointer
+        expect(await read('t3', 3)).toContain('[BLOCKED]');     // third identical call while visible
+
+        guard.noteElidedResults(['t1']);                         // compaction stubbed the content
+
+        const again = await read('t4', 4);
+        expect(again).toBe('file-a body');
+        expect(readFile.getExecCount()).toBe(2);
+    });
+
+    it('after a write, an identical read runs again: unchanged content → pointer, changed → content', async () => {
+        let body = 'v1 body';
+        const readFile = tool(async () => body, { name: 'read_file', description: 'read', schema: z.object({ path: z.string().optional() }) });
+        const writeFile = makeMockTool('write_file', 'written');
+        const { tools } = withLoopGuard([readFile, writeFile.tool], 'dev', { budgets });
+        const [read, write] = [tools.find(t => t.name === 'read_file')!, tools.find(t => t.name === 'write_file')!];
+
+        expect(await call(read, 't1', { path: 'src/a.ts' }, 1)).toBe('v1 body');
+        await call(write, 'w1', { path: 'src/b.ts' }, 2);
+        expect(await call(read, 't2', { path: 'src/a.ts' }, 3)).toContain('[UNCHANGED — identical to your read at turn 1');
+
+        body = 'v2 body';
+        await call(write, 'w2', { path: 'src/c.ts' }, 4);
+        expect(await call(read, 't3', { path: 'src/a.ts' }, 5)).toBe('v2 body');
     });
 });
 

@@ -138,7 +138,7 @@ src/
       planning.ts                  # codebaseAnalyzerNode, architectNode, pmNode, dbaNode, tlNode (Phases 1b-5)
       development.ts               # developmentNode (Phase 6, fan-out dispatch)
       qa.ts                        # qaNode (Phase 7, test planning + execution + gates)
-      bugfix-triage.ts             # bugfixTriageNode (Phase 8)
+      bugfix-triage.ts             # bugfixTriageNode (Phase 8): selectTriageBugs, compact bug table, undelivered branches, source files, TriageRound (Plan 30-05)
       devops.ts                    # devopsNode (Phase 9)
       e2e.ts                       # e2eNode (Phase 9b, Playwright + smoke fallback)
       acceptance.ts                # acceptanceNode (Phase 10)
@@ -147,24 +147,38 @@ src/
     pr-workflow.ts                 # Backward-compatible re-export shim (~80 lines)
     pr/                            # PR workflow modules (Sub-Plan 25-08)
       index.ts                     # Barrel re-export
-      orchestrator.ts              # Top-level PR lifecycle orchestrator; Plan 26: per-assignment invocations, gate-blocking, dev-failure tracking
-      worktree.ts                  # Worktree creation, disposal, salvage, eviction
-      pr-github.ts                 # Octokit wrapper, PR creation/retry/merge, postComment
+      orchestrator.ts              # Top-level PR lifecycle orchestrator (resume, deferred, push-rejected, gate-blocking — Plans 26/30-02)
+      assignment-runner.ts         # Plan 30-02: per-assignment invocations, executed vs deferred, scaled branch wall cap, honest agent ledger
+      merge-decision.ts            # Plan 30-02: fresh merge evidence, decideMerge, merge guard (remote head), completion evidence
+      transcript.ts                # Shared development-phase transcript msg()
+      worktree.ts                  # Worktree creation (resumes from origin/<branch> when pushed — Plan 30-02), disposal (salvage only unpushed work, detached, in .worktrees/_failed/ — Plan 30-04), salvage patches, eviction
+      worktree-deps.ts             # Plan 30-07: preinstallWorktreeDeps — npm install once per worktree before any agent runs (workspace members via their root), hidden lockfile marked fresh
+      pr-github.ts                 # Octokit wrapper, PR creation/retry/merge, checkPrHeadCurrent, postComment
       pr-body.ts                   # PR title & description builders (pure, testable)
       dev-prompts.ts               # Prompt fragments & message builders (fix, repair, escalation)
       diff.ts                      # DIFF_EXCLUDE_SPECS + getReviewDiff with stat fallback
-      agent-invoke.ts              # invokeDevAgent/invokeReviewerAgent with respawn
-      commit.ts                    # commitWorktree (durable stage+commit+push)
-      gates.ts                     # Gate running with tamper detection & repair
+      agent-invoke.ts              # invokeDevAgent (budget-capped output kept; a soft landing is final — no respawn, Plan 30-06)/invokeReviewerAgent with respawn; resolveBaseRef (origin first)
+      commit.ts                    # commitAndPush/commitWorktree (stageWorkspaceChanges; never completes a merge with conflict markers — Plan 30-04) + pushBranch (verified push, non-ff recovery); durable-commit subjects
+      gates.ts                     # runBranchGates, runGatesWithRepair (repair prompt: summarised failures, Plan 30-07), tamper detection & revert, failedGateOf (Plan 30-05)
       review-loop.ts               # Sequential reviewer passes with interleaved fixes
       escalation.ts                # Senior dev + reviewer escalation on CRITICALs
       strong-fixer.ts              # Strong model fixer (Sub-Plan 20)
       merge-ladder.ts              # Base integration & conflict resolution
-    context-builder.ts             # Compact context summarizers with char budgets
+    context-builder.ts             # Compact context summarizers with char budgets (Plan 30-05: summariseBugs, summariseUndeliveredBranches)
+    triage-selection.ts            # Plan 30-05: selectTriageBugs — latest-evaluation window, undelivered work dropped, one bug per undelivered branch, root-cause absorption
+    unrecoverable.ts               # Plan 30-05: detectUnrecoverable (zero merged rounds, abandoned branches, same open bugs, bugs worked on twice, sourceless) + haltIfUnrecoverable
     quality-gates.ts               # Multi-language build/lint/test gates
     security-gates.ts              # Secret scan + dependency audit + licence check
+    test-runner.ts                 # QA's real test execution: install first, framework detection, Jest/JUnit/Go/TRX parsers, rendered runner-error detail (Plan 30-03)
+    test-runners/                  # Plan 30-03 runner adapters
+      executed-report.ts           # ExecutedTestReport model (command, caseNames), parseTraceTag/traceTagIndex, tallyCases
+      karma.ts                     # Karma detection, wrapper config + inline agentjson reporter, ng test / karma start commands, JSON + rendered-output parsing
+    test-sufficiency.ts            # Min tests, per-story (merged stories only), coverage floor; one runner-error violation (Plan 30-03)
+    ac-coverage-gate.ts            # AC coverage gate: inconclusive when unmeasurable, one bug per blocked PR (Plan 30-03)
+    product-verify.ts              # Artifacts, import resolution, smoke test (readiness = any response; explicit GET / reason)
+    product-serve-dir.ts           # Which directory the smoke test serves (angular.json outputPath, shallowest index.html) (Plan 30-03)
     workspace-sync.ts              # Git sync after squash merges; Plan 25-11: async fetchWithRetry/syncWorkspaceToBranch with non-blocking sleep()
-    assignment-policy.ts           # Prevent re-dispatch of completed assignments + sanitizeAssignmentStoryIds
+    assignment-policy.ts           # Prevent re-dispatch of completed assignments + sanitizeAssignmentStoryIds + storyIdsOfAssignments; Plan 30-05: abandonedBranches, newlyExecutedIds, dispatchRoundOf, bugAttemptsAfterRound, resolveBugIds
     review-policy.ts               # Fail-closed review: ReviewOutcome, decideMerge, escalation, quorum (Sub-Plan 07)
     devops-verify.ts               # Real Docker build/run/health-check
     file-checkpointer.ts           # Persistent checkpoints for crash recovery
@@ -183,11 +197,13 @@ src/
     _shared/
       agent-factory.ts             # buildAgent() wrapper for createAgent
       llm-provider.ts              # Multi-provider LLM factory (OpenAI, Anthropic, Google)
-      prompt-cache.ts              # Anthropic cache_control breakpoints (Plan 22)
-      history-compactor.ts         # ReAct history compaction + streaming-residue sanitiser
+      prompt-cache.ts              # Anthropic cache_control breakpoints: system + task, last message only behind a proxy (Plans 22, 30-06); minimum-prefix table for diagnostics only
+      history-compactor.ts         # ReAct history compaction (reports stubbed tool-call ids — Plan 30-07) + streaming-residue sanitiser
+      history-epoch.ts             # Plan 30-06: createEpochCompactor — cache-stable compaction: frozen view, append-only until HISTORY_EPOCH_MAX_TURNS / HISTORY_MAX_CHARS
       persona.ts                   # Developer prompt builder (rank/domain/languages)
       artifact.ts                  # Mission report writer (docs/agents/*.md)
-      tool-loop-guard.ts           # Read/write/shell/turn budgets + loop detection + complexity-aware scaling (Plans 26, 27-C)
+      tool-loop-guard.ts           # Read/write/shell/turn budgets + loop detection + complexity-aware scaling (Plans 26, 27-C); requestTermination (soft landing, Plan 30-06)
+      branch-read-cache.ts         # Plan 30-07: createReadCache — one per agent instance; a repeat read still visible gets a pointer, a stubbed one is re-read
       base-schemas.ts              # Barrel re-export of all schemas
       schemas/                     # 17 individual Zod schema files
         index.ts                   # Barrel export
@@ -221,7 +237,8 @@ src/
       registry.ts                  # 11 developer agent definitions
       dev-agent.builder.ts         # Developer agent constructor
       reviewer-agent.builder.ts    # Code reviewer agent constructor
-      dispatcher.ts                # Branch-grouped fan-out + concurrency; Plan 27-B: sequential dispatch + halt-on-failure
+      dispatch-plan.ts             # Plan 30-01: pure planner — scaffold by branch name, explicit branches win, bootstrap/finalizer barriers without cycles, Tarjan cycle breaking, branch DAG layers, onBranchNotMerged()
+      dispatcher.ts                # Executes the plan layer by layer through the PR workflow; DISPATCH_HALT_POLICY (default dependents), stopReason, dispatch:plan event + ledger
       schemas/                     # dev-output.schema.ts, review-output.schema.ts
     qa/                            # QA Lead + Unit + E2E agents
     devops/                        # DevOps agent
@@ -229,7 +246,7 @@ src/
   tools/
     fs/workspace-tools.ts          # Sandboxed read/write/edit/list/search (5 tools); Plan 25-11: all handlers use fs/promises (non-blocking)
     git/git-tools.ts               # Git CLI tools (12 tools)
-    shell/shell-tools.ts           # Guarded shell execution (1 tool)
+    shell/shell-tools.ts           # Guarded shell execution (1 tool); Plan 30-07: bash -o pipefail, NON_INTERACTIVE_ENV, rendered + summarised output
     diagram/diagram-tools.ts       # Mermaid label sanitization
     requirements/parse-requirements.ts  # .md/.txt/.pdf/.docx parser
     mcp/playwright-mcp.ts          # Playwright MCP client (singleton)
@@ -240,7 +257,8 @@ src/
   utils/
     logger.ts                      # Per-agent colored console + file logger; debug() only prints when DEBUG_MODE=true; every line mirrored into the debug trace
     oauth-auth.util.ts             # OAuth2 client-credentials token cache
-    workspace.ts                   # Project workspace + output dir creation
+    workspace.ts                   # Project workspace + output dir creation; PIPELINE_DIRS + managedGitignoreEntries() — the one managed .gitignore block (Plan 30-04)
+    repo-hygiene.ts                # Plan 30-04: stageWorkspaceChanges (replaces every `git add .`: no pipeline dirs, no undeclared gitlinks, no files with conflict markers) + removePipelineArtifacts (repair of a polluted repo)
     retry.ts                       # Exponential backoff + jitter for LLM calls
     llm-throttle.ts                # Global rate-limit protection (semaphore + cooldown) + createProviderProbe()
     llm-cassette.ts                # Record/replay VCR for deterministic tests
@@ -254,27 +272,32 @@ src/
     debug-environment.ts           # DEBUG_MODE environment.json: runtime, app version + git commit (read via fs), masked config snapshot
     redact.ts                      # Dependency-free secret redaction: redactSecrets() patterns + redactValues() exact configured-secret scrub
     run-context.ts                 # Per-run AsyncLocalStorage context (RunContext class + lastKnownState + setLastKnownState); makes all singletons safe for concurrent server runs; Plan 27-G: lastKnownState updated at each phase entry for graceful shutdown
-    event-bus.ts                   # Typed event bus (17 event types, incl. run:budget-stop, run:provider-stop, branch:partial-failure, branch:gates-blocked, dispatch:halted); context-aware via RunContext
-    token-tracker.ts               # Token consumption tracker; context-aware via RunContext Proxy; Plan 25-11: appends JSONL per call (O(1)), debounces full JSON flush every 10s
+    event-bus.ts                   # Typed event bus (45 event types, incl. run:budget-stop, run:provider-stop, branch:partial-failure, branch:gates-blocked, branch:push-failed, dispatch:halted, dispatch:plan, dispatch:skipped-dependents); context-aware via RunContext
+    token-tracker.ts               # Token consumption tracker; context-aware via RunContext Proxy; Plan 25-11: appends JSONL per call (O(1)), debounces full JSON flush every 10s; Plan 30-06: effective input per invocation, withTokenAttribution (round/branch), branch outcomes, budget-capped marks, previous-run ids namespaced `prev:`
     token-callback.ts              # LangChain callback for token recording (two-tier provider lookup)
     token-usage-extractor.ts       # Shared usage normalisation (normaliseUsage/sumUsageMetadata/usageFromLLMResult) + per-invocation aggregation
     token-report.ts                # HTML + JSON token usage report generator
-    cost.ts                        # USD cost estimation per model
+    token-report-sections.ts       # Plan 30-06: report totals (list vs billed cost, effective input, median uncached input/call, unmerged-branch tokens), round/branch tables, unpriced-model warning
+    cost.ts                        # USD cost per model: billedCost (cache-aware), listCost, effectiveInputTokens; prices resolved by longest id prefix, unpriced models warned once (Plan 30-06)
+    model-id.ts                    # Plan 30-06: longestIdPrefix — model-id prefix match at a separator (pricing, cache minimums)
     run-snapshot.ts                # state.json + run-manifest.json writer + writePeriodicSnapshot(); Plan 25-11: debounced full snapshots (30s min interval) + immediate latest-phase.json marker
-    git-exec.ts                    # Centralized git command execution (gitExec/gitExecVerbose/gitPush via shell-exec's traced execFileSync, shellSplit, assertValidRef)
+    git-exec.ts                    # Centralized git command execution (gitExec/gitExecVerbose/gitPush via shell-exec's traced execFileSync, shellSplit, assertValidRef); Plan 30-04 probes: refExists, deleteLocalBranch
     coding-conventions.ts          # Convention file resolution + deployment
-    traceability.ts                # Requirements traceability matrix
+    traceability.ts                # Requirements traceability matrix; Plan 30-03: blockedDeliveries = each branch's latest record with its real blockers
     codebase-analysis-writer.ts    # Write analysis markdown
     log-colors.util.ts             # ANSI 256-color codes
-    fs-walk.ts                     # Shared filesystem walker (PRUNE_DIRS, SOURCE_EXTENSIONS, walkDir, collectFiles, isTestFile)
+    fs-walk.ts                     # Shared filesystem walker (PRUNE_DIRS — incl. .worktrees-failed, __pycache__ — SOURCE_EXTENSIONS, walkDir, collectFiles, isTestFile)
+    terminal-output.ts             # Plan 30-03: renderTerminalOutput (replays \r / cursor-up / erase-line, strips escapes, collapses progress, drops noise) + summariseTestOutput (failure blocks + summary within a budget); used by the shell tool and the gates (Plan 30-07)
+    angular-workspace.ts           # Plan 30-03: readAngularTarget(rootDir, target) — angular.json `architect`/`targets` lookup
     source-graph.ts                # Import extraction + resolution + graph building + transitive reachability
+    dependency-graph.ts            # Plan 30-01: wait-for graphs — reachableFrom, wouldCreateCycle, deterministic breakCycles (Tarjan SCC)
     markdown-table.ts              # Shared mdTable() + mdSection() with automatic pipe-escaping
-    shell-exec.ts                  # Shared ExecFn type, safeChildEnv, defaultExec/isToolAvailable; Plan 25-11: async AsyncExecFn, defaultExecAsync, isToolAvailableAsync (execFile + promises); traced child_process drop-ins (execSync, execFileSync, execFileAsync, execCapture) — the ONLY module that imports child_process
+    shell-exec.ts                  # Shared ExecFn type, safeChildEnv, NON_INTERACTIVE_ENV (Plan 30-07), defaultExec/isToolAvailable; Plan 25-11: async AsyncExecFn, defaultExecAsync, isToolAvailableAsync (execFile + promises); traced child_process drop-ins (execSync, execFileSync, execFileAsync, execCapture, execFileCapture) — the ONLY module that imports child_process
     branch-naming.ts               # Canonical slugify, systemBranch, featureBranch, projectSlugFromBranch, isSystemBranch
     artifact-writer.ts             # writeOutputFile + appendOutputLine for output-dir artifacts
     workspace-index.ts             # buildWorkspaceIndex() — pre-built file index passed to all gates
-    conventions-digest.ts          # Compact in-prompt summary of coding conventions (avoids runtime read_file)
-    run-ledger.ts                  # Append-only JSONL evidence ledger for post-mortem diagnostics
+    conventions-digest.ts          # Compact in-prompt summary of coding conventions (avoids runtime read_file); Plan 30-07: imperative rule lines only, code blocks skipped
+    run-ledger.ts                  # Append-only JSONL evidence ledger for post-mortem diagnostics (Plan 30-01: one `dispatch-plan` entry per development round)
     ledger-report.ts               # Produces outputs/<run>/run-report.md from ledger data
     run-diagnosis.ts               # Automated failure-cause summary (run-diagnosis.md)
     repo-contract-writer.ts        # Write, read, and render .agent/repo-contract.json + Markdown
@@ -323,6 +346,23 @@ tests/                             # Jest test suite (ts-jest)
   # Debug mode: debug-trace, shell-exec-trace, debug-llm-callback, graph-trace, tool-trace, logger-debug-gating
   #   (enable via jest.mock('../src/config', () => ({ ...jest.requireActual('../src/config'), DEBUG_MODE: true })))
   # run-session-context.test.ts     — HITL getState()/resume() re-enter the run's RunContext
+  # Plan 30-01: dispatch-plan.test.ts (planner), dispatcher-dispatch.test.ts (execution, PR workflow mocked),
+  #   plan30-dispatch-regression.test.ts (the claudeopus5 plan, fixture tests/fixtures/plan30/claudeopus5-assignments.json)
+  # Plan 30-02 (real temp repos + local GitHub stand-in): commit-push-verification.test.ts, pr-resume.test.ts,
+  #   pr-deferred.test.ts (orchestrator, agents mocked), pr-merge-guard.test.ts; agent-invoke-ceiling.test.ts
+  # Plan 30-03: terminal-output.test.ts (fixture tests/fixtures/plan30/karma-stdout-seq2273.json — the claudeopus5 Karma stdout),
+  #   test-runner-karma.test.ts (detection, wrapper + reporter, commands, parsing, runTests with execCapture mocked),
+  #   product-serve-dir.test.ts (salvage prune, Angular serve dir, real smoke server), ac-coverage-gate.test.ts
+  # Plan 30-04 (real temp repos): repo-hygiene-staging.test.ts (staging helper, conflict markers, repair),
+  #   worktree-disposal.test.ts (disposal + salvage, pre-sync auto-commit, continue-run repair; bare origin, local mode)
+  # Plan 30-05: triage-selection.test.ts (fixture tests/fixtures/plan30/claudeopus5-triage-bugs.json — the 63 bugs of the
+  #   first claudeopus5 triage), unrecoverable.test.ts (runaway rules; moved out of acceptance-gate.test.ts)
+  # Plan 30-06: agent-factory-provider-request.test.ts (fake global fetch captures the provider request body:
+  #   automatic caching / breakpoints, soft-landing tool withholding), history-epoch.test.ts, token-report-sections.test.ts
+  #   (effective input, attribution, list vs billed); cost / anthropic-prompt-cache / prompt-cache / loop-guard extended
+  # Plan 30-07: shell-tool-output.test.ts (Karma fixture rendered, summarised test output, env, real-bash pipefail),
+  #   worktree-deps.test.ts; loop-guard (per-instance, visibility-aware read cache), workspace-snapshot, persona,
+  #   coding-conventions (digest) extended
 
 Plans/                             # Historical plan documents (01 … 21) + implementation reports
 specs/
@@ -359,9 +399,9 @@ intake -> [codebase-analyzer] -> architect -> product-manager -> dba -> team-lea
 | 3 | **Product Manager** | `productManagerNode` | Convert architecture + epics into user stories (with acceptance criteria) and granular tasks |
 | 4 | **DBA** | `dbaNode` | Design database entities, relationships, indexes, migration scripts, ERD diagram |
 | 5 | **Team Leader** | `teamLeaderNode` | Assign tasks to developers with rank-based reviewer selection, branch naming, dependencies |
-| 6 | **Development** | `developmentNode` | Fan-out assignments to dev agents via `dispatchDevelopers` with topological sorting. Plan 27-B: sequential dispatch by default (`SEQUENTIAL_DISPATCH=true`, forces concurrency to 1) with halt-on-failure (`DISPATCH_HALT_POLICY=strict` -- halts when any branch fails). Each branch goes through the full PR workflow with **per-assignment invocations** (Plan 26: each assignment gets its own agent with complexity-scaled budget; crashes are isolated). Critical gate failures (typecheck/build) block PR creation. Appends one `DispatchRound` to `state.dispatchRounds` counting **merged** PRs only, so `detectUnrecoverable()` can see a zero-output round |
-| 7 | **QA** | `qaNode` | QA Lead creates test plan -> QA Unit writes tests -> **Real test runner** parses runner output (authoritative signal; agent self-report is advisory) -> Test sufficiency gate (min counts, coverage floor, per-story coverage) -> Quality gates (deterministic build/lint/test) -> Security gates (secrets, deps, licences) -> AC coverage gate. QA crash synthesises a bug; testReports is never empty after qaNode. |
-| 8 | **Bug-fix Triage** | `bugfixTriageNode` | Runs `detectUnrecoverable()` first (halts the QA→triage→dev loop under `RUN_FAIL_POLICY=halt`); Team Leader re-assigns critical/major bugs; namespaced IDs prevent collision; `sanitizeAssignmentStoryIds()` guarantees every `storyId` references a real user story |
+| 6 | **Development** | `developmentNode` | Fan-out assignments to dev agents via `dispatchDevelopers`, which runs the branch DAG from `buildDispatchPlan()` (Plan 30-01, see Dispatch Planning): a branch starts only after every branch it depends on has finished. Plan 27-B: sequential dispatch by default (`SEQUENTIAL_DISPATCH=true`, forces concurrency to 1). Plan 30-01: `DISPATCH_HALT_POLICY=dependents` (default) — a branch that does not merge skips only its transitive dependents (`strict` still halts everything). Each branch goes through the full PR workflow with **per-assignment invocations** (Plan 26: each assignment gets its own agent with complexity-scaled budget; crashes are isolated). Critical gate failures (typecheck/build) block PR creation. Appends one `DispatchRound` to `state.dispatchRounds` (Plan 30-05: `merged` PRs — the progress signal —, first-time `executed` assignments, `deferred` assignments; unmerged `fileChanges` are not progress), so `detectUnrecoverable()` can see a stalled round. Plan 30-05: abandoned branches (unmerged in 2 consecutive rounds) and their dependents are not dispatched; a bug's `bugAttempts` grows only when an assignment with that id in `bugIds` ran; a provider stop is `DispatchResult.stopReason = 'provider-<kind>'` |
+| 7 | **QA** | `qaNode` | QA Lead creates test plan -> QA Unit writes tests -> **Real test runner** (installs Node deps first; Karma via a wrapper config + JSON reporter; output rendered) parses runner output (authoritative signal; agent self-report is advisory) -> Test sufficiency gate (min counts, coverage floor, per-story coverage for stories with merged work) -> Quality gates (deterministic build/lint/test) -> product verification **on the built tree** -> Security gates (secrets, deps, licences) -> AC coverage gate (`inconclusive` when the runner failed or could not name its cases; one bug per blocked PR). QA crash synthesises a bug; testReports is never empty after qaNode. See QA Real Execution (Plan 30-03). |
+| 8 | **Bug-fix Triage** | `bugfixTriageNode` | Runs `detectUnrecoverable()` first (halts the QA→triage→dev loop under `RUN_FAIL_POLICY=halt`). Plan 30-05: `selectTriageBugs()` (`triage-selection.ts`) hands the Team Leader only actionable bugs of the latest evaluation — see Bug-fix Triage Input. The context is a compact bug table (`summariseBugs`), the undelivered branches with blockers, final-round review comments and failing gate (`summariseUndeliveredBranches`), the system branch's real file list (`buildWorkspaceSnapshot`) and `buildBugfixInstructions(slug)` (one fix assignment on a blocked PR's own branch; `bugIds`; no invented paths or conflicts). Records a `TriageRound` (`state.triageRounds`); namespaced IDs prevent collision; `sanitizeAssignmentStoryIds()` guarantees every `storyId` references a real user story |
 | 9 | **DevOps** | `devopsNode` | Generate Dockerfiles, compose, K8s manifests; fallback Dockerfile generator when agent fails (`DEVOPS_FALLBACK_ENABLED`); always overwrite agent claims with `verifyDeployment` result; synthesise `DEPLOY-BUILD-FAILED`/`DEPLOY-UNHEALTHY` bugs |
 | 9b | **E2E** | `e2eNode` | Playwright MCP browser tests with preflight check. `e2eStatus` state channel: `passed`/`failed`/`skipped-no-services`/`error`. Falls back to `runSmokeTest` when Playwright unavailable or no Docker services but a web root exists (`E2E_ALLOW_LOCAL_SERVER`). Catch path synthesises `E2E-INFRA-FAILED` bug. |
 | 10 | **Finalize** | `finalizeNode` | Tear down containers, write summary, token report (HTML + JSON), traceability matrix, state snapshot, run manifest |
@@ -437,7 +477,9 @@ These are load-bearing. Changing any of them reintroduces a failure mode that is
 
 | Invariant | Where | Why |
 |-----------|-------|-----|
-| Anthropic requests carry `cache_control` breakpoints on the system message, the task message and a rolling history point | `prompt-cache.ts`, wired in `agent-factory.ts` | Anthropic serialises `tools` → `system` → `messages`, so the **system** breakpoint also caches the tool schemas and the injected response schema. Without breakpoints the ~6 kB fixed preamble is re-billed on every call: the pacmanclaude run reported `cache_read: 0` on all 227 Anthropic calls and billed **2.32M input / 99.7K output** (23:1) for one branch of fifteen. Max 4 breakpoints per request. Flag: `ANTHROPIC_PROMPT_CACHE_ENABLED`. Plan 26 A1: `blocksWithTrailingBreakpoint()` now skips `thinking` and `redacted_thinking` blocks (placing `cache_control` on them causes Anthropic API rejection). |
+| Anthropic requests carry `cache_control` breakpoints on the system message and the task message, and the conversation is cached too: by **automatic caching** (a top-level `cache_control` in `modelSettings`, `ANTHROPIC_AUTO_CACHE`, default on unless `ANTHROPIC_BASE_URL` is set) or, behind a proxy, by a breakpoint on the last block of the last message | `prompt-cache.ts`, wired in `agent-factory.ts` | Anthropic serialises `tools` → `system` → `messages`, so the **system** breakpoint also caches the tool schemas and the injected response schema. Without breakpoints the ~6 kB fixed preamble is re-billed on every call: the pacmanclaude run reported `cache_read: 0` on all 227 Anthropic calls and billed **2.32M input / 99.7K output** (23:1) for one branch of fifteen. Max 4 breakpoints per request, the automatic one included. Flag: `ANTHROPIC_PROMPT_CACHE_ENABLED`. Plan 26 A1: `blocksWithTrailingBreakpoint()` now skips `thinking` and `redacted_thinking` blocks (placing `cache_control` on them causes Anthropic API rejection). Plan 30-06: no breakpoint is gated on the length of the block it ends — the minimum cacheable length applies to the whole prefix (`getMinCacheableTokens()` only feeds a diagnostic); the old rolling history breakpoint sat behind a rewritten prefix and never hit. |
+| History compaction is cache-stable (`HISTORY_COMPACTION_MODE=epoch`, default) | `history-epoch.ts`, wired in `agent-factory.ts` | The sliding compactor rewrote the history on every call, so the prefix changed every turn and was never read from cache. An epoch freezes its compacted view and only appends to it until `HISTORY_EPOCH_MAX_TURNS` (8) turns were appended or the view exceeds `HISTORY_MAX_CHARS` (60k); then it recompacts once, down to `HISTORY_EPOCH_TARGET_CHARS`. Tool-call/result pairs stay intact; the first message is never touched. `sliding` restores the old behaviour. |
+| An invocation **soft-lands** once it has spent `INVOCATION_SOFT_LANDING_EFFECTIVE_TOKENS` (350k) effective input tokens (cache reads × 0.1, writes × 1.25) or the raw `MAX_INVOCATION_INPUT_TOKENS` (1.5M) backstop | `agent-factory.ts`, `agent-invoke.ts`, `tool-loop-guard.ts` | Before each model call the factory checks the invocation's spend; past the threshold that call can use no tool — Anthropic/Google keep the tool definitions (they head the cached prefix) with `tool_choice: none`, OpenAI-compatible calls get none — and every later tool call answers with the terminal guidance (`requestTermination`). The output is kept `budgetCapped` (ledger `ok-budget-capped`) and never respawned; the event is `agent:budget-exhausted` with `softLanding: true`. The strong fixer lands at `STRONG_FIXER_MAX_INPUT_TOKENS` (250k). Before, an invocation that crossed the raw ceiling had its finished work discarded. |
 | `cacheReadTokens` / `cacheCreationTokens` are recorded on every `TokenCallRecord`, and a zero-cache run logs an ERROR | `token-usage-extractor.ts`, `token-callback.ts`, `token-report.ts` | These numbers were present on every Anthropic response and discarded, so a total cache miss was invisible. `SANITY_ASSERT_CACHE` fires once after `SANITY_ASSERT_CACHE_AFTER` (20) Anthropic calls with zero cache reads. |
 | `opts.timeout` reaches Anthropic (`clientOptions.timeout`) and Google (`timeout`) | `llm-provider.ts` | It was applied to `ChatOpenAI` only, so `LLM_REQUEST_TIMEOUT_MS` was silently OpenAI-exclusive. |
 | `ChatAnthropic` is created **with** `streaming: true` + A2 sanitiser guard | `llm-provider.ts` | Anthropic's HTTP endpoint times out after ~10 minutes on non-streaming requests, killing long agent runs. Streaming residue (`input_json_delta`, id-less `tool_use`) is stripped by `sanitizeStreamingContentBlocks()` before every LLM call. Token accounting for streaming uses the `usage_metadata` fallback (D's two-tier lookup). |
@@ -491,21 +533,47 @@ The development phase uses a sophisticated PR workflow for each branch.
 The implementation is split into focused modules under `src/conductor/pr/` (Sub-Plan 25-08).
 `pr-workflow.ts` is a backward-compatible re-export shim; the real orchestrator is `pr/orchestrator.ts`.
 
-1. **Worktree creation** -- `git worktree add .worktrees/<branch>` for parallel isolation
-2. **Dev agent invocation** -- Agent writes code with TDD (tests first), commits with conventional format.
-   Every `invokeDevAgent` call wrapped in `try/finally` with `commitWorktree()` to preserve partial work.
-3. **Quality gates** -- Deterministic build/lint/test verification
-4. **Quality gate repair** -- If gates fail, re-invoke dev agent with error output (up to `PR_TEST_REPAIR_ATTEMPTS`).
-   Repair wrapped in `try/finally` with `commitWorktree()`.
+1. **Worktree creation** -- `git worktree add .worktrees/<branch>` for parallel isolation. Plan 30-02: a branch
+   already on the remote (blocked, open or deferred earlier) **resumes from `origin/<branch>`**
+   (`WorktreeResult.resumedFrom`); its successfully executed assignments are read back from the durable-commit
+   subjects (`executedAssignmentIds`, `work from <dev> on <assignment> (durable commit)`) and skipped — a failed
+   run is marked `(durable commit, failed)` and runs again — and
+   `integrateBase()` merges the latest base in before any dev work. It was reset to the base, so every
+   round redid the work and every push was rejected as non-fast-forward. Plan 30-07: the conductor then
+   installs the Node dependencies once (`preinstallWorktreeDeps`, the gates' install command, non-interactive
+   env), and the Workspace Snapshot says `Dependencies: installed` — every agent used to start with `npm install`.
+2. **Dev agent invocation** (`assignment-runner.ts`) -- one invocation per assignment, in the dispatch plan's
+   intra-branch order. Every `invokeDevAgent` call wrapped in `try/finally` with `commitWorktree()` to
+   preserve partial work. The branch budget is checked before each assignment; the wall cap scales —
+   `MAX_BRANCH_WALL_MS + MAX_BRANCH_WALL_PER_ASSIGNMENT_MS × (n − 1)`. When it runs out the rest are
+   **deferred**: the executed work is pushed and the workflow returns PR status `deferred` with no gates,
+   PR or review; the next round resumes the branch. A PR's `assignmentIds` lists **only executed**
+   assignments. An invocation that crosses `MAX_INVOCATION_INPUT_TOKENS` after valid output keeps that
+   output (`budgetCapped`, ledger outcome `ok-budget-capped`, no respawn); `InvocationBudgetExceededError`
+   is thrown only without valid output, outside `retryWithBackoff`. Plan 30-06: the effective-token soft
+   landing (see Provider Transport Invariants) normally ends the invocation first, with tools withheld;
+   its output is kept the same way and the tool ceiling no longer respawns it.
+2b. **Verified push** (`pushBranch`) -- every push is checked. A non-fast-forward rejection fetches
+   `origin/<branch>`, rebases (merge as fallback) and retries once; a push that still fails is an ERROR plus
+   `branch:push-failed`, never "Branch pushed". If the branch cannot be pushed before the PR, the workflow
+   returns `PR-PUSH-REJECTED-*` (status `closed`): no PR, review or merge.
+3. **Quality gates** -- Deterministic build/lint/test verification, then product verification on the built
+   tree: `runBranchGates()` is used for every gate run, so repairs and re-runs keep the product-verify blocker.
+4. **Quality gate repair** (`runGatesWithRepair`) -- If gates fail, re-invoke dev agent with error output (up
+   to `PR_TEST_REPAIR_ATTEMPTS`). Repair wrapped in `try/finally` with `commitWorktree()`. Returns the report
+   and the HEAD it was produced at. Plan 30-07: a `GateResult.output` is the step's rendered output cut to its
+   failures and verdict (2,000 chars); the repair prompt, PR body, bugs and test report summarise it further —
+   the raw last 2,000 chars of a Karma run were progress redraws.
 5. **Security gate** (optional) -- Secret scan before PR
 6. **PR creation** -- Checks for existing open PR first (`findExistingPR`), then creates via Octokit or curl.
    422 "already exists" errors reuse the existing PR instead of deadlocking. Auth errors (`classifyPrFailure`)
    are fatal and halt the run immediately. Transient failures (GitHub 5xx, network errors) retry up to 3
    times with exponential backoff (2s base).
 6b. **PR creation failure** -- If all retries fail, `executePRWorkflow` returns a `PullRequest` with
-   `status: 'pr-creation-failed'` instead of throwing. The dispatcher sets a `prCreationFailed` flag,
-   skips all remaining branches (scaffold, bootstrap, serialised, parallel), and stops the run
-   gracefully. The failed PR entry is persisted in `state.json` so continue-run can retry just the PR
+   `status: 'pr-creation-failed'` instead of throwing. The dispatcher stops with
+   `stopReason: 'pr-creation-failed'` (Plan 30-01; it was a `prCreationFailed` flag that the halt policy
+   also set, so halted rounds were logged as "PR creation failed") and starts no further branch.
+   The failed PR entry is persisted in `state.json` so continue-run can retry just the PR
    creation — the branch code is already pushed. See `retryFailedPRCreation()` in `pr-workflow.ts`.
 7. **Review loop** -- Sequential per-reviewer; each reviewer sees code after previous fixes.
    Fix agents wrapped in `try/finally` with `commitWorktree()`.
@@ -527,27 +595,74 @@ The implementation is split into focused modules under `src/conductor/pr/` (Sub-
     findings, blocking review comments, file change count, and quorum before allowing
     merge. Policy modes: `strict` (default, all evidence required), `permissive` (hard blockers only),
     `legacy` (pre-Plan-19 unconditional merge). Blocked PRs get status `'blocked'` and a `pr:blocked` event.
+    Plan 30-02 (`merge-decision.ts`): the evidence is **fresh** — gates and the integrity gate re-run when
+    HEAD moved after they last ran (review fixes, escalation and the strong fixer commit; the strong fixer's
+    own gate run is reused when HEAD is unchanged); a gate re-run that throws is a blocker. `iterationsUsed`
+    is the iterations actually run. **Merge guard** (`checkPrHeadCurrent`): the PR head GitHub would merge
+    must equal the local HEAD (polled; fails closed), otherwise the PR is `blocked` with "remote head stale".
+    Merge-time blockers (branch not on remote, secrets, critical integrity, identity mismatch, stale head,
+    and since Plan 30-05 unresolvable base conflicts) set status `blocked`. Each PR gets one `merge` ledger entry.
+    Plan 30-05: an unmerged PR record also carries `failedGate` (first failing gate step, rendered output
+    summary — `failedGateOf()` in `pr/gates.ts`), as does the `PR-GATES-FAILED-*` placeholder.
+    Plan 30-03: an unmerged PR record carries its blockers (`PullRequest.blockers`, including unresolvable
+    conflicts and a failed merge call); traceability's Blocked Deliveries and the AC gate's `PR-BLOCKED-*` bug show them.
 12. **Merge ladder** -- `git merge origin/<base> --no-edit` (not rebase). On conflict: auto-resolve lockfiles
     and `package.json` via `resolveKnownConflicts()`; hand remaining conflicts to dev agent for
     `MERGE_CONFLICT_FIX_ATTEMPTS`; if still unresolved, salvage branch and report `pr:conflict`.
+    Plan 30-04: the commit after an attempt (`commitAndPush` → `stageWorkspaceChanges`) never stages a
+    file that still has conflict markers, so the merge stays open instead of being reported resolved.
 13. **Evidence-based completion** -- After merge, compute `CompletionEvidence` (real file changes,
-    declared modules present, gate passed). Assignments that merge without evidence go back to pending.
-14. **Worktree disposal** -- On success: remove worktree + delete remote branch. On failure: move worktree
-    to `.worktrees-failed/` for salvage, export `git format-patch` to `<outputPath>/salvage/`, do NOT
-    delete remote branch. Cap retained failed worktrees at `WORKTREE_SALVAGE_MAX`.
+    declared modules present, gate passed). Plan 30-02: declared module ids are resolved to paths through
+    `repoContract.modules` (an id the contract does not know makes the check n/a — `unresolvedModuleIds`),
+    and `developmentNode` applies `settleCompletion()`: merged work without evidence goes back to pending
+    with an `INCOMPLETE-*` bug until it has merged `ASSIGNMENT_MAX_ATTEMPTS` times.
+14. **Worktree disposal** (`disposeWorktree`, Plan 30-04) -- Merged, or not merged but `origin/<branch>`
+    (asked with `ls-remote`) is the worktree's HEAD and nothing is uncommitted: remove the worktree.
+    Otherwise keep it, **detached**, at `.worktrees/_failed/<slug>` (inside the ignored `.worktrees/`;
+    newest `WORKTREE_SALVAGE_MAX` kept). The local branch is deleted afterwards in every case (probed
+    first), so a later round resumes from the remote head. Unmerged branches also export
+    `git format-patch` to `<outputPath>/salvage/`; the remote branch is kept.
 
-### Scaffold Barrier (dispatcher.ts)
+### Dispatch Planning (dispatch-plan.ts) — Plan 30-01
 
-- `injectScaffoldDependencies()` ensures every non-scaffold assignment depends on all scaffold assignments
-- Scaffold branches run first (sequentially); `syncWorkspaceToBranch()` called after each merge
-- `findOverlappingBranches()` detects branches with shared `moduleIds` and serialises them
-- `CONFIG_OWNERSHIP_SCAFFOLD_ONLY` prevents feature branches from modifying root config files
+`buildDispatchPlan(assignments, { projectSlug, preSatisfied })` is pure (no logging, no git) and is
+run twice: by `dispatchDevelopers()` before every development round and by `validateAssignmentPlan()`
+right after the Team Leader, so planning findings and dispatch behaviour cannot disagree.
+
+| Rule | Why (claudeopus5 run) |
+|------|-----------------------|
+| Scaffold = branch name `<slug>/chore/scaffold` only (`isScaffoldAssignment`, `isScaffoldBranch`) | `taskType: 'chore'` + `.some()` made a 7-assignment feature branch "the scaffold" because of a chore-typed asset audit |
+| An explicit `branchName` wins (prefixed, sanitised, `assertValidRef`); without one an assignment follows the first non-scaffold branch of its story (`canonicalBranchName`). Nothing is moved onto or off the scaffold; an invalid name falls back to the story branch with a warning | Story-id canonicalisation put ASSIGN-004/005 and FINAL INTEGRATION onto the scaffold branch, then piled the bug-fix assignments onto a blocked branch |
+| Scaffold assignments drop dependencies on feature work (`skippedEdges`, reason `scaffold-depends-on-feature`) | The scaffold always runs first |
+| Barriers: non-scaffold work waits for every scaffold assignment; feature work waits for every **bootstrap** assignment (entry-module owner or bootstrap/wiring keyword with no transitive dependency on non-scaffold work). Wiring that does depend on feature work is a **finalizer**: no edges point at it and its branch is held back until nothing else is ready | ASSIGN-027 matched `\bwiring\b`, every feature was made to wait for it while it waited for every feature — a 23-assignment cycle |
+| `wouldCreateCycle()` (`utils/dependency-graph.ts`) — a barrier edge that would close an assignment- or branch-level cycle is skipped (`skippedEdges`, reason `would-create-cycle`) | Barrier injection must never create cycles |
+| `topoSort()` breaks any remaining cycle deterministically (`breakCycles()`: Tarjan SCC; in each component the "forward" edge whose dependent is listed earliest is removed) and returns `{ layers, brokenEdges, warnings }`; branch-level cycles are broken the same way. The dispatcher logs assignment-level breaks as ERROR | The old fallback dispatched every cyclic assignment "in one parallel batch" |
+| Branch DAG: `layers` (Kahn, ordered by kind then first appearance), `branchOrder = layers.flat()`, per-branch `dependsOnBranches`, intra-branch dependency order, `overlaps` for same-layer branches sharing a module | A branch started as soon as ANY of its assignments was ready, so us-027 was built on `not implemented` stubs |
+
+The dispatcher runs `plan.layers` in order: scaffold/bootstrap branches one at a time with
+`syncWorkspaceToBranch()` (conductor/workspace-sync.ts) to the **system branch** after each merge —
+a failed sync is an ERROR + transcript entry; the main checkout is never switched to a feature branch.
+Same-layer overlapping branches run as chains, the rest in batches of `MAX_CONCURRENT_DEVS` (1 under
+`SEQUENTIAL_DISPATCH`). When a branch does not merge (or its workflow throws), `onBranchNotMerged()`
+applies `DISPATCH_HALT_POLICY`: `dependents` (default) skips its transitive dependents for the round
+(`dispatch:skipped-dependents` + transcript; their assignments stay pending), `strict` halts,
+`scaffold-only` halts only for the scaffold, `off` carries on and — for a failed scaffold — cuts later
+branches from the scaffold's tip (Plan 26 A5; `createBranchWorktree` resolves it to `origin/<scaffold>`).
+Branches not admitted (run wall clock), branches whose PR status is `deferred` (branch budget ran out —
+Plan 30-02; `DispatchResult.deferredAssignmentIds` lists the unstarted assignments) and recovered provider
+failures also skip their dependents under `dependents`. `DispatchResult.stopReason` is `'pr-creation-failed' | 'halt-policy' | 'budget' |
+'provider-<kind>' | null`, and the final log names the real reason plus the branches not dispatched.
+Every round emits one `dispatch:plan` event and one `dispatch-plan` ledger entry (kinds + reasons such
+as `finalizer: ASSIGN-027 mentions "wiring" but depends on 23 feature assignment(s)`, assignments,
+dependencies, skipped/broken edges, order). `CONFIG_OWNERSHIP_SCAFFOLD_ONLY` still prevents feature
+branches from modifying root config files.
 
 ### Git Branching Strategy
 
 - **System branch**: `project/<system-slug>` (all feature branches target this)
-- **Feature branches**: `<project-slug>/feature/<story-slug>` (one branch per user story)
-- **Scaffold branch**: `<project-slug>/chore/scaffold`
+- **Feature branches**: `<project-slug>/feature/<story-slug>` (by default one per user story; the Team Leader's explicit `branchName` always wins)
+- **Scaffold branch**: `<project-slug>/chore/scaffold` (the only scaffold — by name)
+- **Integration branch**: `<project-slug>/feature/integration` for FINAL INTEGRATION / app-wiring work (a finalizer; runs last)
 - **Commit format**: `[project-slug]-[STORY-ID]-TYPE: description` (feat, fix, test, refactor, chore)
 
 ---
@@ -559,7 +674,8 @@ The implementation is split into focused modules under `src/conductor/pr/` (Sub-
 Prevents agents from infinite tool-call loops with per-tool scoping and split budgets:
 - Tracks total invocations per `toolName::args` key
 - **Read-only tools** (read_file, list_dir, search_code, git tools) cache results; duplicates return `[CACHED]` (free — no budget consumed)
-- **Mutating tools** (write_file, edit_file, etc.) clear all caches (workspace changed)
+- **Read cache per agent instance, visibility-aware** (Plan 30-07, `branch-read-cache.ts`): it was process-global per agent id, so a respawn or the next assignment got `[UNCHANGED]` pointers to content it had never seen. A repeat whose earlier result is still in the history gets `[UNCHANGED — identical to your read at turn N, still visible above]`; once the compactor has stubbed that result (`noteElidedResults`, fed by `compactHistory`'s `stubbedToolCallIds`), the repeat runs again and returns the content — never BLOCKED, never a CACHED stub. A result shrunk for the per-turn budget is cached in full and repeats get it in full.
+- **Mutating tools** (write_file, edit_file, non-read shell commands) reset the repeat counts and the shell read cache (workspace changed). Plan 30-07: the read cache is not cleared — the next identical read runs and its content is compared: unchanged and still visible → the `[UNCHANGED …]` pointer, changed → the new content
 - 3rd identical call blocks ONLY that specific `(tool, args)` — other tools keep working
 - **Split budgets** (`TOOL_BUDGETS_JSON`): separate read/write/shell/turn ceilings per rank — principal 80/40/20/45, senior 70/35/18/40, junior 60/30/16/35 (Plan 27-C: raised ~2x from Plan 22)
 - **Complexity multipliers** (Plan 27-C): trivial=1.0, simple=1.0, moderate=1.0, complex=1.5, very-complex=2.0. The 0.75x penalty for trivial/simple was removed — TL complexity estimates are unreliable and the penalty was catastrophically low
@@ -568,7 +684,8 @@ Prevents agents from infinite tool-call loops with per-tool scoping and split bu
 - **Hard ceiling**: `LOOP_GUARD_HARD_CEILING` (250) absolute stop across all categories (Plan 27-C: raised from 140 to accommodate higher per-rank budgets)
 - **Budget pressure footer** (Plan 22 A3): successful tool results carry `[BUDGET: …]` above 60 % usage and `[BUDGET CRITICAL: …]` above 85 %, so the agent can plan its landing
 - **Terminal guidance**: on exhaustion, injects "return your JSON now, do not claim files you did not write"
-- **Forced termination** (Plan 22 A4): after `MAX_POST_EXHAUSTION_CALLS` (2) guidance responses, `isTerminationDemanded()` becomes true and the agent factory sets `tools: []` + `toolChoice: 'none'` on the next model call. Throwing from a tool does **not** work — LangGraph's ToolNode converts tool errors into ToolMessages and the loop continues
+- **Forced termination** (Plan 22 A4): after `MAX_POST_EXHAUSTION_CALLS` (2) guidance responses, `isTerminationDemanded()` becomes true and the agent factory withholds tools on the next model call (Plan 30-06: `toolChoice: 'none'` with the definitions kept for Anthropic/Google, so the cached prefix survives; `tools: []` for OpenAI-compatible models). Throwing from a tool does **not** work — LangGraph's ToolNode converts tool errors into ToolMessages and the loop continues
+- **Soft landing** (Plan 30-06): `requestTermination(reason)` demands termination at once — the factory calls it when the invocation's effective-token budget is spent; every later tool call answers `BUDGET EXHAUSTED: <reason>`. It does not count as a tool-budget exhaustion, so nothing respawns
 - **Legacy mode**: numeric `maxTotalCalls` parameter still works for reviewer / pipeline agents
 
 > **Plan 22 A1 — load-bearing wiring.** `buildAgent()` must pass `cfg.toolBudgets` (an object)
@@ -590,6 +707,8 @@ corrupting the product:
 | `write_file` / `edit_file` **reject** a payload that is an elision marker | `checkWritePayload()` in `workspace-tools.ts` | The only enforcement that cannot be bypassed by prompting. Deliberately narrow: an exact, whole-payload marker match. A "minimum plausible source length" rule was tried and removed — `export const x = 2;` is 19 characters. |
 | The recent window is measured in **model turns** (`HISTORY_KEEP_RECENT_TURNS`, default 3), not tool results | `history-compactor.ts` | With 8–11 parallel calls per turn, "keep the last 4 results" preserved exactly ONE turn, so agents re-read files they had just read and exhausted their tool budget doing it. `HISTORY_KEEP_RECENT_TOOL_RESULTS` survives as a lower bound (`min()` of the two boundaries wins). |
 | The last `HISTORY_KEEP_RECENT_WRITE_ARGS` (2) write turns keep their arguments verbatim | `history-compactor.ts` | The model needs its most recent writes intact to diff against, and this is exactly the window where placeholder imitation was observed. |
+| Dropping whole groups to reach the char target never touches the recent window | `history-compactor.ts` (Rule 4) | Plan 30-06: the epoch compactor recompacts toward a target below the ceiling; it must cut old stubbed pairs, not the turns the model is working from. |
+| The compactor reports which tool results it stubbed (`stubbedToolCallIds`) | `history-compactor.ts` → `noteElidedResults()` | Plan 30-07: the read cache answers a repeat with a pointer only while the earlier result is visible; a stubbed result must be readable again. |
 | Fresh `AIMessageChunk`s are normalised **before** they enter graph state | `normaliseAIMessageForState()`, `afterModel` middleware | `sanitizeStreamingContentBlocks()` works on a copy by design, so residue accumulated in the checkpoint and was re-scanned every turn — the cause of the `dropped 2 … dropped 31` monotonic growth in the run log. |
 
 ### Respawn Handoff (`agent-respawn.ts`) — Sub-Plan 08, fixed in Plan 22
@@ -631,7 +750,7 @@ Pre-computed answers injected into dev agent prompts to eliminate reconnaissance
 - `git ls-files` tree grouped by directory (capped at `SNAPSHOT_MAX_FILES`, default 400)
 - Verbatim `scripts` block from every `package.json` (root + workspace members)
 - Test framework detection (runner, directories, command)
-- Dependency list (names only, no versions)
+- Dependency list (names only, no versions), after a status line (Plan 30-07): `Dependencies: installed — node_modules is up to date. Do not run npm install unless you add a package.` (from `shouldSkipInstall`; the conductor pre-installs) or `Dependencies: not installed`
 - Budget: `SNAPSHOT_MAX_CHARS` (default 8000)
 - Expected effect: eliminates 6–10 of every ~30 tool calls per invocation
 
@@ -691,9 +810,9 @@ Graceful degradation on budget limits with four levels:
 
 **Provider failure handling** (`provider-failure.ts`, `dispatcher.ts`):
 - Errors are classified into `billing`, `auth`, `quota`, `model-not-found`, `transient`, and `unknown`
-- **Fatal errors** (`auth`, `model-not-found`): dispatch stops immediately; `providerFailureKind` is set on `DispatchResult`
-- **Pauseable errors** (`billing`, `quota`): `awaitProviderRecovery()` probes the provider's `/models` endpoint with exponential backoff via `createProviderProbe()`. If recovery fails, `providerFailureKind` is set
-- `developmentNode` checks `result.providerFailureKind` and returns `{ cancelled: true, _stopReason: 'provider-<kind>' }`, routing to finalize
+- **Fatal errors** (`auth`, `model-not-found`): dispatch stops immediately with `DispatchResult.stopReason = 'provider-<kind>'`
+- **Pauseable errors** (`billing`, `quota`): `awaitProviderRecovery()` probes the provider's `/models` endpoint with exponential backoff via `createProviderProbe()`. If recovery fails, dispatch stops the same way
+- A provider stop replaces any earlier stop reason of the round (Plan 30-05: the separate `providerFailureKind` field is gone); `developmentNode` checks `result.stopReason` and returns `{ cancelled: true, _stopReason: 'provider-<kind>' }`, routing to finalize
 - Planning-phase provider failures propagate as unhandled exceptions, caught by `run.ts` crash snapshot
 
 **Periodic state snapshots** (`run-snapshot.ts`):
@@ -709,7 +828,8 @@ Multi-language deterministic verification:
 - **7 stacks**: Node, Maven, Gradle, Go, Python, .NET, Rust
 - **5 steps**: install, typecheck, build, lint, test
 - **Multi-root detection** (`detectStackRoots`): walks up to `QUALITY_GATE_SCAN_DEPTH` levels deep, prunes
-  `node_modules`/`.git`/`dist`/etc., npm-workspace-aware (tags `isWorkspaceMember`)
+  the shared `PRUNE_DIRS` (`node_modules`/`.git`/`.worktrees`/`.worktrees-failed`/`dist`/etc. — a salvaged
+  worktree became a second product root in claudeopus5), npm-workspace-aware (tags `isWorkspaceMember`)
 - **Script resolver** for Node: reads `package.json` scripts and resolves to `real`/`fallback`/`absent` mode —
   no more `--if-present` (a missing build script is now a real failure, not a silent pass)
 - **Honest aggregation**: `passed = executed.length > 0 && executed.every(r => r.passed)`;
@@ -726,8 +846,15 @@ Three checks that verify the generated product actually works:
 - **Import resolution** (`findUnresolvedReferences`): static analysis of all source files for broken imports,
   missing CSS, absent HTML `src`/`href` targets, and undeclared npm packages
 - **Smoke test** (`runSmokeTest`): inline static file server serves built artifacts, verifies HTTP 200 and that
-  sub-resources resolve; no external dependencies (no Playwright)
-- Wired into PR workflow (artifacts+resolve only) and QA node (full mode with smoke)
+  sub-resources resolve; no external dependencies (no Playwright). Plan 30-03 (`product-serve-dir.ts`): the
+  served directory is angular.json's `architect.build.options.outputPath` (string → `<path>/browser` then
+  `<path>`; `{ base, browser }`) when it holds an index.html, else the shallowest directory under the build
+  output that does, else the build output itself. Readiness is **any** HTTP response; `GET /` is judged
+  separately with an explicit reason (`GET / returned 404 — index.html found at …` / `no index.html under dist`).
+  claudeopus5 served `dist/` of an Angular 17 build (`dist/<project>/browser/`) and reported a 60 s readiness timeout.
+- Wired into PR workflow (artifacts+resolve only) and QA node (full mode with smoke). Both run it **after**
+  the quality gates built the tree (`runBranchGates` — Plan 30-02; `qaNode` — Plan 30-03) and attach it as
+  `GateReport.productVerify`; QA ran it before the build and reported "Build produced no artifacts: ."
 - Synthesises `PRODUCT-ARTIFACTS-*`, `PRODUCT-RESOLVE`, and `PRODUCT-SMOKE` bugs
 
 ### QA Real Execution (`test-runner.ts`, `test-sufficiency.ts`) — Sub-Plan 09
@@ -751,6 +878,22 @@ QA reports are now derived from **real test-runner output**, not LLM self-report
   `storyId`/`acIndex`. Refine rejects `{ total: 0, status: 'pass' }`.
 - **QA crash handling**: QA Unit or QA Lead crash synthesises a `QA-UNIT-FAILED` / `QA-LEAD-FAILED`
   bug. `testReports` is never empty after `qaNode` (invariant assertion).
+
+**Plan 30-03 — QA signal integrity.** The claudeopus5 run fed 63 bugs per round to triage, all of them
+artifacts of pipeline bugs (Karma run with Jest flags, `ng` before `npm install`, a salvage directory as a
+product root, the wrong smoke directory, assignment ids passed as story ids). Now:
+
+| Rule | Where |
+|------|-------|
+| Supported runners: Jest (`--json`), **Karma/Jasmine** (agentjson reporter), Vitest/Mocha/pytest (JUnit XML), Maven/Gradle (surefire/JUnit), Go (`-json`), dotnet (TRX), Rust; anything else is `unknown` | `test-runner.ts`, `test-runners/` |
+| Detection: `ng test` (Karma or no angular.json test builder), `karma` in the script, a `karma.conf.*`, or a Karma test builder → `karma`; Jest only when it is in the script (incl. `react-scripts test`), a dependency, a `jest` key or a config file; otherwise `unknown` (plain `npm test`: exit code + rendered summary, `caseNames: 'unavailable'`) | `detectNodeFramework`, `isKarmaProject` |
+| Karma runs through a wrapper config written to `outputs/<run>/test-reports/<root>/karma.agent.conf.cjs` (never into the repo): it loads the project's karma config (or reproduces Angular's built-in one for `@angular-devkit/build-angular:karma` without a config file), forces `singleRun`/no watch, keeps the project's browsers (+ `ChromeHeadlessNoSandbox` swapped in for `ChromeHeadless` when running as root) and registers an inline `reporter:agentjson` writing `karma-results.json`. Commands: `npm test -- --karma-config=<wrapper> --watch=false [--code-coverage]` / `npx --no-install karma start <wrapper> --single-run`. An ESM/TS config or a script that already passes `--karma-config` runs unwrapped | `test-runners/karma.ts` |
+| Without `karma-results.json`, the totals (`TOTAL:` / last `Executed N of M`) and the failed specs (tags, expectation) are parsed from the rendered output, `caseNames: 'unavailable'` | `parseKarmaOutput` |
+| Node dependencies are installed (`GATE_COMMANDS.node.install`) before the suite unless `shouldSkipInstall()` (an npm workspace member is left to its root's install, as in the quality gates); a failed install is the runner error; exit 127 reads `command not found: <bin> — dependencies not installed?` | `runTests` |
+| Runner output is rendered (`renderTerminalOutput`) before anything reads it; a runner error's `runnerErrorDetail` is a headline plus `summariseTestOutput(…, 1500)`; every report carries the exact `command` | `utils/terminal-output.ts` |
+| One `runner-error` violation (one `QA-runner-error` bug) lists every failing root with its command, exit code and rendered output; an unmeasured root (`caseNames: 'unavailable'`, exit 0) is not "no tests" | `checkTestSufficiency` |
+| Min-test and per-story checks run only when a root produced case names; `story-untested` (critical) only for stories with merged work — `qaNode` passes `storyIdsOfAssignments(assignments, completedAssignmentIds)` | `checkTestSufficiency`, `assignment-policy.ts` |
+| `PRUNE_DIRS` includes `.worktrees-failed` (and `__pycache__`); the security gate's walk and skip list use it | `utils/fs-walk.ts`, `security-gates.ts` |
 
 ### Gate Integrity (`gate-integrity.ts`) — Sub-Plan 02
 
@@ -782,15 +925,22 @@ Single deterministic function that evaluates whether the product is acceptable.
   INTEGRITY, SCOPE, AC_COVERAGE, DEPLOY, E2E. Required criteria (BUILD, ARTIFACTS, RESOLVE, TESTS,
   SMOKE, INTEGRITY, SCOPE) must all pass for `'accepted'`; otherwise `'rejected'`, `'partial'`
   (all required pass but optional fail), or `'inconclusive'` (some required criteria could not execute).
-- **`detectUnrecoverable(state)`** — detects when no further pipeline work can change the outcome:
-  N consecutive zero-progress dispatch rounds, merge-conflict blocked branches, sourceless workspaces,
-  or bugs attempted 2+ times that remain unresolved. Called at the **top of `bugfixTriageNode`** as
-  well as from the acceptance gate — otherwise `unrecoverable` is only ever set post-e2e and the
-  QA → triage → development loop can never halt itself (Plan 21, E3).
-  Its zero-progress check reads `state.dispatchRounds`, which **`developmentNode` must keep writing**;
-  `prs` there counts merged PRs only, never `PR-SKIPPED-*` placeholders.
-- **`haltIfUnrecoverable()`** — checked in developmentNode, qaNode, devopsNode to skip early under
-  `RUN_FAIL_POLICY='halt'`.
+  Plan 30-05: SCOPE reads the stories of `completedAssignmentIds` (`storyIdsOfAssignments`). Its set
+  was created and never filled, so SCOPE failed for every run with stories and the loop always ran to
+  `MAX_BUGFIX_ITERATIONS`.
+- **`detectUnrecoverable(state)`** (`unrecoverable.ts`, moved out in Plan 30-05) — no further pipeline
+  work can change the outcome when: (1) `UNRECOVERABLE_ZERO_ROUNDS` consecutive dispatch rounds merged
+  no PR (unmerged file changes are not progress; a round with deferred work is in flight); (2) a branch
+  is **abandoned** (`abandonedBranches()`: its last 2 PR records are failed attempts — a deferred,
+  merged or pr-creation-failed record ends the streak) and every pending assignment is on it or waits
+  for it; (3) the workspace is sourceless after development; (4) two consecutive triage rounds see the
+  same open bugs (`state.triageRounds`); (5) 3+ open bugs **of any kind** were worked on twice
+  (`bugAttempts`). "Open" means `selectTriageBugs()` still selects it from the latest evaluation.
+  Called at the **top of `bugfixTriageNode`** and from the acceptance gate (Plan 21, E3). It reads
+  `state.dispatchRounds`, which **`developmentNode` must keep writing** (`dispatchRoundOf()`:
+  `merged`, `executed`, `deferred` — `merged` never counts a `PR-SKIPPED-*` placeholder).
+- **`haltIfUnrecoverable()`** (`unrecoverable.ts`) — checked in developmentNode, qaNode, devopsNode to
+  skip early under `RUN_FAIL_POLICY='halt'`.
 - **`acceptanceBlockersToBugs()`** — converts failed required criteria into `ACCEPT-*` bugs for the
   bugfix loop.
 
@@ -800,6 +950,23 @@ accepted (and not unrecoverable).
 
 Key env vars: `RUN_FAIL_POLICY` (halt/finalize/legacy), `ACCEPT_MIN_TESTS`, `ACCEPT_REQUIRE_SMOKE`,
 `UNRECOVERABLE_ZERO_ROUNDS`.
+
+### Bug-fix Triage Input (`triage-selection.ts`) — Plan 30-05
+
+claudeopus5's first triage handed the Team Leader 63 bugs (`JSON.stringify`, 38 kB), every one a
+pipeline artifact; it then invented merge conflicts and file paths. `selectTriageBugs(state)`:
+
+| Rule | What it does |
+|------|--------------|
+| Bug window | Only bugs raised after the previous `TriageRound.bugCursor` (`currentBugs`) — a bug no longer reported is not triaged again, a regression is (QA's sticky `fixedBugIds` used to hide it) |
+| Undelivered work is not a bug | A story-scoped bug (`bugStoryId`: `storyId`, `AC-<story>-<n>`, `QA-PLAN-GAP-…`, `QA-story-untested-…`) is dropped while its story has assignments but none merged; kept when no assignment covers the story. `ACCEPT-SCOPE` is dropped while every story has an assignment |
+| One bug per undelivered branch | `branchesNeedingFix()`: latest PR record `blocked`/`open`, or `closed` with `failedGate` → one `PR-BLOCKED-<branch>` bug with `prBlockers()`. None for a deferred branch, a PR-less placeholder without a gate failure, or an **abandoned** branch |
+| Root cause absorbs derivatives | `QA-runner-error` absorbs `QA-story-untested-*` and `implemented-untested` AC bugs; `PRODUCT-ARTIFACTS-*` absorbs `PRODUCT-SMOKE`; a `PR-BLOCKED-*` bug absorbs `blocked` AC bugs; `ACCEPT-<criterion>` is dropped while the specific bug it restates is open |
+
+Dropped bugs are logged and summarised in the transcript (`summariseDropped`). The fixture
+`tests/fixtures/plan30/claudeopus5-triage-bugs.json` (63 bugs) reduces to `QA-runner-error`,
+`PRODUCT-ARTIFACTS-root` and one `PR-BLOCKED-…us-027…` bug. Each bug-fix assignment gets `bugIds`
+(`resolveBugIds`: the Team Leader's list, else the open ids its description names).
 
 ### Requirements Traceability & AC Coverage (`traceability.ts`, `nodes/qa.ts`) — Sub-Plan 10
 
@@ -831,14 +998,18 @@ full traceability matrix so "did we build and verify what was asked?" is answera
 - No in-place mutation of `story.acceptanceCriteria` — a local copy is used.
 - Developer persona requires `[storyId#acIndex]` test naming (e.g. `it('[US-003#1] eating a dot increments score', ...)`).
 
-**AC Coverage Gate** (in `qaNode`):
+**AC Coverage Gate** (`evaluateAcCoverageGate()` in `ac-coverage-gate.ts`, called by `qaNode`):
 - Enabled when `MIN_AC_COVERAGE_PCT > 0` (default 70%). The `AC_COVERAGE` acceptance criterion
   becomes **required** when this threshold is set.
 - Emits a `TestReport` signal with `framework: 'ac-coverage'` and `source: 'quality-gates'`
   so `afterQaRouter` sees failures and routes to the bugfix loop.
-- On failure, synthesises bugs with `severity: 'critical'`, prioritising **missing** over
-  **tested-failing** over **blocked** over **implemented-untested** (gap-first ordering).
-  Bug IDs follow the pattern `AC-<storyId>-<acIndex>`.
+- Plan 30-03: the gate is **`inconclusive` with no bugs** when any test runner failed or could not name
+  its cases (`caseNames: 'unavailable'`) — a criterion without a passing test is then unmeasured, not
+  untested (an inconclusive report does not route to triage).
+- On failure, synthesises bugs with `severity: 'critical'`, gap-first: **missing**, **tested-failing**,
+  then **one `PR-BLOCKED-<branch>` bug per blocked PR** carrying its real blockers (`blockedPrBug`, from
+  Blocked Deliveries; a deferred branch gets none), then **implemented-untested**. Criterion bug IDs follow
+  `AC-<storyId>-<acIndex>`. `planned-only` criteria (work not merged yet) never produce bugs.
 - Max bugs per gate run: `MIN_AC_COVERAGE_MAX_BUGS` (default 25).
 
 **QA Plan Gap Detection** (in `qaNode`):
@@ -849,6 +1020,9 @@ full traceability matrix so "did we build and verify what was asked?" is answera
 **Traceability Report** (in `finalizeNode`):
 - `TraceabilityReport` includes: `rows`, `totals`, `orphanedStories`, `orphanedAssignments`,
   `orphanedTasks`, `unassignedTasks`, `blockedDeliveries`, `claimedVsExecuted`.
+- `blockedDeliveries` (Plan 30-03): each branch's **latest** PR record when it is blocked, open or deferred,
+  with `reason` = the record's `blockers` (merge-stage blockers) — it read "Merge conflicts or review
+  blocked" for every blocked PR, and a branch that merged later stayed listed.
 - Output: `outputs/<run>/traceability.md` (human-readable) **and** `outputs/<run>/traceability.json`
   (machine-readable, controlled by `TRACEABILITY_JSON`, default true).
 
@@ -898,7 +1072,7 @@ TestReport, and records a `verificationErrors` entry. No silent swallowing.
 ### Security Gates (`security-gates.ts`)
 
 Three checks combined:
-- **Secret scan**: Regex patterns for AWS keys, private keys, GitHub tokens, JWTs, generic secrets; falls back to filesystem walk when git is unavailable (Plan 25-04 &sect;3)
+- **Secret scan**: Regex patterns for AWS keys, private keys, GitHub tokens, JWTs, generic secrets; falls back to filesystem walk when git is unavailable (Plan 25-04 &sect;3). Skips `.worktrees/` and `.worktrees-failed/` (salvaged worktrees); the walk prunes the shared `PRUNE_DIRS` plus dot directories (Plan 30-03)
 - **Dependency audit**: Per-stack (npm audit, pip-audit, govulncheck, etc.)
 - **Licence check**: SPDX deny-list for npm packages
 - Never logs matched values (redaction discipline)
@@ -928,6 +1102,7 @@ Validates that no stories or tasks are silently dropped between planning phases:
 - `validateAssignmentPlan(state)` -- stories/tasks -> assignments (after TL); also detects off-stack agent assignments (Plan 27-E)
 - `buildCoverageGapPrompt(ctx)` -- targeted gap prompt for the TL, accepts `GapRepairContext` with project slug, tech stack, repo contract, existing assignments, and existing branches (Plan 27-D). Legacy `(violations, nextId)` signature still supported.
 - Violation kinds: `story-without-task`, `task-without-assignment`, `story-without-assignment`, `ac-without-assignment`, `dangling-story-ref`, `dangling-task-ref`, `dangling-dependency`, `epic-without-story`, `duplicate-id`, `oversized-assignment`, `agent-overloaded`, `off-stack-agent` (Plan 27-E)
+- **Dispatch-plan findings** (Plan 30-01): `validateAssignmentPlan` runs `buildDispatchPlan()` over the pending assignments and reports `dependency-cycle` (critical — one per broken edge, `assignmentIds` = the members the Team Leader may rewrite), `scaffold-depends-on-feature` (major), `finalizer-on-shared-branch` (major) and `story-branch-split` (info; severity `'info'` is new). The gap prompt shows the cycles and asks for corrected copies with the same id; `mergeGapRepair()` (used by `teamLeaderNode`) replaces those assignments instead of appending duplicates
 - Controlled by `PLAN_COVERAGE_MODE` (off/warn/enforce), `PLAN_COVERAGE_REPAIR_ATTEMPTS`
 - The Team Leader now receives full acceptance criteria (`storiesWithCriteria`), has a larger
   context budget (`TEAM_LEADER_CONTEXT_MAX_CHARS`), and must fill `taskIds`/`additionalStoryIds`
@@ -1065,8 +1240,8 @@ Provider billing/auth fails  ─┘    writePeriodicSnapshot()    ├─→ grap
 | Trigger | Where Detected | Mechanism |
 |---------|----------------|-----------|
 | **Token/cost/wall-clock limit** | `checkBudgetStop()` in each node | `shouldStopRun()` checks budget level; emits `run:budget-stop`; returns `{ cancelled: true, _stopReason: 'budget-exhausted:<binding>' }` |
-| **Provider billing/quota** (recoverable) | `dispatcher.ts` | `awaitProviderRecovery(createProviderProbe())` probes `/models` endpoint; on failure sets `providerFailureKind`; `developmentNode` returns `{ cancelled: true, _stopReason: 'provider-billing' }` |
-| **Provider auth/model-not-found** (fatal) | `dispatcher.ts` | Immediate stop — `providerFailureKind` set, `run:provider-stop` emitted |
+| **Provider billing/quota** (recoverable) | `dispatcher.ts` | `awaitProviderRecovery(createProviderProbe())` probes `/models` endpoint; on failure `stopReason` is `provider-<kind>`; `developmentNode` returns `{ cancelled: true, _stopReason: 'provider-billing' }` |
+| **Provider auth/model-not-found** (fatal) | `dispatcher.ts` | Immediate stop — `stopReason: 'provider-<kind>'`, `run:provider-stop` emitted |
 | **HITL deny** | Graph HITL interrupt | `cancelled = true` (no `_stopReason`) |
 | **Ctrl+C / SIGINT / SIGTERM** (Plan 27-G) | `gracefulShutdown()` in `crash-handlers.ts` | Runs `onGracefulShutdown()` hooks, saves `state.json` with `_stopReason: 'manual-kill'`, writes `invariant` ledger entry, flushes token report, exits 130/143 |
 | **Crash / uncaught exception** | `gracefulShutdown()` in `crash-handlers.ts` | Best-effort state snapshot + token report, exits with code 1 |
@@ -1108,9 +1283,10 @@ Phases are walked in pipeline order; each phase requires both ledger evidence (e
 | PR Status | Branch Status | Git Action |
 |-----------|--------------|------------|
 | `merged` | `merged` | Delete local branch |
+| `open` / `approved` / `escalated_open` / `blocked` / `deferred`, head still on the remote (checked before salvage) | `resumable` | Delete local branch only — **keep** `origin/<branch>` and its PR; dispatch resumes from the remote head and reuses the PR (Plan 30-02) |
 | `open` / `approved` / `escalated_open` | `open` | Delete local branch (re-created on dispatch) |
 | `pr-creation-failed` | `pr-creation-failed` | **Keep** branch — PR creation will be retried |
-| `blocked` / `closed` (local branch exists) | `open` | Delete local branch |
+| `blocked` / `closed` / `deferred` (local branch exists) | `open` | Delete local branch |
 | salvaged | `failed-salvaged` | Delete local branch |
 
 ### Node Idempotency
@@ -1319,7 +1495,7 @@ export async function someNode(state: ProjectStateType): Promise<Partial<Project
 - `run.ts` catches crashes and writes best-effort state snapshots (`writeStateSnapshot` + `writeRunManifest` with `'crashed'` status)
 - **Graceful shutdown (Plan 27-G)**: SIGINT/SIGTERM run registered `onGracefulShutdown()` hooks, save state from `RunContext.lastKnownState` with `_stopReason: 'manual-kill'`, write `invariant` ledger entry, flush token report. Use `Ctrl+C` or `kill -INT` for graceful shutdown; `kill -9` bypasses all handlers.
 - **Budget exhaustion**: `checkBudgetStop()` at the start of each node catches the `'stop'` level and routes to finalize gracefully (no exception, no crash)
-- **Provider failures**: Dispatcher sets `providerFailureKind` on the result; `developmentNode` translates this to `{ cancelled: true, _stopReason }`. Planning-phase provider failures propagate as exceptions and are caught by the `run.ts` crash path
+- **Provider failures**: Dispatcher sets `stopReason: 'provider-<kind>'` on the result; `developmentNode` translates this to `{ cancelled: true, _stopReason }`. Planning-phase provider failures propagate as exceptions and are caught by the `run.ts` crash path
 - **Periodic snapshots** (`writePeriodicSnapshot` at each `phase:start`) ensure the latest complete state is always on disk for continue-run recovery
 
 ---
@@ -1368,7 +1544,7 @@ When referenced in code comments, these plans are cited as "fixes A1", "fixes A2
    silently disabled — that was the Plan 22 root cause.
 5. **`git_diff` was removed from reviewer tools** -- It showed empty results for committed code and caused llama-3-3-70b-instruct to loop. Use `git_merge_base_diff` instead.
 6. **`emitMermaidTool` removed from dev agents** -- Caused infinite loops. Only the Architect has it.
-7. **Worktree cleanup is critical** -- Stale worktrees break subsequent runs. Intake prunes them.
+7. **Worktree cleanup is critical** -- Stale worktrees break subsequent runs. Intake prunes them (and `git worktree prune`s their registrations). Plan 30-04: never stage with `git add .` — use `stageWorkspaceChanges()` (`utils/repo-hygiene.ts`), which never stages `PIPELINE_DIRS`, refuses to stage a gitlink `.gitmodules` does not declare (ERROR), and leaves files with conflict markers unstaged. Every `.gitignore` block comes from `managedGitignoreEntries()`. Salvaged worktrees live in `.worktrees/_failed/` (never `.worktrees-failed/`): claudeopus5's development node rewrote the block without `.worktrees-failed/`, and the pre-sync auto-commit pushed a salvaged worktree as a gitlink. Intake and continue-run remove such artifacts (`removePipelineArtifacts()`). Probe before an expected failure (`refExists`, `deleteLocalBranch`, `ls-remote --quiet`) so `errors.jsonl` stays clean.
 8. **SSL: use `NODE_EXTRA_CA_CERTS`** -- Plan 25 removed `NODE_TLS_REJECT_UNAUTHORIZED=0` from all locations. For corporate environments with self-signed certs, set `NODE_EXTRA_CA_CERTS=/path/to/ca-bundle.pem`. Never re-introduce TLS disabling.
 9. **Dockerfile SSL opt-in** -- `strict-ssl false` in generated Dockerfiles is gated behind `DOCKER_ALLOW_INSECURE_NPM` (default `false`). Only set to `true` when a corporate proxy requires it.
 10. **`GITHUB_MODE=local`** creates a bare repo under the run output directory and patches `origin` to point there.
@@ -1377,8 +1553,14 @@ When referenced in code comments, these plans are cited as "fixes A1", "fixes A2
 13. **`completed` now means accepted by the acceptance gate** — never a false positive. The `finalStatus` is one of `completed`, `failed`, `partial`, or `inconclusive`, determined by the deterministic acceptance gate.
 14. **`.agent/` is gitignored in generated projects** — the `repo-contract.json` and other machine-generated files live there and must not be committed.
 15. **Singletons are per-run in server mode** — `token-tracker`, `event-bus`, `run-budget`, `run-ledger`, `response-log`, `logger`, `run-snapshot`, `debug-trace`, `history-compactor` memo/stats, and `prompt-cache` breakpoint set are scoped per-run via `RunContext` + `AsyncLocalStorage` (Plan 25-14). Module-level globals remain as CLI-mode defaults. New singletons must follow the `_active()` pattern or use `RunContext` to avoid cross-run contamination. Code invoked later from outside the run's async scope (HITL `session.getState()` / `session.resume()`) must re-enter it with `runWithContext(ctx, …)` — `makeSession()` does; before it did, every per-run singleton went dark after the first HITL approval.
-16. **Spawn child processes only through `shell-exec.ts`** (`execSync`, `execFileSync`, `execFileAsync`, `execCapture`) or the higher-level `gitExec()` / `defaultExec()` / `defaultExecAsync()` — never import `child_process` directly. These drop-ins are what make `DEBUG_MODE` traces complete; a direct import is invisible to the trace. They resolve `child_process` at call time, so `jest.mock('child_process')` / `jest.spyOn` keep working.
+16. **Spawn child processes only through `shell-exec.ts`** (`execSync`, `execFileSync`, `execFileAsync`, `execCapture`, `execFileCapture`) or the higher-level `gitExec()` / `defaultExec()` / `defaultExecAsync()` — never import `child_process` directly. These drop-ins are what make `DEBUG_MODE` traces complete; a direct import is invisible to the trace. They resolve `child_process` at call time, so `jest.mock('child_process')` / `jest.spyOn` keep working.
 17. **`logger.debug()` is gated by `DEBUG_MODE`** — debug lines are dropped unless `DEBUG_MODE=true`. Use `info` for anything a normal run must show.
+18. **Only the branch name makes the scaffold** (Plan 30-01). Never classify scaffold work by `taskType` or by "any assignment on the branch looks like scaffold": a scaffold runs first and every branch waits for it, so a misclassified feature branch reorders the whole round. Dispatch decisions live in `dispatch-plan.ts` (pure); keep `dispatcher.ts` an executor.
+19. **A PR claims only what ran, and only a verified push counts** (Plan 30-02). Build `assignmentIds` from executed assignments, never from the branch's input list. Push through `pushBranch()`/`commitWorktree()` and check `pushed` — never treat raw `gitPush()` output as success. The durable-commit subject (`durableCommitSubject()`) is parsed back by `executedAssignmentIds()` to resume branches: change both together or resumed branches will re-run their work. `resolveBaseRef()` prefers `origin/<base>` because the main checkout's local system branch lags behind merges.
+20. **QA reports only what it measured** (Plan 30-03). Never default a runner to Jest — detect it (`detectNodeFramework`) or treat it as `unknown`. Render runner output (`renderTerminalOutput`) before a log, bug or prompt sees it. A runner problem is one `QA-runner-error` bug with the command and rendered output, never a cascade of per-story or per-criterion bugs: the min-test/per-story checks skip when no root produced case names, the AC gate is `inconclusive` when any runner failed or reported `caseNames: 'unavailable'`, `story-untested` needs merged work, and a blocked PR is one bug with its recorded `blockers`. Verify product artifacts after the build, not before.
+21. **The bug-fix loop stops when it stops merging** (Plan 30-05). Progress is merged PRs (`DispatchRound.merged`), never file changes. Triage reads only the latest evaluation (`currentBugs()`, `TriageRound.bugCursor`) through `selectTriageBugs()` — never `state.bugs` minus `fixedBugIds`. `bugAttempts` is written by `developmentNode` from assignments that ran (`bugIds`), not by triage. A branch unmerged in two consecutive rounds is abandoned: not dispatched, no triage bug. `pullRequests` is append-only, so never return existing records again (the PR-creation retry used to duplicate them all). QA stamps every report with `state.iteration.bugfix` — reports that said 0 made `afterQaRouter` and traceability ignore executed tests from the first bug-fix round on.
+22. **Keep the Anthropic prompt prefix byte-stable** (Plan 30-06). Anything that rewrites earlier messages on every call — a sliding compaction window, a per-call timestamp, re-ordered tools — turns every request into a cache write. Compaction is `epoch` (append-only between recompactions); the conversation is cached by automatic caching, the system/task breakpoints are never gated on their own length, and withholding tools keeps the definitions (`tool_choice: none`) on Anthropic. Invocation budgets are in **effective** tokens (cache reads × 0.1, writes × 1.25 — `effectiveInputTokens()`), and costs are **billed** (`billedCost()`); the report's list price is the list price. Price new models in `MODEL_PRICING` (prefix match at a separator) — an unpriced model costs $0 with one warning, never a guessed price.
+23. **What a model reads of a command is rendered and summarised** (Plan 30-07). The shell tool runs `bash -o pipefail -c` with `NON_INTERACTIVE_ENV` (no colour, no npm notices, no host `NODE_ENV`), renders output (`renderTerminalOutput`) and cuts test/build runs to failures + verdict; `GateResult.output` is stored the same way. Dependencies are installed by the conductor (`preinstallWorktreeDeps`), not by the agents. The read cache belongs to one agent instance and only points at results still visible in its history.
 
 ---
 

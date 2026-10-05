@@ -5,13 +5,17 @@
  * - `validateStoryPlan`:      epics → stories → tasks  (after Product Manager)
  * - `validateAssignmentPlan`: stories/tasks → assignments  (after Team Leader)
  *
- * Both return a list of `CoverageViolation` objects graded critical or major.
+ * Both return a list of `CoverageViolation` objects graded critical, major or info.
  * The conductor can then re-invoke the planning agent with a targeted gap prompt
  * or (under PLAN_COVERAGE_MODE='enforce') fail the run early.
  */
 import type { ProjectStateType } from './state';
+import type { Assignment } from '../agents/_shared/base-schemas';
 import { getLogger } from '../utils/logger';
+import { projectSlugFromBranch } from '../utils/branch-naming';
 import { getDevAgent } from '../agents/developers/registry';
+import { buildDispatchPlan, describeBrokenEdge } from '../agents/developers/dispatch-plan';
+import { selectPendingAssignments } from './assignment-policy';
 
 const log = getLogger('[plan-coverage]', 213);
 
@@ -30,10 +34,17 @@ export interface CoverageViolation {
         | 'duplicate-id'
         | 'oversized-assignment'
         | 'agent-overloaded'
-        | 'off-stack-agent';
-    severity: 'critical' | 'major';
+        | 'off-stack-agent'
+        // Plan 30-01: what the dispatcher's planner would have to work around
+        | 'dependency-cycle'
+        | 'scaffold-depends-on-feature'
+        | 'story-branch-split'
+        | 'finalizer-on-shared-branch';
+    severity: 'critical' | 'major' | 'info';
     id: string;
     detail: string;
+    /** Assignments a gap repair may return corrected copies of (same id) — see `mergeGapRepair`. */
+    assignmentIds?: string[];
 }
 
 // ─── Story Plan Validator (after PM) ────────────────────────────────────────
@@ -324,7 +335,83 @@ export function validateAssignmentPlan(state: ProjectStateType): CoverageViolati
         }
     }
 
+    violations.push(...dispatchPlanViolations(state));
     return violations;
+}
+
+/**
+ * Plan 30-01: run the dispatcher's planner over the plan and report what it would
+ * have to work around — dependency cycles (critical: the Team Leader repairs
+ * them), scaffold work that waits for feature work, a finalizer sharing its
+ * branch with other work, and stories spread over several branches (info).
+ */
+function dispatchPlanViolations(state: ProjectStateType): CoverageViolation[] {
+    const completed = state.completedAssignmentIds ?? [];
+    const projectSlug = projectSlugFromBranch(state.systemBranch ?? '');
+    const plan = buildDispatchPlan(selectPendingAssignments(state.assignments ?? [], completed), { projectSlug, preSatisfied: completed });
+    const violations: CoverageViolation[] = [];
+
+    for (const e of plan.brokenEdges) {
+        violations.push({
+            kind: 'dependency-cycle',
+            severity: 'critical',
+            id: e.from,
+            detail: describeBrokenEdge(e),
+            assignmentIds: e.level === 'assignment' ? e.cycle : [...new Set((e.via ?? []).flatMap(v => [v.from, v.to]))],
+        });
+    }
+    for (const e of plan.skippedEdges) {
+        if (e.reason !== 'scaffold-depends-on-feature') continue;
+        violations.push({
+            kind: 'scaffold-depends-on-feature',
+            severity: 'major',
+            id: e.from,
+            detail: `Scaffold assignment ${e.from} depends on feature assignment ${e.to} — the scaffold always runs first, so the dependency is dropped`,
+        });
+    }
+    for (const branch of plan.branches.values()) {
+        const finalizers = branch.assignments.filter(a => plan.assignmentKinds.get(a.id) === 'finalizer');
+        if (finalizers.length === 0 || finalizers.length === branch.assignments.length) continue;
+        for (const f of finalizers) {
+            violations.push({
+                kind: 'finalizer-on-shared-branch',
+                severity: 'major',
+                id: f.id,
+                detail: `Finalizer ${f.id} (wiring that depends on feature work) shares branch ${branch.name} with `
+                    + `${branch.assignments.length - finalizers.length} other assignment(s), so they all wait until the end — `
+                    + `give it its own branch "${projectSlug ? `${projectSlug}/` : ''}feature/integration"`,
+            });
+        }
+    }
+    for (const s of plan.storySplits) {
+        violations.push({
+            kind: 'story-branch-split',
+            severity: 'info',
+            id: s.storyId,
+            detail: `Story ${s.storyId} spans ${s.branches.length} branches: ${s.branches.join(', ')}`,
+        });
+    }
+    return violations;
+}
+
+/**
+ * Merge a gap-repair response into the plan (Plan 30-01). A corrected copy of an
+ * assignment a violation names in `assignmentIds` (a dependency-cycle member)
+ * replaces the original — a cycle cannot be repaired by adding assignments.
+ * Everything else is appended, as before.
+ */
+export function mergeGapRepair(
+    current: Assignment[],
+    additions: Assignment[],
+    violations: CoverageViolation[],
+): Assignment[] {
+    const replaceable = new Set(violations.flatMap(v => v.assignmentIds ?? []));
+    const currentIds = new Set(current.map(a => a.id));
+    const replacements = new Map(additions.filter(a => replaceable.has(a.id) && currentIds.has(a.id)).map(a => [a.id, a]));
+    return [
+        ...current.map(a => replacements.get(a.id) ?? a),
+        ...additions.filter(a => !replacements.has(a.id)),
+    ];
 }
 
 // ─── Gap Repair Context (Plan 27-D) ────────────────────────────────────────
@@ -432,6 +519,7 @@ export function buildCoverageGapPrompt(
     const oversized = violations.filter(v => v.kind === 'oversized-assignment');
     const overloaded = violations.filter(v => v.kind === 'agent-overloaded');
     const offStack = violations.filter(v => v.kind === 'off-stack-agent');
+    const cycles = violations.filter(v => v.kind === 'dependency-cycle');
 
     if (storyGaps.length > 0) {
         parts.push(`## Unassigned stories (${storyGaps.length}):`);
@@ -474,11 +562,22 @@ export function buildCoverageGapPrompt(
         parts.push('');
     }
 
+    // Plan 30-01: cycles are fixed by correcting existing assignments, not by adding new ones
+    if (cycles.length > 0) {
+        parts.push(`## Dependency cycles (${cycles.length}):`);
+        for (const v of cycles) parts.push(`  ${v.detail}`);
+        parts.push('A branch is dispatched only after every branch it depends on has merged, so no assignment may wait for itself and no two branches may wait for each other.');
+        parts.push('Fix each cycle by correcting dependsOn (or branchName) and return a full corrected copy of every assignment you change, with the SAME id — it replaces the original.');
+        parts.push('');
+    }
+
     parts.push(
         `Return ONLY the ADDITIONAL assignments needed to close these gaps, as`,
         `{ "assignments": [ ...the remaining items... ] }`,
         `Continue the id sequence from ASSIGN-${String(nextId).padStart(3, '0')}.`,
-        `Do not restate assignments you already produced.`,
+        cycles.length > 0
+            ? `Do not restate assignments you already produced, except the corrected copies requested above.`
+            : `Do not restate assignments you already produced.`,
     );
 
     return parts.join('\n');

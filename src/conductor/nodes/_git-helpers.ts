@@ -8,6 +8,7 @@ import * as fs from 'fs';
 import { getLogger } from '../../utils/logger';
 import { execSync, execFileAsync } from '../../utils/shell-exec';
 import { gitExec, gitPush, findGitRoot } from '../../utils/git-exec';
+import { stageWorkspaceChanges } from '../../utils/repo-hygiene';
 import { syncWorkspaceToBranch } from '../workspace-sync';
 import { GIT_DEFAULT_BRANCH } from '../../config';
 import type { GitContext } from '../../agents/_shared/base-schemas';
@@ -68,9 +69,13 @@ export async function commitAndPushArtifacts(
         await syncWorkspaceToBranch(gitRoot, currentBranch, gitContext);
     }
 
-    gitExec(workspacePath, 'add .');
-    const status = gitExec(workspacePath, 'status --short');
-    if (!status || status.includes('nothing to commit')) {
+    // Plan 30-04: never a pipeline directory or a nested repository
+    const stage = stageWorkspaceChanges(workspacePath);
+    if (stage.error) {
+        logger?.error?.(`Cannot stage artifacts in ${workspacePath}: ${stage.error}`);
+        return;
+    }
+    if (stage.staged.length === 0) {
         // No new changes to commit, but check if we need to push existing commits
         if (currentBranch && !currentBranch.startsWith('Error:')) {
             const ahead = gitExec(workspacePath, `rev-list origin/${currentBranch}..HEAD --count`);
@@ -86,7 +91,11 @@ export async function commitAndPushArtifacts(
         return;
     }
 
-    gitExec(workspacePath, `commit -m "${commitMessage}"`);
+    const commit = gitExec(workspacePath, `commit -m "${commitMessage}"`);
+    if (commit.startsWith('Error:')) {
+        logger?.error?.(`Commit of artifacts failed: ${commit}`);
+        return;
+    }
     if (currentBranch && !currentBranch.startsWith('Error:')) {
         const pushResult = gitPush(workspacePath, currentBranch, gitContext);
         if (pushResult.startsWith('Error:')) {

@@ -30,7 +30,7 @@ import type {
 } from '../agents/_shared/base-schemas';
 import type { RepoContract } from '../agents/_shared/schemas/repo-contract.schema';
 // TechDecision is already imported above via base-schemas — mergeByLayerReducer uses it.
-import type { AcceptanceReport, DispatchRound } from './gate-types';
+import type { AcceptanceReport, DispatchRound, TriageRound } from './gate-types';
 import type { GateReport } from './quality-gates';
 import type { CompletionEvidence } from './assignment-policy';
 
@@ -298,13 +298,19 @@ export const ProjectState = Annotation.Root({
         default: () => [],
     }),
 
+    /** One record per bug-fix triage round (Plan 30-05): the bug window and the bugs handed out. */
+    triageRounds: Annotation<TriageRound[]>({
+        reducer: appendReducer,
+        default: () => [],
+    }),
+
     /** Bug ids that triage has sent to development (informational — actual fix verified later). */
     attemptedBugIds: Annotation<string[]>({
         reducer: appendReducer,
         default: () => [],
     }),
 
-    /** Per-bug attempt count: how many times triage has dispatched a fix for each bug id. */
+    /** Per-bug attempt count: in how many rounds an assignment that works on the bug actually ran (Plan 30-05). */
     bugAttempts: Annotation<Record<string, number>>({
         reducer: bugAttemptsReducer,
         default: () => ({}),

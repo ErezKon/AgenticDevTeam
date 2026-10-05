@@ -19,19 +19,17 @@
  * - Budget pressure is surfaced on every tool result once usage crosses 60%,
  *   so the agent can plan its landing instead of crashing into the ceiling (A3).
  * - `isTerminationDemanded()` lets the agent factory strip tools from the next
- *   model call, ending the post-exhaustion spin (A4).
+ *   model call, ending the post-exhaustion spin (A4). Plan 30-06's soft landing
+ *   feeds it too (`requestTermination`).
+ * - Plan 30-07: a repeated read the model can still see gets a one-line pointer;
+ *   one the compactor stubbed (`noteElidedResults`) runs again.
  */
 import type { StructuredToolInterface } from '@langchain/core/tools';
 import { tool } from '@langchain/core/tools';
 import { getLogger } from '../../utils/logger';
 import { traceToolCall } from '../../utils/debug-trace';
 import { MAX_TURN_TOOL_RESULT_CHARS, SHELL_READ_MAX_FILES } from '../../config';
-import {
-    branchReadCacheHit,
-    branchReadCacheStore,
-    branchReadCacheInvalidate,
-    branchReadCacheInvalidateFile,
-} from './branch-read-cache';
+import { createReadCache } from './branch-read-cache';
 
 const guardLog = getLogger('[loop-guard]', 226);
 
@@ -275,6 +273,10 @@ export interface LoopGuardResult {
      * next model call so the ReAct loop must terminate (Plan 22 A4).
      */
     isTerminationDemanded: () => boolean;
+    /** Demand termination now — every later tool call gets the terminal guidance (Plan 30-06 soft landing). */
+    requestTermination: (reason: string) => void;
+    /** Tool calls whose results the compactor stubbed or dropped: those reads may run again (Plan 30-07). */
+    noteElidedResults: (toolCallIds: string[]) => void;
     /** Current budget usage — used for handoff summaries and diagnostics. */
     getUsage: () => BudgetUsage;
     /** Throws `ToolBudgetExhaustedError` when the ceiling has been reached. */
@@ -301,6 +303,8 @@ export function withLoopGuard(
         tools,
         isCeilingReached: () => false,
         isTerminationDemanded: () => false,
+        requestTermination: () => { /* no tools to withhold */ },
+        noteElidedResults: () => { /* no reads to forget */ },
         getUsage: () => emptyUsage(),
         assertNotExhausted: () => { /* nothing to assert */ },
     };
@@ -344,10 +348,11 @@ export function withLoopGuard(
 
     // ── Loop detection state ─────────────────────────────────────────────
     const callCounts = new Map<string, number>();
-    const resultCache = new Map<string, string>();
+    const readCache = createReadCache();     // Plan 30-07: this instance's reads only
     const blockedKeys = new Set<string>();   // per-(tool,args) blocks
     let allExhausted = false;
     let postExhaustionCalls = 0;
+    let terminationReason: string | null = null;   // Plan 30-06 soft landing
     let recentWriteCount = 0;       // writes in the last N calls (progress tracking)
     let bonusGranted = 0;           // total bonus already granted
 
@@ -463,13 +468,19 @@ export function withLoopGuard(
     // ── Terminal guidance message ────────────────────────────────────────
     function exhaustedMessage(): string {
         return JSON.stringify({
-            error: `BUDGET EXHAUSTED: Agent "${agentId}" has used all available tool calls `
-                + `(${describeUsage(usage())}). `
+            error: `BUDGET EXHAUSTED: ${terminationReason
+                ?? `Agent "${agentId}" has used all available tool calls (${describeUsage(usage())})`}. `
                 + 'Return your JSON output now, listing exactly the files you actually wrote. '
                 + 'Do not claim files you did not write. '
                 + 'Produce your final JSON response matching the response schema.',
         });
     }
+
+    const blockedMessage = (toolName: string, argSig: string, count: number): string => JSON.stringify({
+        error: `[BLOCKED] You already called ${toolName}('${argSig.slice(0, 80)}') ${count} times. ` +
+            'The answer is in your prompt\'s Workspace Snapshot or earlier results. ' +
+            'Use a DIFFERENT tool or produce your final JSON response.',
+    });
 
     // Plan 24, C5: shell read command cache (keyed by normalised command)
     const shellReadCache = new Map<string, string>();
@@ -480,9 +491,6 @@ export function withLoopGuard(
             let category = classifyTool(toolName);
             const argSig = JSON.stringify(args);
             const key = `${toolName}::${argSig}`;
-
-            // Plan 24, C6: extract read_file path for branch-scoped cache (checked post-exec)
-            const readFilePath = toolName === 'read_file' ? (args.filePath ?? args.path ?? '') as string : '';
 
             // Plan 24, C5: reclassify pure-read shell commands as 'read'
             const commandStr = toolName === 'run_command' ? (args.command ?? args.cmd ?? '') as string : '';
@@ -509,6 +517,9 @@ export function withLoopGuard(
 
             const currentTurnKey = registerTurn(config);
 
+            // Plan 30-06: the invocation is landing — no tool runs any more
+            if (terminationReason !== null) return exhaustedMessage();
+
             // Fast path: if all budgets exhausted, return terminal guidance
             if (isExhausted()) {
                 if (!allExhausted) {
@@ -528,35 +539,17 @@ export function withLoopGuard(
             }
 
             // ── Per-(tool,args) block check ──────────────────────────────
-            if (blockedKeys.has(key)) {
-                // This specific (tool,args) is blocked — but other tools still work
-                return JSON.stringify({
-                    error: `[BLOCKED] You already called ${toolName}('${argSig.slice(0, 80)}') ${MAX_REPEATED_TOOL_CALLS + LOOP_TOLERANCE} times. ` +
-                        'The answer is in your prompt\'s Workspace Snapshot or earlier results. ' +
-                        'Use a DIFFERENT tool or produce your final JSON response.',
-                });
-            }
+            // This specific (tool,args) is blocked — but other tools still work
+            if (blockedKeys.has(key)) return blockedMessage(toolName, argSig, MAX_REPEATED_TOOL_CALLS + LOOP_TOLERANCE);
 
-            // ── Mutation clears read caches ──────────────────────────────
-            if (MUTATING_TOOL_NAMES.has(toolName)) {
+            // ── A mutation (a write, or a shell command that is not a pure read) may change any
+            //    file: identical reads run again and are compared with what the agent has (Plan 30-07) ──
+            if (MUTATING_TOOL_NAMES.has(toolName) || (SHELL_TOOL_NAMES.has(toolName) && !isShellRead)) {
                 const ownCount = callCounts.get(key) ?? 0;
                 callCounts.clear();
-                resultCache.clear();
                 shellReadCache.clear(); // Plan 24, C5: clear shell read cache on mutation
-                // Plan 24, C6: invalidate branch-scoped read cache for this worktree
-                branchReadCacheInvalidate(agentId);
-                // If a specific file is being mutated, also invalidate it precisely
-                const mutatedFile = (args.filePath ?? args.path ?? '') as string;
-                if (mutatedFile) branchReadCacheInvalidateFile(agentId, mutatedFile);
                 if (ownCount > 0) callCounts.set(key, ownCount);
-                // Track progress
-                recentWriteCount++;
-            }
-
-            if (SHELL_TOOL_NAMES.has(toolName) && !isShellRead) {
-                resultCache.clear();
-                shellReadCache.clear(); // Plan 24, C5: mutating shell clears read cache
-                branchReadCacheInvalidate(agentId); // Plan 24, C6: shell mutation clears branch cache
+                if (MUTATING_TOOL_NAMES.has(toolName)) recentWriteCount++;   // Track progress
             }
 
             // ── Repeat detection ─────────────────────────────────────────
@@ -570,23 +563,20 @@ export function withLoopGuard(
                     `${agentId}: tool "${toolName}" called ${count} times with identical args — blocking this call only`,
                 );
                 blockedKeys.add(key);
-                return JSON.stringify({
-                    error: `[BLOCKED] You already called ${toolName}('${argSig.slice(0, 80)}') ${count} times. ` +
-                        'The answer is in your prompt\'s Workspace Snapshot or earlier results. ' +
-                        'Use a DIFFERENT tool or produce your final JSON response.',
-                });
+                return blockedMessage(toolName, argSig, count);
             }
 
-            // Warning threshold: return cached result (FREE — no budget consumed)
+            // Warning threshold: point at the earlier result (FREE — no budget consumed)
             if (count >= MAX_REPEATED_TOOL_CALLS) {
-                const cached = resultCache.get(key);
+                const earlier = CACHEABLE_TOOL_NAMES.has(toolName) ? readCache.previous(key) : null;
 
-                if (cached !== undefined) {
+                if (earlier) {
                     guardLog.warn(
-                        `${agentId}: tool "${toolName}" called ${count} times with identical args — returning cached result (free)`,
+                        `${agentId}: tool "${toolName}" called ${count} times with identical args — returning the earlier result (free)`,
                     );
-                    // Cached responses are FREE — do not increment any counter
-                    return `[CACHED — identical to your earlier call. Do not call this again.]\n${cached}`;
+                    // Plan 30-07: a result the model can still see gets a pointer, not a second copy
+                    if (earlier.kind === 'visible') return unchangedPointer(earlier.turn);
+                    return `[CACHED — identical to your earlier call. Do not call this again.]\n${earlier.content}`;
                 }
 
                 guardLog.warn(
@@ -664,33 +654,21 @@ export function withLoopGuard(
             const result = await originalTool.invoke(args);
             const resultStr = typeof result === 'string' ? result : JSON.stringify(result);
 
-            // Cache the result for read-only tools
-            if (CACHEABLE_TOOL_NAMES.has(toolName)) {
-                resultCache.set(key, resultStr);
-            }
-
             // Plan 24, C5: cache shell read results by normalised command
             if (isShellRead) {
                 const normCmd = normaliseShellReadCommand(commandStr);
                 shellReadCache.set(normCmd, resultStr);
             }
 
-            // Plan 24, C6: branch-scoped read cache for read_file (full reads only)
-            // When content is unchanged since the last read, replace the bulky
-            // result with a compact marker.  The read still counts against the
-            // budget (the tool did execute), but the much-smaller response saves
-            // input tokens on subsequent turns.
-            if (toolName === 'read_file' && readFilePath && !args.offset && !args.limit) {
-                if (branchReadCacheHit(agentId, readFilePath, resultStr)) {
-                    guardLog.debug(`${agentId}: branch read cache hit for "${readFilePath}"`);
-                    return withFooter('[CACHED — file unchanged since your last read. Do not re-read.]');
-                }
-                // Store in cache for future comparisons
-                branchReadCacheStore(agentId, readFilePath, resultStr);
-            }
+            // Plan 24 C6 / 30-07: content identical to a read the model can still see → a pointer.
+            // The read still counts against the budget (the tool did execute).
+            const cacheable = CACHEABLE_TOOL_NAMES.has(toolName);
+            const visible = cacheable ? readCache.record(key, resultStr, toolCallIdOf(config), turns) : null;
+            if (visible) return withFooter(unchangedPointer(visible.turn));
 
             // Plan 24, C4: enforce per-turn aggregate tool-result budget
             const budgeted = applyTurnResultBudget(result, currentTurnKey);
+            if (cacheable && budgeted !== result) readCache.demote(key);   // the model sees a shrunk copy
             return withFooter(budgeted);
         };
 
@@ -704,7 +682,15 @@ export function withLoopGuard(
     return {
         tools: wrappedTools,
         isCeilingReached: () => isExhausted(),
-        isTerminationDemanded: () => postExhaustionCalls >= maxPostExhaustionCalls,
+        isTerminationDemanded: () => terminationReason !== null || postExhaustionCalls >= maxPostExhaustionCalls,
+        requestTermination: (reason) => { terminationReason ??= reason; },
+        noteElidedResults: (toolCallIds) => {
+            // A stubbed read may run again: its repeat count and block go with the result
+            for (const key of readCache.forget(toolCallIds)) {
+                callCounts.delete(key);
+                blockedKeys.delete(key);
+            }
+        },
         getUsage: () => usage(),
         assertNotExhausted: () => {
             if (isExhausted()) throw new ToolBudgetExhaustedError(agentId, usage());
@@ -713,6 +699,17 @@ export function withLoopGuard(
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
+
+/** Plan 30-07: the reply to a repeated read whose identical result is still in the model's view. */
+function unchangedPointer(turn: number): string {
+    return `[UNCHANGED — identical to your read at turn ${turn}, still visible above]`;
+}
+
+/** The id of the tool call being run — ToolNode passes it as `config.toolCall`. */
+function toolCallIdOf(config: unknown): string | undefined {
+    const id = (config as { toolCall?: { id?: unknown } } | undefined)?.toolCall?.id;
+    return typeof id === 'string' ? id : undefined;
+}
 
 /**
  * Extract a per-model-turn identifier from the RunnableConfig LangGraph passes

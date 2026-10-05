@@ -104,6 +104,9 @@ export const QA_MODEL =
  *
  * These are configurable defaults based on typical provider pricing.
  * Adjust via the MODEL_PRICING_OVERRIDES env var (JSON string) if needed.
+ * Plan 30-06: an id that is not listed is priced by its longest listed prefix
+ * (`claude-opus-5-5` → `claude-opus-5`, see `resolvePricing()`); an id with no listed
+ * prefix costs $0 and is warned about once.
  */
 /** Pricing entry for a model. Cache multipliers default to Anthropic's published rates. */
 export interface ModelPricingEntry {
@@ -169,13 +172,24 @@ export const GOOGLE_API_KEY =
 export const ANTHROPIC_BASE_URL =
     process.env.ANTHROPIC_BASE_URL ?? '';
 
-/** Place `cache_control` breakpoints on the Anthropic system prompt, tool schemas,
- *  task message and stable history prefix (Plan 22, D1).
+/** Anthropic prompt caching: `cache_control` breakpoints on the system prompt (which also
+ *  covers the tool schemas) and the task message (Plan 22, D1), and the conversation itself
+ *  (Plan 30-06, see ANTHROPIC_AUTO_CACHE).
  *
  *  The pacmanclaude run reported `cache_read: 0` on all 227 Anthropic calls and
  *  billed 2.32M input tokens against 99.7K output for one branch of fifteen. */
 export const ANTHROPIC_PROMPT_CACHE_ENABLED =
     envBool('ANTHROPIC_PROMPT_CACHE_ENABLED', true);
+
+/** Cache the conversation with Anthropic's automatic caching (Plan 30-06): a top-level
+ *  `cache_control` on every request puts a breakpoint on the last block and moves it forward
+ *  each turn, so the whole history prefix is read from cache. Default true when
+ *  ANTHROPIC_BASE_URL is empty; a proxy may not support the top-level field, so with a base URL
+ *  the default is false: an explicit breakpoint on the last block of the last message instead.
+ *  In the claudeopus5 run only the static prefix was cached — each junior call re-sent ~8k
+ *  uncached tokens of history. */
+export const ANTHROPIC_AUTO_CACHE =
+    envBool('ANTHROPIC_AUTO_CACHE', ANTHROPIC_BASE_URL === '');
 
 /** Log an ERROR when Anthropic reports zero cache reads after SANITY_ASSERT_CACHE_AFTER
  *  calls (Plan 22, D2). A silent cache miss is expensive and otherwise invisible. */
@@ -315,11 +329,16 @@ export const MAX_CONCURRENT_DEVS =
 export const SEQUENTIAL_DISPATCH =
     envBool('SEQUENTIAL_DISPATCH', true);
 
-/** Halt the entire dispatch when any branch fails to produce a merged PR.
- *  Values: 'strict' (halt on any failure), 'scaffold-only' (halt only if scaffold fails),
- *  'off' (never halt, original behavior). Default: 'strict' (Plan 27-B). */
+/** What the dispatcher does when a branch finishes a round without a merged PR.
+ *  'dependents'    — skip only the branches that (transitively) depend on it; their
+ *                    assignments stay pending. A failed scaffold still blocks everything,
+ *                    because every other branch depends on it. Default (Plan 30-01).
+ *  'strict'        — halt all remaining dispatch on any failure (Plan 27-B default).
+ *  'scaffold-only' — halt only when the scaffold fails.
+ *  'off'           — never halt; dependents run anyway, cut from a failed scaffold's tip. */
 export const DISPATCH_HALT_POLICY =
-    envEnum('DISPATCH_HALT_POLICY', ['strict', 'scaffold-only', 'off'] as const, 'strict');
+    envEnum('DISPATCH_HALT_POLICY', ['dependents', 'strict', 'scaffold-only', 'off'] as const, 'dependents');
+export type DispatchHaltPolicy = typeof DISPATCH_HALT_POLICY;
 
 /** Delay (ms) between dispatching batches of branches to avoid rate limits. */
 export const INTER_BATCH_DELAY_MS =
@@ -393,11 +412,22 @@ export const MAX_RUN_COST_USD =
 export const MAX_RUN_WALL_MS =
     envInt('MAX_RUN_WALL_MS', 18000000);
 
-/** Max input tokens for a single agent invocation (Plan 24, D1).
- *  Prevents a single runaway invocation from consuming the entire run budget.
+/** Raw input-token backstop for a single agent invocation (Plan 24, D1).
+ *  Plan 30-06: raised from 600000 and checked before every model call — the call after it is
+ *  crossed can use no tool, so the agent returns its JSON. The effective-token soft landing
+ *  (INVOCATION_SOFT_LANDING_EFFECTIVE_TOKENS) normally ends an invocation well before.
  *  0 = unlimited. */
 export const MAX_INVOCATION_INPUT_TOKENS =
-    envInt('MAX_INVOCATION_INPUT_TOKENS', 600000);
+    envInt('MAX_INVOCATION_INPUT_TOKENS', 1500000);
+
+/** Effective (price-weighted) input tokens after which an invocation lands softly (Plan 30-06):
+ *  its next model call can use no tool, the agent returns its final JSON, and nothing respawns.
+ *  Effective = uncached + 1.25 × cache write + 0.1 × cache read (the model's pricing multipliers),
+ *  so cached history costs a tenth. In the claudeopus5 run all four junior invocations (~44 calls
+ *  of ~15k raw tokens each) crossed the old 600k raw ceiling and their outputs were discarded.
+ *  0 = off. */
+export const INVOCATION_SOFT_LANDING_EFFECTIVE_TOKENS =
+    envInt('INVOCATION_SOFT_LANDING_EFFECTIVE_TOKENS', 350000);
 
 /** Max estimated USD cost for a single branch workflow (Plan 24, D2).
  *  0 = unlimited. */
@@ -405,9 +435,17 @@ export const MAX_BRANCH_COST_USD =
     envFloat('MAX_BRANCH_COST_USD', 6);
 
 /** Max wall-clock time (ms) for a single branch workflow (Plan 24, D2).
- *  Default 15 minutes. 0 = unlimited. */
+ *  Default 15 minutes. 0 = unlimited. Plan 30-02: this is the cap for a one-assignment
+ *  branch; MAX_BRANCH_WALL_PER_ASSIGNMENT_MS is added for every further assignment. */
 export const MAX_BRANCH_WALL_MS =
     envInt('MAX_BRANCH_WALL_MS', 900000);
+
+/** Extra branch wall-clock time (ms) per assignment beyond the first (Plan 30-02).
+ *  Effective cap = MAX_BRANCH_WALL_MS + MAX_BRANCH_WALL_PER_ASSIGNMENT_MS × (assignments − 1).
+ *  Assignments the cap still leaves unstarted are deferred to the next round (PR status
+ *  'deferred') instead of being dropped. Default 6 minutes. */
+export const MAX_BRANCH_WALL_PER_ASSIGNMENT_MS =
+    envInt('MAX_BRANCH_WALL_PER_ASSIGNMENT_MS', 360000);
 
 /** Utilisation threshold for budget warning level (default: 0.70). */
 export const BUDGET_WARN_AT =
@@ -513,6 +551,25 @@ export const SANITIZE_STREAM_BLOCKS =
  *  compaction caused re-reads that cost *more* tokens than the saved context. */
 export const HISTORY_MAX_CHARS =
     envInt('HISTORY_MAX_CHARS', 60000);
+
+/** How the ReAct history is compacted (Plan 30-06).
+ *  'epoch'   — the compacted view is frozen and only appended to, so each call's prompt extends
+ *              the previous call's byte for byte and is read from the prompt cache. It is
+ *              recompacted when it exceeds HISTORY_MAX_CHARS or HISTORY_EPOCH_MAX_TURNS turns
+ *              were appended. Default.
+ *  'sliding' — recompacted on every call (before Plan 30-06): the recent window slides, results
+ *              turn into stubs, and the prefix changes every turn, so the history is never cached. */
+export const HISTORY_COMPACTION_MODE =
+    envEnum('HISTORY_COMPACTION_MODE', ['epoch', 'sliding'] as const, 'epoch');
+
+/** Model turns appended to a frozen history view before it is recompacted (Plan 30-06, epoch mode). */
+export const HISTORY_EPOCH_MAX_TURNS =
+    envInt('HISTORY_EPOCH_MAX_TURNS', 8);
+
+/** Character target of an epoch recompaction (Plan 30-06) — room below HISTORY_MAX_CHARS for the
+ *  view to grow append-only again. Default 0.6 × HISTORY_MAX_CHARS. */
+export const HISTORY_EPOCH_TARGET_CHARS =
+    envInt('HISTORY_EPOCH_TARGET_CHARS', Math.round(HISTORY_MAX_CHARS * 0.6));
 
 /** Max aggregate characters across all tool results for a single model turn
  *  (Plan 24, C4). When exceeded, results are proportionally shrunk with a
@@ -643,7 +700,7 @@ export const ACCEPT_MIN_TESTS =
 export const ACCEPT_REQUIRE_SMOKE =
     envBool('ACCEPT_REQUIRE_SMOKE', true);
 
-/** Consecutive zero-output dispatch rounds that mark a run unrecoverable. */
+/** Consecutive dispatch rounds without a merged PR (and no deferred work) that mark a run unrecoverable; 0 disables the rule (Plan 30-05). */
 export const UNRECOVERABLE_ZERO_ROUNDS =
     envInt('UNRECOVERABLE_ZERO_ROUNDS', 2);
 
@@ -917,7 +974,7 @@ export const CONTRACT_PROMPT_MAX_CHARS =
 
 // ─── PR Workflow / Work Preservation (Sub-Plan 06) ──────────────────────────
 
-/** Max failed worktrees retained under .worktrees-failed/ for salvage. */
+/** Max unmerged worktrees with unpushed work retained (detached) under .worktrees/_failed/ for salvage (Plan 30-04). */
 export const WORKTREE_SALVAGE_MAX =
     envInt('WORKTREE_SALVAGE_MAX', 10);
 
@@ -982,8 +1039,9 @@ export const STRONG_FIXER_ENABLED =
 export const STRONG_FIXER_MAX_TOOL_CALLS =
     envInt('STRONG_FIXER_MAX_TOOL_CALLS', 18);
 
-/** Input-token ceiling for the strong fixer agent (default: 250 000).
- *  Plan 24 B2: prevents runaway context growth in the fixer pass. */
+/** The strong fixer's soft-landing threshold in effective input tokens (default: 250 000).
+ *  Plan 24 B2 introduced it against runaway context growth in the fixer pass, but it was only
+ *  logged; Plan 30-06 enforces it as INVOCATION_SOFT_LANDING_EFFECTIVE_TOKENS for the fixer. */
 export const STRONG_FIXER_MAX_INPUT_TOKENS =
     envInt('STRONG_FIXER_MAX_INPUT_TOKENS', 250000);
 
@@ -1066,7 +1124,7 @@ export const QA_ENFORCE_SUFFICIENCY =
 export const QA_MIN_TOTAL_TESTS =
     envInt('QA_MIN_TOTAL_TESTS', 0);
 
-/** Minimum tagged passing tests per user story. */
+/** Minimum tagged passing tests per user story with merged work (Plan 30-03). */
 export const QA_MIN_TESTS_PER_STORY =
     envInt('QA_MIN_TESTS_PER_STORY', 1);
 
@@ -1074,7 +1132,7 @@ export const QA_MIN_TESTS_PER_STORY =
 export const QA_MIN_COVERAGE_PCT =
     envInt('QA_MIN_COVERAGE_PCT', 40);
 
-/** Timeout (ms) for a single test-runner invocation. */
+/** Timeout (ms) for a single test-runner invocation (and, separately, for the dependency install before it — Plan 30-03). */
 export const QA_TEST_TIMEOUT_MS =
     envInt('QA_TEST_TIMEOUT_MS', 600000);
 

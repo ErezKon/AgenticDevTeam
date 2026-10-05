@@ -1,19 +1,16 @@
 /**
  * Dispatcher branching — unit tests.
  *
- * Tests the canonicalBranchName helper exported from src/agents/developers/dispatcher.ts.
- * Verifies one-branch-per-story grouping: all assignments with the same storyId
- * collapse onto a single branch, regardless of what branchName the Team Leader
- * assigned to each one.
+ * Tests canonicalBranchName (src/agents/developers/dispatch-plan.ts) and how
+ * buildDispatchPlan groups assignments onto branches.
  *
- * Test cases from Sub-Plan 6 verification spec:
- *   - 3 assignments with storyId US-001 (different branchNames) → 1 branch
- *   - 3 assignments with storyId US-002 → 1 branch
- *   - Total: 6 assignments, 2 stories → 2 branches
- *   - First assignment's branchName wins for the story
- *   - Missing branchName gets a generated name with project slug prefix
+ * Plan 30-01: an explicit branchName from the Team Leader always wins. Only an
+ * assignment WITHOUT a branchName follows its story, onto the first non-scaffold
+ * branch recorded for that story. The old "first branch seen for the story wins"
+ * rule moved feature work and the FINAL INTEGRATION assignment onto the scaffold
+ * branch in the claudeopus5 run.
  */
-import { canonicalBranchName } from '../src/agents/developers/dispatcher';
+import { canonicalBranchName, buildDispatchPlan } from '../src/agents/developers/dispatch-plan';
 
 const projectSlug = 'simple-calculator';
 
@@ -39,52 +36,49 @@ function makeAssignment(overrides: Record<string, any>) {
 }
 
 describe('canonicalBranchName', () => {
-    it('collapses assignments with the same storyId onto one branch', () => {
+    it('honours explicit branch names even when assignments share a storyId', () => {
         const storyBranches = new Map<string, string>();
 
         const a1 = makeAssignment({ id: 'ASSIGN-001', storyId: 'US-001', branchName: 'simple-calculator/feature/us-001-auth' });
         const a2 = makeAssignment({ id: 'ASSIGN-002', storyId: 'US-001', branchName: 'simple-calculator/feature/us-001-auth-form' });
         const a3 = makeAssignment({ id: 'ASSIGN-003', storyId: 'US-001', branchName: 'simple-calculator/feature/us-001-auth-api' });
 
-        const b1 = canonicalBranchName(a1, projectSlug, storyBranches);
-        const b2 = canonicalBranchName(a2, projectSlug, storyBranches);
-        const b3 = canonicalBranchName(a3, projectSlug, storyBranches);
-
-        expect(b1).toBe('simple-calculator/feature/us-001-auth');
-        expect(b2).toBe(b1); // collapsed onto the first assignment's branch
-        expect(b3).toBe(b1);
+        expect(canonicalBranchName(a1, projectSlug, storyBranches)).toBe('simple-calculator/feature/us-001-auth');
+        expect(canonicalBranchName(a2, projectSlug, storyBranches)).toBe('simple-calculator/feature/us-001-auth-form');
+        expect(canonicalBranchName(a3, projectSlug, storyBranches)).toBe('simple-calculator/feature/us-001-auth-api');
+        // The story remembers its FIRST explicit branch, for assignments that have none.
+        expect(storyBranches.get('US-001')).toBe('simple-calculator/feature/us-001-auth');
     });
 
-    it('produces exactly 2 branches for 6 assignments across 2 stories', () => {
-        const storyBranches = new Map<string, string>();
-
-        const assignments = [
-            makeAssignment({ id: 'ASSIGN-001', storyId: 'US-001', branchName: 'simple-calculator/feature/us-001-auth' }),
-            makeAssignment({ id: 'ASSIGN-002', storyId: 'US-001', branchName: 'simple-calculator/feature/us-001-login' }),
-            makeAssignment({ id: 'ASSIGN-003', storyId: 'US-001', branchName: 'simple-calculator/feature/us-001-register' }),
-            makeAssignment({ id: 'ASSIGN-004', storyId: 'US-002', branchName: 'simple-calculator/feature/us-002-calc' }),
-            makeAssignment({ id: 'ASSIGN-005', storyId: 'US-002', branchName: 'simple-calculator/feature/us-002-calc-ui' }),
-            makeAssignment({ id: 'ASSIGN-006', storyId: 'US-002', branchName: 'simple-calculator/feature/us-002-calc-api' }),
-        ];
-
-        const branches = new Set(
-            assignments.map(a => canonicalBranchName(a, projectSlug, storyBranches)),
-        );
-
-        expect(branches.size).toBe(2);
-        expect(storyBranches.size).toBe(2);
-    });
-
-    it('first assignment branchName wins for the story', () => {
+    it('an assignment without a branchName follows its story\'s branch', () => {
         const storyBranches = new Map<string, string>();
 
         const a1 = makeAssignment({ id: 'ASSIGN-001', storyId: 'US-003', branchName: 'simple-calculator/feature/us-003-first' });
-        const a2 = makeAssignment({ id: 'ASSIGN-002', storyId: 'US-003', branchName: 'simple-calculator/feature/us-003-second' });
+        const a2 = makeAssignment({ id: 'ASSIGN-002', storyId: 'US-003', branchName: undefined });
 
         canonicalBranchName(a1, projectSlug, storyBranches);
-        const branch2 = canonicalBranchName(a2, projectSlug, storyBranches);
+        expect(canonicalBranchName(a2, projectSlug, storyBranches)).toBe('simple-calculator/feature/us-003-first');
+    });
 
-        expect(branch2).toBe('simple-calculator/feature/us-003-first');
+    it('never moves an assignment without a branchName onto the scaffold', () => {
+        const storyBranches = new Map<string, string>();
+
+        const scaffold = makeAssignment({ id: 'ASSIGN-001', storyId: 'US-035', branchName: 'simple-calculator/chore/scaffold', taskType: 'chore' });
+        const wiring = makeAssignment({ id: 'ASSIGN-027', storyId: 'US-035', branchName: undefined, description: 'Final integration' });
+
+        expect(canonicalBranchName(scaffold, projectSlug, storyBranches)).toBe('simple-calculator/chore/scaffold');
+        expect(storyBranches.has('US-035')).toBe(false);
+        expect(canonicalBranchName(wiring, projectSlug, storyBranches)).toBe('simple-calculator/feature/us-035-final-integration');
+    });
+
+    it('never moves a scaffold assignment off the scaffold', () => {
+        const storyBranches = new Map<string, string>();
+
+        const feature = makeAssignment({ id: 'ASSIGN-004', storyId: 'US-001', branchName: 'simple-calculator/feature/us-001-engine' });
+        const scaffold = makeAssignment({ id: 'ASSIGN-002', storyId: 'US-001', branchName: 'chore/scaffold', taskType: 'chore' });
+
+        canonicalBranchName(feature, projectSlug, storyBranches);
+        expect(canonicalBranchName(scaffold, projectSlug, storyBranches)).toBe('simple-calculator/chore/scaffold');
     });
 
     it('generates a branch name with slug prefix when branchName is missing', () => {
@@ -113,6 +107,53 @@ describe('canonicalBranchName', () => {
         const branch = canonicalBranchName(a, projectSlug, storyBranches);
 
         expect(branch).toBe('simple-calculator/chore/scaffold');
-        expect(storyBranches.get('ASSIGN-030')).toBe('simple-calculator/chore/scaffold');
+        // Scaffold branches are never recorded as a story's branch.
+        expect(storyBranches.has('ASSIGN-030')).toBe(false);
+    });
+});
+
+describe('branch grouping (buildDispatchPlan)', () => {
+    it('collapses assignments without a branchName onto their story\'s branch', () => {
+        const assignments = [
+            makeAssignment({ id: 'ASSIGN-001', storyId: 'US-001', branchName: 'simple-calculator/feature/us-001-auth' }),
+            makeAssignment({ id: 'ASSIGN-002', storyId: 'US-001' }),
+            makeAssignment({ id: 'ASSIGN-003', storyId: 'US-001' }),
+            makeAssignment({ id: 'ASSIGN-004', storyId: 'US-002', branchName: 'simple-calculator/feature/us-002-calc' }),
+            makeAssignment({ id: 'ASSIGN-005', storyId: 'US-002' }),
+            makeAssignment({ id: 'ASSIGN-006', storyId: 'US-002' }),
+        ];
+        const plan = buildDispatchPlan(assignments, { projectSlug });
+
+        expect([...plan.branches.keys()].sort()).toEqual([
+            'simple-calculator/feature/us-001-auth',
+            'simple-calculator/feature/us-002-calc',
+        ]);
+        expect(plan.branches.get('simple-calculator/feature/us-001-auth')!.assignments.map(a => a.id))
+            .toEqual(['ASSIGN-001', 'ASSIGN-002', 'ASSIGN-003']);
+        expect(plan.storySplits).toEqual([]);
+    });
+
+    it('an explicit branch listed after its story-mates still seeds the story branch', () => {
+        const plan = buildDispatchPlan([
+            makeAssignment({ id: 'ASSIGN-001', storyId: 'US-004' }),
+            makeAssignment({ id: 'ASSIGN-002', storyId: 'US-004', branchName: 'feature/us-004-settings' }),
+        ], { projectSlug });
+
+        expect([...plan.branches.keys()]).toEqual(['simple-calculator/feature/us-004-settings']);
+    });
+
+    it('reports a story-branch-split when the Team Leader spreads a story over branches', () => {
+        const plan = buildDispatchPlan([
+            makeAssignment({ id: 'ASSIGN-001', storyId: 'US-001', branchName: 'feature/us-001-auth' }),
+            makeAssignment({ id: 'ASSIGN-002', storyId: 'US-001', branchName: 'feature/us-001-login' }),
+        ], { projectSlug });
+
+        expect(plan.storySplits).toEqual([{
+            storyId: 'US-001',
+            branches: ['simple-calculator/feature/us-001-auth', 'simple-calculator/feature/us-001-login'],
+        }]);
+        expect(plan.warnings).toContain(
+            'Story US-001 spans 2 branches: simple-calculator/feature/us-001-auth, simple-calculator/feature/us-001-login',
+        );
     });
 });

@@ -135,6 +135,9 @@ export class RunContext {
     /** Per-run prompt-cache breakpoint-logged set (fixes unbounded growth). */
     readonly breakpointLoggedAgents = new Set<string>();
 
+    /** Models already warned about as unpriced (Plan 30-06, cost.ts `resolvePricing`). */
+    readonly unpricedModelsWarned = new Set<string>();
+
     /** Last known project state — updated at each phase entry for graceful shutdown (Plan 27-G). */
     lastKnownState: Record<string, any> | null = null;
 

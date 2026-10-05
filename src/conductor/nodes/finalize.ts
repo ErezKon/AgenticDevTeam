@@ -10,7 +10,7 @@ import { writeArtifact } from '../../agents/_shared/artifact';
 import { writeOutputFile } from '../../utils/artifact-writer';
 import { gitExec, findGitRoot } from '../../utils/git-exec';
 import { tokenTracker } from '../../utils/token-tracker';
-import { estimateCost } from '../../utils/cost';
+import { billedCost, estimateRunCost } from '../../utils/cost';
 import { MODEL_PRICING } from '../../config';
 import { getThrottleStats, logThrottleStats } from '../../utils/llm-throttle';
 import { getValidationStats, logValidationStats } from '../../utils/structured-output';
@@ -36,7 +36,6 @@ import {
 import { msg } from './_guards';
 import type { ProjectStateType } from '../state';
 import type { PhaseName } from '../../agents/_shared/base-schemas';
-import type { DispatchRound } from '../gate-types';
 
 const finalLog = getLogger('[Finalize]', 46);
 
@@ -86,7 +85,6 @@ export async function finalizeNode(state: ProjectStateType): Promise<Partial<Pro
     let prCounts = countPRsByStatus(state.pullRequests ?? []);
     const branchesSalvaged = (state.salvageBranches ?? []).length;
     const branchesNotAttempted = 0;
-    const branchesDeferred = (state.dispatchRounds ?? []).filter((r: DispatchRound) => r.prs === 0 && r.fileChanges === 0).length;
     let allEvents = getAllEvents();
     let phaseTimeline = extractPhaseTimeline(allEvents);
     const budget = getBudgetStatus();
@@ -267,11 +265,8 @@ export async function finalizeNode(state: ProjectStateType): Promise<Partial<Pro
         content: summaryText,
     });
 
-    // ── Token usage report artifact
-    let totalEstimatedCost = 0;
-    for (const a of usageSummary.byAgent) {
-        totalEstimatedCost += estimateCost(a.model, a.inputTokens, a.outputTokens);
-    }
+    // ── Token usage report artifact (Plan 30-06: billed, cache-aware cost — it was list price)
+    const totalEstimatedCost = estimateRunCost(usageSummary);
 
     const usageReportLines: string[] = [
         `# Token Usage Report`,
@@ -297,7 +292,7 @@ export async function finalizeNode(state: ProjectStateType): Promise<Partial<Pro
         mdTable(
             ['Agent', 'Model', 'Calls', 'Input', 'Output', 'Total', 'Est. Cost'],
             usageSummary.byAgent.map(a => {
-                const cost = estimateCost(a.model, a.inputTokens, a.outputTokens);
+                const cost = billedCost(a);
                 return [a.agentId, a.model, a.callCount, a.inputTokens.toLocaleString(), a.outputTokens.toLocaleString(), a.totalTokens.toLocaleString(), `$${cost.toFixed(4)}`];
             }),
             ['left', 'left', 'right', 'right', 'right', 'right', 'right'],
@@ -316,7 +311,7 @@ export async function finalizeNode(state: ProjectStateType): Promise<Partial<Pro
         mdTable(
             ['Model', 'Calls', 'Input', 'Output', 'Total', 'Est. Cost'],
             usageSummary.byModel.map(m => {
-                const cost = estimateCost(m.model, m.inputTokens, m.outputTokens);
+                const cost = billedCost(m);
                 return [m.model, m.callCount, m.inputTokens.toLocaleString(), m.outputTokens.toLocaleString(), m.totalTokens.toLocaleString(), `$${cost.toFixed(4)}`];
             }),
             ['left', 'right', 'right', 'right', 'right', 'right'],
@@ -421,7 +416,8 @@ export async function finalizeNode(state: ProjectStateType): Promise<Partial<Pro
         filesDelivered,
         prCounts,
         branchesSalvaged,
-        branchesDeferred,
+        // Plan 30-02: branches whose latest PR record is 'deferred' (was: zero-output dispatch rounds)
+        branchesDeferred: prCounts.branchesDeferred,
         branchesNotAttempted,
         phaseTimeline,
     });

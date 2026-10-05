@@ -9,6 +9,11 @@
  * schemas, injected JSON schema and task context — byte-identical on every turn —
  * were re-billed each time, giving a 23:1 input:output ratio (2,320,436 in /
  * 99,731 out) for a single branch of fifteen. Nothing in the pipeline noticed.
+ *
+ * Plan 30-06: the conversation is cached too — by Anthropic's automatic caching
+ * (a top-level `cache_control`, set by the agent factory), or, behind a proxy, by
+ * an explicit breakpoint on the last message. No breakpoint is gated on the
+ * length of the block it ends any more: the minimum applies to the whole prefix.
  */
 import { AIMessage, HumanMessage, SystemMessage, ToolMessage, type BaseMessage } from '@langchain/core/messages';
 
@@ -50,9 +55,10 @@ describe('withSystemCacheBreakpoint (Plan 22 D1)', () => {
         expect(marked[0].text).toContain('You are a principal developer.');
     });
 
-    it('leaves a small system prompt alone — a cache write would cost more', () => {
+    it('marks a short system prompt too — the minimum applies to the whole prefix (Plan 30-06)', () => {
         const sys = new SystemMessage('short');
-        expect(withSystemCacheBreakpoint(sys)).toBe(sys);
+        const out = withSystemCacheBreakpoint(sys, { model: 'claude-haiku-4-5', tools: [{ name: 'read_file' }], agentId: 'junior' });
+        expect(cacheControlBlocks(out.content)).toHaveLength(1);
     });
 
     it('is idempotent — never stacks breakpoints across turns', () => {
@@ -80,17 +86,15 @@ describe('withSystemCacheBreakpoint (Plan 22 D1)', () => {
     });
 });
 
-// ─── D1: message breakpoints ────────────────────────────────────────────────
+// ─── D1 / Plan 30-06: message breakpoints ───────────────────────────────────
 
-describe('withMessageCacheBreakpoints (Plan 22 D1)', () => {
-    /** A history with 5 tool-calling turns and a large task message.
-     *  AI message content must exceed the model-aware cache minimum
-     *  (Plan 24, C2: default 1024 tokens × ~4 chars/token = 4096 chars). */
+describe('withMessageCacheBreakpoints (Plan 22 D1, Plan 30-06)', () => {
+    /** A task message and 5 tool-calling turns; the last message is a tool result. */
     function history(): BaseMessage[] {
         const out: BaseMessage[] = [new HumanMessage(`## Architecture\n${big(8000)}`)];
         for (let t = 1; t <= 5; t++) {
             out.push(new AIMessage({
-                content: `reasoning ${t} ${big(5000)}`,
+                content: `reasoning ${t}`,
                 tool_calls: [{ id: `t${t}`, name: 'read_file', args: { filePath: `f${t}.ts` }, type: 'tool_call' }],
             }));
             out.push(new ToolMessage({ content: big(2000), tool_call_id: `t${t}`, name: 'read_file' }));
@@ -98,65 +102,86 @@ describe('withMessageCacheBreakpoints (Plan 22 D1)', () => {
         return out;
     }
 
-    it('marks the task message and a rolling history breakpoint', () => {
-        const { messages, breakpoints } = withMessageCacheBreakpoints(history());
+    const markedIndexes = (messages: BaseMessage[]): number[] =>
+        messages.map((m, i) => (cacheControlBlocks(m.content).length > 0 ? i : -1)).filter(i => i >= 0);
+
+    it('with automatic caching, marks only the task message — the conversation is cached by the API', () => {
+        const { messages, breakpoints } = withMessageCacheBreakpoints(history(), { autoCache: true });
+        expect(breakpoints).toBe(1);
+        expect(markedIndexes(messages)).toEqual([0]);
+    });
+
+    it('fallback (proxy): also marks the last block of the last message', () => {
+        const msgs = history();
+        const { messages, breakpoints } = withMessageCacheBreakpoints(msgs, { autoCache: false });
 
         expect(breakpoints).toBe(2);
-        // First human message = the task and its architecture context.
-        expect(cacheControlBlocks(messages[0].content)).toHaveLength(1);
-        // Exactly two messages carry a breakpoint in total.
-        const marked = messages.filter(m => cacheControlBlocks(m.content).length > 0);
-        expect(marked).toHaveLength(2);
+        expect(markedIndexes(messages)).toEqual([0, msgs.length - 1]);
+        const last = messages[messages.length - 1] as ToolMessage;
+        expect(last).toBeInstanceOf(ToolMessage);
+        expect(last.tool_call_id).toBe('t5');
+        expect(last.name).toBe('read_file');
     });
 
-    it('places the rolling breakpoint OUTSIDE the recent window', () => {
-        const msgs = history();
-        const { messages } = withMessageCacheBreakpoints(msgs);
-
-        const markedIndexes = messages
-            .map((m, i) => (cacheControlBlocks(m.content).length > 0 ? i : -1))
-            .filter(i => i >= 0);
-
-        // 5 turns of 2 messages starting at index 1; the last 3 turns start at
-        // index 1 + 2*2 = 5. The rolling breakpoint must be before that.
-        const rolling = markedIndexes.filter(i => i !== 0);
-        expect(rolling).toHaveLength(1);
-        expect(rolling[0]).toBeLessThan(5);
+    it('fallback: preserves tool_calls when the last message is an AIMessage', () => {
+        const msgs = [...history(), new AIMessage({
+            content: [{ type: 'text', text: 'next step' }] as any,
+            tool_calls: [{ id: 't6', name: 'read_file', args: { filePath: 'f6.ts' }, type: 'tool_call' }],
+        })];
+        const { messages } = withMessageCacheBreakpoints(msgs, { autoCache: false });
+        const last = messages[messages.length - 1] as AIMessage;
+        expect(cacheControlBlocks(last.content)).toHaveLength(1);
+        expect(last.tool_calls).toHaveLength(1);
+        expect(last.tool_calls![0].args.filePath).toBe('f6.ts');
     });
 
-    it('preserves tool_calls when rewriting an AIMessage', () => {
-        const { messages } = withMessageCacheBreakpoints(history());
-        const rewritten = messages.filter(
-            (m): m is AIMessage => m instanceof AIMessage && cacheControlBlocks(m.content).length > 0,
-        );
-        expect(rewritten).toHaveLength(1);
-        expect(rewritten[0].tool_calls).toHaveLength(1);
-        expect(rewritten[0].tool_calls![0].args.filePath).toMatch(/^f\d\.ts$/);
+    it('fallback: never marks a thinking block', () => {
+        const msgs = [new HumanMessage('task'), new AIMessage({ content: [{ type: 'thinking', thinking: 'hmm', signature: 's' }] as any })];
+        const { messages, breakpoints } = withMessageCacheBreakpoints(msgs, { autoCache: false });
+        expect(breakpoints).toBe(1);
+        expect(markedIndexes(messages)).toEqual([0]);
+    });
+
+    it('marks a short task message — no gating on the block\'s own length (Plan 30-06)', () => {
+        const { breakpoints } = withMessageCacheBreakpoints([new HumanMessage('tiny')], { autoCache: true });
+        expect(breakpoints).toBe(1);
     });
 
     it('respects the remaining breakpoint budget', () => {
-        const { breakpoints } = withMessageCacheBreakpoints(history(), 1);
+        const { messages, breakpoints } = withMessageCacheBreakpoints(history(), { autoCache: false, budget: 1 });
         expect(breakpoints).toBe(1);
+        expect(markedIndexes(messages)).toEqual([0]);
     });
 
     it('is a no-op with zero budget', () => {
         const msgs = history();
-        const { messages, breakpoints } = withMessageCacheBreakpoints(msgs, 0);
+        const { messages, breakpoints } = withMessageCacheBreakpoints(msgs, { autoCache: false, budget: 0 });
         expect(messages).toBe(msgs);
         expect(breakpoints).toBe(0);
     });
 
-    it('never exceeds Anthropic\'s 4-breakpoint limit in total', () => {
-        const sys = withSystemCacheBreakpoint(new SystemMessage(big(6000)));
-        const systemBreakpoints = cacheControlBlocks(sys.content).length;
-        const { breakpoints } = withMessageCacheBreakpoints(history(), MAX_CACHE_BREAKPOINTS - systemBreakpoints);
-        expect(systemBreakpoints + breakpoints).toBeLessThanOrEqual(MAX_CACHE_BREAKPOINTS);
+    it('is idempotent — never stacks breakpoints', () => {
+        const once = withMessageCacheBreakpoints(history(), { autoCache: false }).messages;
+        const twice = withMessageCacheBreakpoints(once, { autoCache: false });
+        expect(twice.breakpoints).toBe(0);
+        expect(twice.messages.flatMap(m => cacheControlBlocks(m.content))).toHaveLength(2);
     });
 
-    it('skips messages too small to be worth a cache write', () => {
-        const msgs = [new HumanMessage('tiny'), new AIMessage('also tiny')];
-        const { breakpoints } = withMessageCacheBreakpoints(msgs);
-        expect(breakpoints).toBe(0);
+    it.each([true, false])('never exceeds Anthropic\'s 4-breakpoint limit in total (autoCache=%s)', (autoCache) => {
+        const sys = withSystemCacheBreakpoint(new SystemMessage(big(6000)));
+        const systemBreakpoints = cacheControlBlocks(sys.content).length;
+        const automatic = autoCache ? 1 : 0;
+        const { breakpoints } = withMessageCacheBreakpoints(history(), {
+            autoCache, budget: MAX_CACHE_BREAKPOINTS - systemBreakpoints - automatic,
+        });
+        expect(systemBreakpoints + breakpoints + automatic).toBeLessThanOrEqual(MAX_CACHE_BREAKPOINTS);
+        expect(systemBreakpoints + breakpoints + automatic).toBe(3);
+    });
+
+    it('never mutates the input messages', () => {
+        const msgs = history();
+        withMessageCacheBreakpoints(msgs, { autoCache: false });
+        expect(msgs.flatMap(m => cacheControlBlocks(m.content))).toHaveLength(0);
     });
 });
 

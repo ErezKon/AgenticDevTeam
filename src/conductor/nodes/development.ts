@@ -1,21 +1,22 @@
 /**
  * Development node — fan-out dispatch of developer agents.
  */
-import * as path from 'path';
 import { getLogger } from '../../utils/logger';
 import { getAccessToken } from '../../utils/oauth-auth.util';
 import { dispatchDevelopers } from '../../agents/developers/dispatcher';
 import { getDevAgent } from '../../agents/developers/registry';
 import { deployConventionsToWorkspace, resolveConventionFiles } from '../../utils/coding-conventions';
-import { ensureProjectGitignore, getGitignoreEntriesForStack } from '../../utils/workspace';
+import { ensureProjectGitignore, managedGitignoreEntries } from '../../utils/workspace';
 import { gitExec, findGitRoot } from '../../utils/git-exec';
 import { retryFailedPRCreation } from '../pr-workflow';
 import { syncWorkspaceToBranch, looksSourceless } from '../workspace-sync';
-import { selectPendingAssignments } from '../assignment-policy';
+import {
+    abandonedBranches, bugAttemptsAfterRound, dispatchRoundOf, newlyExecutedIds, selectPendingAssignments, settleCompletion,
+} from '../assignment-policy';
 import { runAssemblyGate } from '../assembly-gate';
 import { makeGateBug } from '../bug-factory';
 import {
-    CONTEXT_MAX_CHARS, DEV_CONTEXT_FILE_CHANGES_LIMIT, RUN_FAIL_POLICY,
+    CONTEXT_MAX_CHARS, DEV_CONTEXT_FILE_CHANGES_LIMIT, ASSIGNMENT_MAX_ATTEMPTS,
 } from '../../config';
 import {
     summariseArchitecture, summariseTechStack, summariseDbDesign,
@@ -24,13 +25,12 @@ import {
 } from '../context-builder';
 import type { ContextSection } from '../context-builder';
 import { emitRunEvent } from '../../utils/event-bus';
+import { withTokenAttribution } from '../../utils/token-tracker';
 import { writePeriodicSnapshot } from '../../utils/run-snapshot';
 import { projectSlugFromBranch } from '../../utils/branch-naming';
-import { phaseNode, msg, checkRerun } from './_guards';
-import type { ProjectStateType } from '../state';
+import { phaseNode, msg } from './_guards';
 import type { PhaseName, TranscriptMessage, Bug } from '../../agents/_shared/base-schemas';
 import type { PullRequest } from '../../agents/_shared/schemas/pr.schema';
-import type { DispatchRound } from '../gate-types';
 
 const devLog = getLogger('[Development]', 226);
 
@@ -61,11 +61,12 @@ export const developmentNode = phaseNode('development', devLog, { haltCheck: tru
         }
         if (retriedPRs.length > 0) {
             devLog.info(`Successfully retried ${retriedPRs.length} PR(s) — updating state`);
-            const otherPRs = (state.pullRequests ?? []).filter((pr: PullRequest) => pr.status !== 'pr-creation-failed');
+            // pullRequests is append-only: returning the other records again duplicated every one of
+            // them, and Plan 30-05 reads that history (abandoned branches, first executions).
             return {
                 ...rerunUpdate,
                 phase: 'development' as PhaseName,
-                pullRequests: [...otherPRs, ...retriedPRs],
+                pullRequests: retriedPRs,
                 transcript: retriedTranscript,
             };
         }
@@ -88,13 +89,7 @@ export const developmentNode = phaseNode('development', devLog, { haltCheck: tru
     const devConventionFiles = resolveConventionFiles(devLanguages, state.techStack);
     deployConventionsToWorkspace(state.workspacePath, devConventionFiles);
 
-    const stackGitignoreEntries = [
-        ...getGitignoreEntriesForStack(state.techStack),
-        '.conventions/',
-        '.worktrees/',
-        '.agent/',
-    ];
-    ensureProjectGitignore(state.workspacePath, stackGitignoreEntries);
+    ensureProjectGitignore(state.workspacePath, managedGitignoreEntries(state.techStack));
 
     let contextPrompt: string;
     {
@@ -116,35 +111,56 @@ export const developmentNode = phaseNode('development', devLog, { haltCheck: tru
     const projectSlug = projectSlugFromBranch(state.systemBranch);
 
     const isMaintainMode = state.codebaseAnalysis != null;
-    const result = await dispatchDevelopers(apiKey, pending, state.workspacePath, contextPrompt, state.systemBranch, projectSlug, state.gitContext, state.techStack, state.completedAssignmentIds, state.userStories, isMaintainMode, state.outputPath, state.tasks);
+    // Plan 30-05: a branch unmerged in consecutive rounds is not dispatched again
+    const abandoned = abandonedBranches(state.pullRequests ?? []);
+    if (abandoned.length > 0) {
+        devLog.warn(`${abandoned.length} abandoned branch(es) will not be dispatched: ${abandoned.map(b => `${b.branchName} (${b.rounds} unmerged rounds, last ${b.lastStatus})`).join(', ')}`);
+    }
+    // Plan 30-06: the round's invocations are attributed to it in the token report
+    const result = await withTokenAttribution({ round: (state.dispatchRounds?.length ?? 0) + 1 }, () => dispatchDevelopers(
+        apiKey, pending, state.workspacePath, contextPrompt, state.systemBranch, projectSlug, state.gitContext, state.techStack,
+        state.completedAssignmentIds, state.userStories, isMaintainMode, state.outputPath, state.tasks, state.repoContract,
+        abandoned.map(b => b.branchName),
+    ));
 
     devLog.info(`Development complete: ${result.fileChanges.length} file changes, ${result.pullRequests.length} PRs`);
-    if (result.completionEvidence.length > 0) {
-        const incomplete = result.completionEvidence.filter(e => !e.merged || e.filesChanged === 0 || !e.gatePassed);
-        if (incomplete.length > 0) {
-            devLog.warn(`${incomplete.length} assignment(s) merged without full evidence — will be re-evaluated`);
-        }
+    // Plan 30-05 step 5: an attempt on a bug counts only when an assignment working on it ran
+    const executedIds = newlyExecutedIds(state.pullRequests ?? [], result.pullRequests);
+    const bugAttempts = bugAttemptsAfterRound(state.assignments, executedIds, state.bugAttempts ?? {});
+    // Plan 30-02 step 8 (Sub-Plan 06 §6): merged work without completion evidence goes back to
+    // pending with an INCOMPLETE-* bug, until it has merged ASSIGNMENT_MAX_ATTEMPTS times.
+    const settled = settleCompletion(
+        result.completedAssignmentIds, result.completionEvidence,
+        [...(state.pullRequests ?? []), ...result.pullRequests], ASSIGNMENT_MAX_ATTEMPTS,
+    );
+    if (settled.reopened.length > 0) {
+        devLog.warn(`${settled.reopened.length} merged assignment(s) lack completion evidence — kept pending with an INCOMPLETE bug: ${settled.reopened.map(e => e.assignmentId).join(', ')}`);
+    }
+    if (result.deferredAssignmentIds.length > 0) {
+        devLog.warn(`${result.deferredAssignmentIds.length} assignment(s) deferred to the next round (branch budget): ${result.deferredAssignmentIds.join(', ')}`);
     }
     if (result.salvageBranches.length > 0) {
         devLog.warn(`${result.salvageBranches.length} branch(es) salvaged (not merged): ${result.salvageBranches.join(', ')}`);
     }
 
     // Plan 25: provider failure — stop gracefully so continue-run can pick up
-    if (result.providerFailureKind) {
-        const reason = `provider-${result.providerFailureKind}`;
-        devLog.error(`Provider failure (${result.providerFailureKind}) — routing to finalize for graceful shutdown`);
+    if (result.stopReason?.startsWith('provider-')) {
+        const reason = result.stopReason;
+        devLog.error(`Provider failure (${reason}) — routing to finalize for graceful shutdown`);
         writePeriodicSnapshot(state.outputPath, state, 'development');
         return {
             ...rerunUpdate,
             fileChanges: result.fileChanges,
             artifacts: result.artifacts,
             pullRequests: result.pullRequests,
-            completedAssignmentIds: result.completedAssignmentIds,
+            completedAssignmentIds: settled.completed,
             completionEvidence: result.completionEvidence,
             salvageBranches: result.salvageBranches,
+            bugs: settled.bugs,
+            bugAttempts,
             transcript: [
                 ...result.transcript,
-                msg('conductor', 'development', `Run stopped: provider failure (${result.providerFailureKind})`),
+                msg('conductor', 'development', `Run stopped: provider failure (${reason})`),
             ],
             phase: 'development' as PhaseName,
             tokenUsage: result.tokenUsage ?? [],
@@ -213,31 +229,37 @@ export const developmentNode = phaseNode('development', devLog, { haltCheck: tru
         }
     }
 
-    const mergedPrCount = result.pullRequests.filter(pr => pr.status === 'merged').length;
-    const round: DispatchRound = {
-        fileChanges: result.fileChanges.length,
-        prs: mergedPrCount,
-        completed: result.completedAssignmentIds.length,
-    };
-    if (round.fileChanges === 0 && round.prs === 0) {
-        devLog.error(`Dispatch round produced no file changes and no merged PRs (${result.pullRequests.length} PR record(s), all skipped/unmerged)`);
+    // Plan 30-05: merged PRs are the progress signal; unmerged file changes are not
+    const round = dispatchRoundOf(state.pullRequests ?? [], {
+        pullRequests: result.pullRequests, fileChanges: result.fileChanges.length,
+        deferredAssignmentIds: result.deferredAssignmentIds, completed: settled.completed.length,
+    });
+    const mergedPrCount = round.merged;
+    if (round.merged === 0) {
+        const text = `Dispatch round merged no PR: ${result.pullRequests.length} PR record(s), ${round.fileChanges} unmerged file change(s), `
+            + `${round.executed} assignment(s) run for the first time, ${round.deferred} deferred`;
+        // Deferred work resumes next round — in flight, not a stall
+        if (round.deferred > 0) devLog.warn(text);
+        else devLog.error(text);
     }
 
     emitRunEvent('phase:end', { phase: 'development', nextPhase: 'qa', fileChanges: result.fileChanges.length, prs: mergedPrCount });
     return {
         ...rerunUpdate,
         dispatchRounds: [round],
+        bugAttempts,
         fileChanges: result.fileChanges,
         artifacts: result.artifacts,
         pullRequests: result.pullRequests,
-        completedAssignmentIds: result.completedAssignmentIds,
+        completedAssignmentIds: settled.completed,
         completionEvidence: result.completionEvidence,
         salvageBranches: result.salvageBranches,
         // Plan 25-04 §7: surface assembly-gate bugs so bugfix triage picks them up
-        bugs: assemblyBugs,
+        // (Plan 30-02: plus INCOMPLETE-* bugs for merged work without completion evidence)
+        bugs: [...assemblyBugs, ...settled.bugs],
         transcript: [
             ...result.transcript,
-            msg('conductor', 'development', `Development phase complete: ${result.fileChanges.length} files changed, ${result.pullRequests.length} PRs merged. Sync: ${syncResult.details}`),
+            msg('conductor', 'development', `Development phase complete: ${result.fileChanges.length} files changed, ${mergedPrCount} of ${result.pullRequests.length} PR record(s) merged. Sync: ${syncResult.details}`),
         ],
         phase: 'development' as PhaseName,
         tokenUsage: result.tokenUsage ?? [],

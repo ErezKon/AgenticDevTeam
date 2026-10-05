@@ -35,8 +35,19 @@ export const PullRequestSchema = z.object({
     authorAgentId: z.string().describe('Developer agent who created the PR'),
     reviewerAgentIds: z.array(z.string()).describe('Assigned reviewer agent IDs'),
     reviews: z.array(PRReviewSchema).describe('Review history'),
-    status: z.enum(['open', 'approved', 'merged', 'closed', 'escalated_open', 'blocked', 'pr-creation-failed']),
+    /** `deferred` (Plan 30-02): the branch budget ran out before every assignment ran — the
+     *  partial work is pushed, no PR/review happened, and the next round resumes the branch. */
+    status: z.enum(['open', 'approved', 'merged', 'closed', 'escalated_open', 'blocked', 'pr-creation-failed', 'deferred']),
+    /** Plan 30-02: only the assignments whose agent actually ran on this branch. */
     assignmentIds: z.array(z.string()).describe('Assignment IDs covered by this PR'),
+    /** Plan 30-03: why an unmerged PR did not merge (the merge stage's blockers) — traceability and triage show these. */
+    blockers: z.array(z.string()).optional().describe('Why the PR did not merge'),
+    /** Plan 30-05: the first failing step of the branch's last gate run, with its rendered output summary — triage shows it. */
+    failedGate: z.object({
+        step: z.string(),
+        command: z.string(),
+        summary: z.string(),
+    }).optional().describe('First failing quality-gate step of the last gate run'),
     taskType: z.enum(['feature', 'bug', 'fix', 'refactor', 'chore']).describe('Type of work'),
     currentState: z.string().optional().describe('For bug/fix/refactor: description of current state before changes'),
     integrityFindings: z.array(z.object({

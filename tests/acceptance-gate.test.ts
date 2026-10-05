@@ -1,6 +1,7 @@
 /**
- * Acceptance Gate — unit tests for evaluateAcceptance, detectUnrecoverable,
- * acceptanceBlockersToBugs, and acceptanceReportToMarkdown.
+ * Acceptance Gate — unit tests for evaluateAcceptance, acceptanceBlockersToBugs,
+ * and acceptanceReportToMarkdown. Runaway detection (detectUnrecoverable) is
+ * tested in unrecoverable.test.ts (Plan 30-05).
  *
  * Plan 19 Sub-Plan 03: tests that the acceptance gate correctly determines
  * product status from state evidence.
@@ -15,7 +16,6 @@ process.env.MIN_AC_COVERAGE_PCT = '0';
 
 import {
     evaluateAcceptance,
-    detectUnrecoverable,
     acceptanceBlockersToBugs,
     acceptanceReportToMarkdown,
 } from '../src/conductor/acceptance-gate';
@@ -67,6 +67,7 @@ function makeMinimalState(overrides: Partial<ProjectStateType> = {}): ProjectSta
         unrecoverable: null,
         verificationErrors: [],
         dispatchRounds: [],
+        triageRounds: [],
         attemptedBugIds: [],
         bugAttempts: {},
         planViolations: [],
@@ -117,16 +118,38 @@ describe('evaluateAcceptance', () => {
     it('returns "accepted" when all criteria pass', () => {
         const state = makeMinimalState({
             latestGateReport: makeGateReport(),
-            testReports: [{ type: 'unit', framework: 'jest', total: 5, passed: 5, failed: 0, skipped: 0, status: 'pass' as const, source: 'quality-gates' as const, iterationIndex: 0, runnerError: false, cases: [], failures: [], agentId: 'qa-unit' }],
+            testReports: [{ type: 'unit', framework: 'jest', total: 5, passed: 5, failed: 0, skipped: 0, status: 'pass' as const, source: 'executed' as const, iterationIndex: 0, runnerError: false, cases: [], failures: [], agentId: 'qa-unit' }],
             userStories: [{ id: 'US-1', epicId: 'E-1', asA: 'user', iWant: 'calc', soThat: 'math', acceptanceCriteria: ['AC-1'] }],
             assignments: [{ id: 'A-1', storyId: 'US-1', additionalStoryIds: [], taskIds: ['TASK-001'], acIndexes: [], devAgentId: 'dev-1', rank: 'senior' as const, priority: 'high' as const, complexity: 'moderate' as const, estimate: '2h', description: 'impl', dependsOn: [], taskType: 'feature' as const, moduleIds: [] }],
+            completedAssignmentIds: ['A-1'],
             pullRequests: [{ id: 'PR-1', prNumber: 1, prUrl: '', title: '', description: '', branchName: 'feature/us1', authorAgentId: 'dev-1', reviewerAgentIds: [], reviews: [], status: 'merged' as any, assignmentIds: ['A-1'], taskType: 'feature' as any }],
         });
 
         const report = evaluateAcceptance(state);
-        // SCOPE always fails (storyIdsWithMerge is always empty) so best status is 'rejected'
-        expect(report.status).toBe('rejected');
+        // Plan 30-05: SCOPE reads the stories of merged assignments. Its set was never filled
+        // before, so SCOPE failed for every run with stories and this test expected 'rejected'.
+        expect(report.status).toBe('accepted');
+        expect(report.criteria.find(c => c.id === 'SCOPE')).toMatchObject({ passed: true, detail: 'Every story has merged work' });
         expect(report.unrecoverable).toBe(false);
+    });
+
+    it('SCOPE fails for a story whose assignments have not merged (Plan 30-05)', () => {
+        const state = makeMinimalState({
+            latestGateReport: makeGateReport(),
+            userStories: [
+                { id: 'US-1', epicId: 'E-1', asA: 'user', iWant: 'calc', soThat: 'math', acceptanceCriteria: ['AC-1'] },
+                { id: 'US-2', epicId: 'E-1', asA: 'user', iWant: 'undo', soThat: 'fix', acceptanceCriteria: ['AC-1'] },
+            ],
+            assignments: [
+                { id: 'A-1', storyId: 'US-1', additionalStoryIds: [], taskIds: ['TASK-001'], acIndexes: [], devAgentId: 'dev-1', rank: 'senior' as const, priority: 'high' as const, complexity: 'moderate' as const, estimate: '2h', description: 'impl', dependsOn: [], taskType: 'feature' as const, moduleIds: [] },
+                { id: 'A-2', storyId: 'US-2', additionalStoryIds: [], taskIds: ['TASK-002'], acIndexes: [], devAgentId: 'dev-1', rank: 'senior' as const, priority: 'high' as const, complexity: 'moderate' as const, estimate: '2h', description: 'impl', dependsOn: [], taskType: 'feature' as const, moduleIds: [] },
+            ],
+            completedAssignmentIds: ['A-1'],
+        });
+
+        const scope = evaluateAcceptance(state).criteria.find(c => c.id === 'SCOPE')!;
+        expect(scope.passed).toBe(false);
+        expect(scope.detail).toContain('1 of 2 user stories have no merged assignment (US-2)');
     });
 
     it('returns "rejected" when build fails', () => {
@@ -228,11 +251,12 @@ describe('evaluateAcceptance', () => {
     it('optional criteria failing yields "partial" status', () => {
         const state = makeMinimalState({
             latestGateReport: makeGateReport(),
-            testReports: [{ type: 'unit', framework: 'jest', total: 5, passed: 5, failed: 0, skipped: 0, status: 'pass' as const, source: 'quality-gates' as const, iterationIndex: 0, runnerError: false, cases: [], failures: [], agentId: 'qa-unit' }],
+            testReports: [{ type: 'unit', framework: 'jest', total: 5, passed: 5, failed: 0, skipped: 0, status: 'pass' as const, source: 'executed' as const, iterationIndex: 0, runnerError: false, cases: [], failures: [], agentId: 'qa-unit' }],
             // E2E failures (optional criterion) — Sub-Plan 11: e2eStatus drives the criterion
             e2eStatus: 'failed' as const,
             userStories: [{ id: 'US-1', epicId: 'E-1', asA: 'user', iWant: 'calc', soThat: 'math', acceptanceCriteria: ['AC-1'] }],
             assignments: [{ id: 'A-1', storyId: 'US-1', additionalStoryIds: [], taskIds: ['TASK-001'], acIndexes: [], devAgentId: 'dev-1', rank: 'senior' as const, priority: 'high' as const, complexity: 'moderate' as const, estimate: '2h', description: 'impl', dependsOn: [], taskType: 'feature' as const, moduleIds: [] }],
+            completedAssignmentIds: ['A-1'],
             pullRequests: [{ id: 'PR-1', prNumber: 1, prUrl: '', title: '', description: '', branchName: 'feature/us1', authorAgentId: 'dev-1', reviewerAgentIds: [], reviews: [], status: 'merged' as any, assignmentIds: ['A-1'], taskType: 'feature' as any }],
         });
 
@@ -240,127 +264,8 @@ describe('evaluateAcceptance', () => {
         state.testReports.push({ type: 'e2e' as any, framework: 'playwright', total: 3, passed: 1, failed: 2, skipped: 0, status: 'fail' as any, source: 'quality-gates' as const, iterationIndex: 0, runnerError: false, cases: [], failures: [{ testName: 'e2e-1', error: 'timeout' }], agentId: 'qa-e2e' });
 
         const report = evaluateAcceptance(state);
-        // SCOPE always fails (storyIdsWithMerge is always empty) so status is 'rejected'
-        expect(report.status).toBe('rejected');
-    });
-});
-
-// ─── detectUnrecoverable tests ──────────────────────────────────────────────
-
-describe('detectUnrecoverable', () => {
-    it('returns false for a normal state', () => {
-        const state = makeMinimalState({ phase: 'intake' as any });
-        const { unrecoverable } = detectUnrecoverable(state);
-        expect(unrecoverable).toBe(false);
-    });
-
-    it('detects zero-progress dispatch rounds', () => {
-        const state = makeMinimalState({
-            phase: 'intake' as any,
-            dispatchRounds: [
-                { fileChanges: 0, prs: 0, completed: 0 },
-                { fileChanges: 0, prs: 0, completed: 0 },
-            ],
-        });
-        const { unrecoverable, reason } = detectUnrecoverable(state);
-        expect(unrecoverable).toBe(true);
-        expect(reason).toContain('consecutive dispatch rounds');
-    });
-
-    it('does not trigger on a single zero-progress round', () => {
-        const state = makeMinimalState({
-            phase: 'intake' as any,
-            dispatchRounds: [
-                { fileChanges: 0, prs: 0, completed: 0 },
-            ],
-        });
-        const { unrecoverable } = detectUnrecoverable(state);
-        expect(unrecoverable).toBe(false);
-    });
-
-    // Plan 21, E3: developmentNode now writes dispatchRounds with MERGED PR
-    // counts only. A `PR-SKIPPED-*` placeholder is not progress.
-    it('does not count skipped PR placeholders as progress', () => {
-        const state = makeMinimalState({
-            phase: 'intake' as any,
-            dispatchRounds: [
-                { fileChanges: 0, prs: 0, completed: 0 },
-                { fileChanges: 0, prs: 0, completed: 0 },
-            ],
-            pullRequests: [
-                { id: 'PR-SKIPPED-feat/a', prNumber: 0, status: 'closed', branchName: 'feat/a', assignmentIds: ['A'] } as any,
-            ],
-        });
-        const { unrecoverable, reason } = detectUnrecoverable(state);
-        expect(unrecoverable).toBe(true);
-        expect(reason).toContain('consecutive dispatch rounds');
-    });
-
-    it('resets when a round lands a merged PR', () => {
-        const state = makeMinimalState({
-            phase: 'intake' as any,
-            dispatchRounds: [
-                { fileChanges: 0, prs: 0, completed: 0 },
-                { fileChanges: 0, prs: 1, completed: 1 },
-            ],
-        });
-        expect(detectUnrecoverable(state).unrecoverable).toBe(false);
-    });
-
-    it('resets when a round lands file changes', () => {
-        const state = makeMinimalState({
-            phase: 'intake' as any,
-            dispatchRounds: [
-                { fileChanges: 3, prs: 0, completed: 0 },
-                { fileChanges: 0, prs: 0, completed: 0 },
-            ],
-        });
-        expect(detectUnrecoverable(state).unrecoverable).toBe(false);
-    });
-
-    it('detects sourceless workspace after development', () => {
-        const state = makeMinimalState({
-            phase: 'qa' as any,
-            fileChanges: [],
-            pullRequests: [],
-        });
-        const { unrecoverable, reason } = detectUnrecoverable(state);
-        expect(unrecoverable).toBe(true);
-        expect(reason).toContain('sourceless');
-    });
-
-    it('detects repeated acceptance bug failures', () => {
-        // Provide fileChanges to avoid the "sourceless" heuristic kicking in first
-        const state = makeMinimalState({
-            phase: 'qa' as any,
-            fileChanges: [{ path: 'src/app.ts', action: 'modified' as const, summary: 'mod', storyId: 'US-1', agentId: 'dev-1' }],
-            pullRequests: [{ id: 'PR-1', prNumber: 1, prUrl: '', title: '', description: '', branchName: 'feature/x', authorAgentId: 'dev-1', reviewerAgentIds: [], reviews: [], status: 'merged' as any, assignmentIds: ['A-1'], taskType: 'feature' as any }],
-            bugAttempts: {
-                'ACCEPT-BUILD': 2,
-                'ACCEPT-TESTS': 2,
-                'ACCEPT-RESOLVE': 2,
-            },
-            fixedBugIds: [],
-        });
-        const { unrecoverable, reason } = detectUnrecoverable(state);
-        expect(unrecoverable).toBe(true);
-        expect(reason).toContain('acceptance/gate bugs');
-    });
-
-    it('does not trigger when attempted bugs are fixed', () => {
-        const state = makeMinimalState({
-            phase: 'qa' as any,
-            fileChanges: [{ path: 'src/app.ts', action: 'modified' as const, summary: 'mod', storyId: 'US-1', agentId: 'dev-1' }],
-            pullRequests: [{ id: 'PR-1', prNumber: 1, prUrl: '', title: '', description: '', branchName: 'feature/x', authorAgentId: 'dev-1', reviewerAgentIds: [], reviews: [], status: 'merged' as any, assignmentIds: ['A-1'], taskType: 'feature' as any }],
-            bugAttempts: {
-                'ACCEPT-BUILD': 2,
-                'ACCEPT-TESTS': 2,
-                'ACCEPT-RESOLVE': 2,
-            },
-            fixedBugIds: ['ACCEPT-BUILD', 'ACCEPT-TESTS', 'ACCEPT-RESOLVE'],
-        });
-        const { unrecoverable } = detectUnrecoverable(state);
-        expect(unrecoverable).toBe(false);
+        // Plan 30-05: with SCOPE fixed, a failing optional criterion yields 'partial' as intended
+        expect(report.status).toBe('partial');
     });
 });
 

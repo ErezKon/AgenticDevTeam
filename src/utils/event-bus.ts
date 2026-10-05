@@ -8,8 +8,8 @@
  * - A ring buffer (EVENT_BUFFER_SIZE, default 5000) for routine events.
  * - A priority buffer (EVENT_PRIORITY_BUFFER_SIZE, default 500, unbounded growth
  *   up to cap) that **never evicts** high-severity events: phase:*, gate:result,
- *   pr:blocked, acceptance:result, integrity:*, plan:coverage, run:error,
- *   agent:budget-exhausted.
+ *   pr:blocked, acceptance:result, integrity:*, plan:coverage, dispatch:plan,
+ *   dispatch:skipped-dependents, branch:push-failed, run:error, agent:budget-exhausted.
  */
 import { EventEmitter } from 'node:events';
 import { EVENT_BUFFER_SIZE, EVENT_PRIORITY_BUFFER_SIZE } from '../config';
@@ -34,8 +34,13 @@ export type RunEventType =
     | 'branch:partial-failure'
     // Plan 26, A4: critical quality gates (typecheck/build) blocked PR creation.
     | 'branch:gates-blocked'
+    // Plan 30-02: a push was rejected even after integrating the remote branch.
+    | 'branch:push-failed'
     // Plan 27-B: dispatch halted by DISPATCH_HALT_POLICY when a branch fails.
     | 'dispatch:halted'
+    // Plan 30-01: the round's branch DAG (kinds, order, skipped/broken edges), and the
+    // branches skipped because a branch they depend on did not merge.
+    | 'dispatch:plan' | 'dispatch:skipped-dependents'
     | 'gate:result'
     | 'acceptance:result'
     | 'plan:coverage'
@@ -73,6 +78,8 @@ const PRIORITY_TYPES = new Set<string>([
     'acceptance:result',
     'integrity:finding',
     'plan:coverage',
+    'dispatch:plan', 'dispatch:skipped-dependents',
+    'branch:push-failed',
     'run:error', 'run:blocked', 'run:budget-stop', 'run:provider-stop',
     'agent:budget-exhausted',
     'product-verify:result',

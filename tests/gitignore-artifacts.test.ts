@@ -79,6 +79,62 @@ describe('getGitignoreEntriesForStack (Plan 22 G1)', () => {
     });
 });
 
+// ─── Plan 30-04: one managed block ──────────────────────────────────────────
+
+describe('managedGitignoreEntries (Plan 30-04)', () => {
+    function load(configOverrides: Record<string, unknown> = {}) {
+        jest.resetModules();
+        jest.doMock('../src/config', () => ({
+            GENERATED_PROJECTS_DIR: '/tmp/generated',
+            OUTPUTS_DIR: '/tmp/outputs',
+            AGENT_ARTIFACTS_IN_REPO: true,
+            ...configOverrides,
+        }));
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        return require('../src/utils/workspace');
+    }
+    const angular = [{ layer: 'frontend', choice: 'Angular 17', alternatives: [], rationale: '' }];
+    const read = (ws: string) => fs.readFileSync(path.join(ws, '.gitignore'), 'utf-8');
+
+    // claudeopus5: the development node's own list lacked `.worktrees-failed/`.
+    it.each<[string, typeof angular | undefined]>([['no tech stack (intake)', undefined], ['an Angular stack (development, PR workflow)', angular]])(
+        'lists every pipeline directory for %s', (_label, stack) => {
+            const { managedGitignoreEntries, PIPELINE_DIRS } = load();
+            const entries: string[] = managedGitignoreEntries(stack);
+            for (const dir of PIPELINE_DIRS as string[]) expect(entries).toContain(`${dir}/`);
+            expect(entries).toContain('.worktrees-failed/');
+        });
+
+    it('lists .agent/ once when the stack entries already ignore it', () => {
+        const { managedGitignoreEntries } = load({ AGENT_ARTIFACTS_IN_REPO: false });
+        expect(managedGitignoreEntries().filter((e: string) => e === '.agent/')).toHaveLength(1);
+    });
+
+    it('writes the block only when it changes, so an unchanged block never dirties the checkout', () => {
+        const { ensureProjectGitignore, managedGitignoreEntries } = load();
+        const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'adt-gitignore-'));
+        try {
+            fs.writeFileSync(path.join(ws, '.gitignore'), 'secrets.txt\n');
+            expect(ensureProjectGitignore(ws, managedGitignoreEntries())).toBe(true);
+            const intakeBlock = read(ws);
+            expect(ensureProjectGitignore(ws, managedGitignoreEntries())).toBe(false);
+            expect(read(ws)).toBe(intakeBlock);
+
+            // The development node adds the stack entries; the PR workflow then writes the identical block
+            expect(ensureProjectGitignore(ws, managedGitignoreEntries(angular))).toBe(true);
+            const stackBlock = read(ws);
+            expect(ensureProjectGitignore(ws, managedGitignoreEntries(angular))).toBe(false);
+            expect(read(ws)).toBe(stackBlock);
+            expect(stackBlock).toContain('.angular/');
+            expect(stackBlock).toContain('.worktrees-failed/');
+            expect(stackBlock.startsWith('secrets.txt\n')).toBe(true);
+            expect(stackBlock.match(/AgenticDevTeam \(do not edit/g)).toHaveLength(1);
+        } finally {
+            fs.rmSync(ws, { recursive: true, force: true });
+        }
+    });
+});
+
 // ─── G4 ─────────────────────────────────────────────────────────────────────
 
 describe('writeArtifact placement (Plan 22 G4)', () => {

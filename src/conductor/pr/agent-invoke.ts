@@ -7,7 +7,7 @@ import { getLogger } from '../../utils/logger';
 import { gitExec } from '../../utils/git-exec';
 import { retryWithBackoff } from '../../utils/retry';
 import { buildHandoff, renderHandoff, madeProgress } from '../agent-respawn';
-import { getEffectiveLimits, InvocationBudgetExceededError } from '../../utils/run-budget';
+import { InvocationBudgetExceededError } from '../../utils/run-budget';
 import {
     DEV_RECURSION_LIMIT, REVIEWER_RECURSION_LIMIT,
     PRINCIPAL_DEV_MODEL, SENIOR_DEV_MODEL, JUNIOR_DEV_MODEL,
@@ -21,10 +21,7 @@ import { ReviewOutputSchema } from '../../agents/developers/schemas/review-outpu
 import { extractTokenUsageFromMessages } from '../../utils/token-usage-extractor';
 import { tokenTracker, type TokenCallRecord } from '../../utils/token-tracker';
 import { emitRunEvent } from '../../utils/event-bus';
-import {
-    isBlockingReview, type ReviewOutcome,
-    enforceCriteriaVerdicts,
-} from '../review-policy';
+import type { ReviewOutcome } from '../review-policy';
 import type { DeveloperOutput } from '../../agents/developers/schemas/dev-output.schema';
 import type { ReviewOutput } from '../../agents/developers/schemas/review-output.schema';
 import type { DevRank } from '../../agents/_shared/persona';
@@ -51,11 +48,14 @@ export function getModelForRank(rank: DevRank): string {
 /**
  * Parse a single agent invocation result into a DeveloperOutput.
  * Extracted from invokeDevAgent so the respawn loop can call it per-generation.
+ *
+ * `synthetic` is true when the agent produced no text at all and the output is a
+ * placeholder — that is not valid output for the invocation-ceiling decision.
  */
 export function parseDevResult(
     result: any, agentId: string, model: string,
     logMeta?: { userMessage?: string; systemPrompt?: string; generation?: number },
-): { output: DeveloperOutput; tokenUsage: TokenCallRecord | null } {
+): { output: DeveloperOutput; tokenUsage: TokenCallRecord | null; synthetic: boolean } {
     const tokenUsage = extractTokenUsageFromMessages(result, agentId, model, 'development');
     logAgentResponse({
         agentId, phase: 'development', model,
@@ -68,7 +68,7 @@ export function parseDevResult(
     // Guard against empty or missing messages array
     if (!result?.messages || result.messages.length === 0) {
         log.warn(`Dev agent ${agentId} returned no messages — returning empty output`);
-        return { output: { fileChanges: [], notes: 'Agent returned no messages (possible tool loop or recursion limit).' }, tokenUsage };
+        return { output: { fileChanges: [], notes: 'Agent returned no messages (possible tool loop or recursion limit).' }, tokenUsage, synthetic: true };
     }
 
     // Content may be a plain string or an array of blocks (Anthropic streaming,
@@ -78,7 +78,7 @@ export function parseDevResult(
         log.warn(
             `Dev agent ${agentId} returned no text content (${extraction.blockTypes}) — returning empty output`,
         );
-        return { output: { fileChanges: [], notes: `Agent returned no text content (${extraction.blockTypes}).` }, tokenUsage };
+        return { output: { fileChanges: [], notes: `Agent returned no text content (${extraction.blockTypes}).` }, tokenUsage, synthetic: true };
     }
 
     const raw = extraction.text;
@@ -92,7 +92,71 @@ export function parseDevResult(
     if (!validation.ok) {
         throw new Error(`Dev agent ${agentId} output failed schema validation:\n${validation.issues}`);
     }
-    return { output: validation.value as DeveloperOutput, tokenUsage };
+    return { output: validation.value as DeveloperOutput, tokenUsage, synthetic: false };
+}
+
+/** Result of one dev-agent invocation (all respawn generations). */
+export interface DevInvocationResult {
+    output: DeveloperOutput;
+    tokenUsage: TokenCallRecord | null;
+    allTokenUsage?: TokenCallRecord[];
+    /**
+     * Plan 30-02: the invocation crossed MAX_INVOCATION_INPUT_TOKENS after producing
+     * valid output. That output is returned instead of discarded, and nothing respawns.
+     * Plan 30-06: also set when the invocation landed softly (its effective-token budget).
+     */
+    budgetCapped: boolean;
+}
+
+/** Input tokens spent so far when the invocation is at or over MAX_INVOCATION_INPUT_TOKENS, else null. */
+function overInvocationCeiling(invocationId: string): number | null {
+    if (MAX_INVOCATION_INPUT_TOKENS <= 0) return null;
+    const spent = tokenTracker.getInvocationInputTokens(invocationId);
+    return spent >= MAX_INVOCATION_INPUT_TOKENS ? spent : null;
+}
+
+function withUsage(output: DeveloperOutput, tokenUsage: TokenCallRecord[], budgetCapped: boolean): DevInvocationResult {
+    return { output, tokenUsage: tokenUsage[0] ?? null, allTokenUsage: tokenUsage.length > 1 ? tokenUsage : undefined, budgetCapped };
+}
+
+/**
+ * The invocation crossed MAX_INVOCATION_INPUT_TOKENS: keep its last valid output
+ * (budget-capped), or — when no generation produced one — return the error to throw.
+ */
+function settleOverCeiling(
+    agentId: string, invocationId: string, spent: number,
+    valid: DeveloperOutput | null, tokenUsage: TokenCallRecord[],
+): DevInvocationResult | InvocationBudgetExceededError {
+    const usage = `${spent.toLocaleString()} / ${MAX_INVOCATION_INPUT_TOKENS.toLocaleString()}`;
+    emitRunEvent('agent:budget-exhausted', { agentId, invocationId, inputTokens: spent, ceiling: MAX_INVOCATION_INPUT_TOKENS, outputKept: valid !== null });
+    if (!valid) {
+        log.warn(`${agentId} invocation ${invocationId} exceeded input ceiling (${usage}) without valid output — stopping`);
+        return new InvocationBudgetExceededError(invocationId, spent, MAX_INVOCATION_INPUT_TOKENS);
+    }
+    log.warn(`${agentId} invocation ${invocationId} exceeded input ceiling (${usage}) — keeping its valid output (budget-capped, no respawn)`);
+    tokenTracker.markBudgetCapped(invocationId);
+    return withUsage(valid, tokenUsage, true);
+}
+
+/** Plan 30-06: the invocation landed softly — its output is kept, budget-capped, and nothing respawns. */
+function settleSoftLanding(
+    agentId: string, invocationId: string, reason: string,
+    output: DeveloperOutput, tokenUsage: TokenCallRecord[],
+): DevInvocationResult {
+    log.warn(`${agentId} invocation ${invocationId} landed softly (${reason}) — keeping its output (budget-capped, no respawn)`);
+    tokenTracker.markBudgetCapped(invocationId);
+    return withUsage(output, tokenUsage, true);
+}
+
+/** Parse a generation without throwing: `parsed` is null when its output is unusable. */
+function tryParseDevResult(
+    ...args: Parameters<typeof parseDevResult>
+): { parsed: ReturnType<typeof parseDevResult> | null; error: unknown } {
+    try {
+        return { parsed: parseDevResult(...args), error: null };
+    } catch (error) {
+        return { parsed: null, error };
+    }
 }
 
 /**
@@ -105,6 +169,18 @@ export function parseDevResult(
  *
  * This replaces "poison and flail" with "summarise and respawn", bounding
  * each invocation's context to O(threshold) instead of O(max steps).
+ *
+ * Plan 30-02 — valid output is never discarded. MAX_INVOCATION_INPUT_TOKENS is
+ * checked after every generation; past it the last valid output is returned with
+ * `budgetCapped: true` and nothing respawns. `InvocationBudgetExceededError` is
+ * thrown only when no generation produced valid output, and outside
+ * `retryWithBackoff`, so its token counts (e.g. "1,429,881") are never mistaken
+ * for a 429 and the whole invocation re-run. A respawned generation whose
+ * output does not parse also falls back to the last valid output.
+ *
+ * Plan 30-06 — a generation the agent factory landed softly (the invocation's
+ * effective-token budget) is final: its output is returned budget-capped and
+ * nothing respawns.
  */
 export async function invokeDevAgent(
     agent: any, userMessage: string, threadSuffix: string,
@@ -118,8 +194,8 @@ export async function invokeDevAgent(
      * generations that had committed real work were terminated for "zero writes".
      */
     respawnContext?: { worktreeDir: string; baseRef: string },
-): Promise<{ output: DeveloperOutput; tokenUsage: TokenCallRecord | null; allTokenUsage?: TokenCallRecord[] }> {
-    return retryWithBackoff(async () => {
+): Promise<DevInvocationResult> {
+    const outcome = await retryWithBackoff(async (): Promise<DevInvocationResult | InvocationBudgetExceededError> => {
         // Track the overall dev invocation (spans all respawn generations)
         const invocationId = tokenTracker.startInvocation(agentId, 'development');
 
@@ -130,6 +206,9 @@ export async function invokeDevAgent(
             let handoff: ReturnType<typeof buildHandoff> | null = null;
             let respawnCount = 0;
             let consecutiveZeroWriteGenerations = 0;
+            /** Output of the latest generation that parsed and validated. */
+            let lastValid: DeveloperOutput | null = null;
+            const end = (): void => tokenTracker.endInvocation(invocationId, respawnCount > 0 ? respawnCount : undefined);
 
             for (let gen = 0; gen <= AGENT_RESPAWN_MAX_GENERATIONS; gen++) {
                 // Build a fresh agent for generations > 0
@@ -151,22 +230,29 @@ export async function invokeDevAgent(
                     { configurable: { thread_id: `dev-pr-${threadSuffix}-gen${gen}-${Date.now()}` }, recursionLimit: DEV_RECURSION_LIMIT },
                 );
 
-                const parsed = parseDevResult(result, agentId, model, {
+                const { parsed, error } = tryParseDevResult(result, agentId, model, {
                     userMessage: message, systemPrompt: currentAgent.systemPromptText, generation: gen || undefined,
                 });
-                if (parsed.tokenUsage) allTokenUsage.push(parsed.tokenUsage);
+                if (parsed?.tokenUsage) allTokenUsage.push(parsed.tokenUsage);
+                if (parsed && !parsed.synthetic) lastValid = parsed.output;
 
-                // Plan 24 D1: per-invocation input token ceiling
-                if (MAX_INVOCATION_INPUT_TOKENS > 0) {
-                    const invInputTokens = tokenTracker.getInvocationInputTokens(invocationId);
-                    if (invInputTokens >= MAX_INVOCATION_INPUT_TOKENS) {
-                        log.warn(
-                            `${agentId} invocation ${invocationId} exceeded input ceiling: `
-                            + `${invInputTokens.toLocaleString()} / ${MAX_INVOCATION_INPUT_TOKENS.toLocaleString()} — stopping gracefully`,
-                        );
-                        tokenTracker.endInvocation(invocationId, respawnCount > 0 ? respawnCount : undefined);
-                        throw new InvocationBudgetExceededError(invocationId, invInputTokens, MAX_INVOCATION_INPUT_TOKENS);
-                    }
+                // Plan 24 D1 / Plan 30-02: per-invocation input token ceiling
+                const spent = overInvocationCeiling(invocationId);
+                if (spent !== null) {
+                    end();
+                    return settleOverCeiling(agentId, invocationId, spent, lastValid, allTokenUsage);
+                }
+                if (!parsed) {
+                    end();
+                    if (!lastValid) throw error;
+                    log.warn(`${agentId} generation ${gen} returned unusable output (${String((error as Error)?.message ?? error).slice(0, 200)}) — keeping the output an earlier generation validated`);
+                    return withUsage(lastValid, allTokenUsage, false);
+                }
+                // Plan 30-06: a soft landing is final — the agent was told to return its JSON
+                const landing: string | null = currentAgent.softLanding?.() ?? null;
+                if (landing) {
+                    end();
+                    return settleSoftLanding(agentId, invocationId, landing, lastValid ?? parsed.output, allTokenUsage);
                 }
 
                 // Check if ceiling was reached and more generations are available
@@ -174,12 +260,8 @@ export async function invokeDevAgent(
 
                 if (!ceilingHit || gen === AGENT_RESPAWN_MAX_GENERATIONS) {
                     // Done — return the final result with all accumulated token usage
-                    tokenTracker.endInvocation(invocationId, respawnCount > 0 ? respawnCount : undefined);
-                    return {
-                        output: parsed.output,
-                        tokenUsage: allTokenUsage[0] ?? null,
-                        allTokenUsage: allTokenUsage.length > 1 ? allTokenUsage : undefined,
-                    };
+                    end();
+                    return withUsage(parsed.output, allTokenUsage, false);
                 }
 
                 // Build handoff for the next generation.
@@ -210,12 +292,8 @@ export async function invokeDevAgent(
                         `${agentId} generation ${gen} made no progress `
                         + `(${consecutiveZeroWriteGenerations} consecutive) — terminating instead of respawning`,
                     );
-                    tokenTracker.endInvocation(invocationId, respawnCount > 0 ? respawnCount : undefined);
-                    return {
-                        output: parsed.output,
-                        tokenUsage: allTokenUsage[0] ?? null,
-                        allTokenUsage: allTokenUsage.length > 1 ? allTokenUsage : undefined,
-                    };
+                    end();
+                    return withUsage(parsed.output, allTokenUsage, false);
                 }
 
                 log.info(
@@ -241,22 +319,22 @@ export async function invokeDevAgent(
         );
         tokenTracker.endInvocation(invocationId);
 
-        // Plan 24 D1: per-invocation input token ceiling
-        if (MAX_INVOCATION_INPUT_TOKENS > 0) {
-            const invInputTokens = tokenTracker.getInvocationInputTokens(invocationId);
-            if (invInputTokens >= MAX_INVOCATION_INPUT_TOKENS) {
-                log.warn(
-                    `${agentId} invocation ${invocationId} exceeded input ceiling: `
-                    + `${invInputTokens.toLocaleString()} / ${MAX_INVOCATION_INPUT_TOKENS.toLocaleString()} — stopping gracefully`,
-                );
-                throw new InvocationBudgetExceededError(invocationId, invInputTokens, MAX_INVOCATION_INPUT_TOKENS);
-            }
-        }
-
-        return parseDevResult(result, agentId, model, {
+        const { parsed, error } = tryParseDevResult(result, agentId, model, {
             userMessage, systemPrompt: agent.systemPromptText,
         });
+        const usage = parsed?.tokenUsage ? [parsed.tokenUsage] : [];
+        // Plan 24 D1 / Plan 30-02: per-invocation input token ceiling
+        const spent = overInvocationCeiling(invocationId);
+        if (spent !== null) {
+            return settleOverCeiling(agentId, invocationId, spent, parsed && !parsed.synthetic ? parsed.output : null, usage);
+        }
+        if (!parsed) throw error;
+        const landing: string | null = agent.softLanding?.() ?? null;
+        if (landing) return settleSoftLanding(agentId, invocationId, landing, parsed.output, usage);
+        return withUsage(parsed.output, usage, false);
     }, `dev-${threadSuffix}`);
+    if (outcome instanceof InvocationBudgetExceededError) throw outcome;
+    return outcome;
 }
 
 /**
@@ -335,15 +413,20 @@ export async function invokeReviewerAgent(
 
 /**
  * Resolve baseBranch to a ref that exists in the worktree.
- * Worktrees don't have local branches for the base — only origin/ remotes.
+ *
+ * Plan 30-02: `origin/<base>` comes first. Worktrees share the main checkout's
+ * refs, and its local system branch is only synced at the end of a round (or
+ * after a scaffold merge), so it lags behind the remote after every feature
+ * merge. Diffs, commit checks, salvage patches and completion evidence taken
+ * against that stale ref include other branches' merged work — and a resumed
+ * branch that merged the latest base in would look like it changed it all.
  */
 export function resolveBaseRef(worktreeDir: string, baseBranch: string): string {
-    // Try local branch first
-    const localCheck = gitExec(worktreeDir, `rev-parse --verify --quiet ${baseBranch}`);
-    if (localCheck && !localCheck.startsWith('Error')) return baseBranch;
-    // Fall back to origin/<baseBranch>
     const remoteCheck = gitExec(worktreeDir, `rev-parse --verify --quiet origin/${baseBranch}`);
     if (remoteCheck && !remoteCheck.startsWith('Error')) return `origin/${baseBranch}`;
+    // No remote-tracking ref (nothing pushed yet): fall back to the local branch
+    const localCheck = gitExec(worktreeDir, `rev-parse --verify --quiet ${baseBranch}`);
+    if (localCheck && !localCheck.startsWith('Error')) return baseBranch;
     // Last resort: return as-is
     return baseBranch;
 }

@@ -4,7 +4,7 @@
  * Verifies that checkTestSufficiency catches the exact patterns from pacman8 and retroboard3.
  */
 import { checkTestSufficiency, sufficiencyViolationsToBugs } from '../src/conductor/test-sufficiency';
-import type { ExecutedTestReport } from '../src/conductor/test-runner';
+import type { ExecutedTestReport } from '../src/conductor/test-runners/executed-report';
 import type { UserStory } from '../src/agents/_shared/schemas/user-story.schema';
 
 // Mock config to control test behaviour
@@ -30,6 +30,7 @@ function makeReport(overrides: Partial<ExecutedTestReport> = {}): ExecutedTestRe
     return {
         framework: 'jest',
         root: '',
+        command: 'npm test',
         total: 0,
         passed: 0,
         failed: 0,
@@ -54,6 +55,7 @@ describe('checkTestSufficiency — pacman8 scenario (0 tests, 20 stories)', () =
             executed,
             userStories: stories,
             trivialTestFiles: [],
+            completedStoryIds: [],
         });
 
         expect(violations.some(v => v.kind === 'no-tests')).toBe(true);
@@ -86,6 +88,8 @@ describe('checkTestSufficiency — retroboard3 scenario (1 trivial test, runner 
             executed,
             userStories: stories,
             trivialTestFiles: ['__tests__/math.test.js'],
+            // every story had merged work in retroboard3
+            completedStoryIds: stories.map(s => s.id),
         });
 
         expect(violations.some(v => v.kind === 'all-tests-trivial')).toBe(true);
@@ -105,6 +109,7 @@ describe('checkTestSufficiency — retroboard3 scenario (1 trivial test, runner 
             executed,
             userStories: stories,
             trivialTestFiles: [],
+            completedStoryIds: stories.map(s => s.id),
         });
 
         expect(violations.some(v => v.kind === 'runner-error')).toBe(true);
@@ -145,6 +150,7 @@ describe('checkTestSufficiency — healthy scenario', () => {
             executed,
             userStories: stories,
             trivialTestFiles: [],
+            completedStoryIds: stories.map(s => s.id),
         });
 
         expect(violations).toHaveLength(0);
@@ -176,10 +182,77 @@ describe('checkTestSufficiency — coverage below floor', () => {
             executed,
             userStories: stories,
             trivialTestFiles: [],
+            completedStoryIds: ['US-001'],
         });
 
         expect(violations.some(v => v.kind === 'coverage-below-floor')).toBe(true);
         expect(violations.find(v => v.kind === 'coverage-below-floor')!.severity).toBe('major');
+    });
+});
+
+// ─── Plan 30-03: no derived false bugs ──────────────────────────────────────
+
+describe('checkTestSufficiency — claudeopus5 QA round (Plan 30-03)', () => {
+    // 35 stories, two roots whose runner failed: 36 bugs before (1 runner-error + 35 story-untested).
+    const stories = Array.from({ length: 35 }, (_, i) => makeStory(`US-${String(i + 1).padStart(3, '0')}`));
+    const failedRoots = [
+        makeReport({
+            framework: 'karma', command: 'npm test -- --watch=false', exitCode: 127, runnerError: true,
+            runnerErrorDetail: 'command not found: ng — dependencies not installed?\nsh: 1: ng: not found',
+        }),
+        makeReport({
+            root: 'packages/web', framework: 'karma', command: 'npm test -- --watch=false', exitCode: 1, runnerError: true,
+            runnerErrorDetail: '`npm test -- --watch=false` exited 1 without a failing spec\nError: Unknown arguments: ci, json',
+        }),
+    ];
+
+    it('a runner error produces exactly one bug, carrying each command and its rendered output', () => {
+        const violations = checkTestSufficiency({
+            executed: failedRoots, userStories: stories, trivialTestFiles: [], completedStoryIds: ['US-001', 'US-002'],
+        });
+
+        expect(violations.map(v => v.kind)).toEqual(['runner-error']);
+        const bugs = sufficiencyViolationsToBugs(violations);
+        expect(bugs).toHaveLength(1);
+        expect(bugs[0].id).toBe('QA-runner-error');
+        expect(bugs[0].stepsToReproduce).toBe('Run `npm test -- --watch=false` in .\nRun `npm test -- --watch=false` in packages/web');
+        expect(bugs[0].actualBehavior).toContain('Root ".": `npm test -- --watch=false` (exit 127)\ncommand not found: ng');
+        expect(bugs[0].actualBehavior).toContain('Root "packages/web": `npm test -- --watch=false` (exit 1)');
+        expect(bugs[0].actualBehavior).toContain('Error: Unknown arguments: ci, json');
+    });
+
+    it('story-untested applies only to stories with merged work', () => {
+        const executed = [makeReport({
+            total: 6, passed: 6,
+            cases: Array.from({ length: 6 }, (_, i) => ({
+                testName: `[US-001#${i}] test ${i}`, suite: 'Suite', file: `t${i}.spec.ts`, status: 'pass' as const,
+                durationMs: 1, storyId: 'US-001', acIndex: i,
+            })),
+        })];
+        const violations = checkTestSufficiency({
+            executed, userStories: stories.slice(0, 5), trivialTestFiles: [], completedStoryIds: ['US-001', 'US-002'],
+        });
+
+        expect(violations.filter(v => v.kind === 'story-untested')).toEqual([
+            expect.objectContaining({ storyId: 'US-002', severity: 'critical' }),
+        ]);
+    });
+
+    it('skips the min-test and per-story checks when no root produced case names', () => {
+        const executed = [makeReport({
+            framework: 'karma', total: 134, passed: 133, failed: 1, exitCode: 1, caseNames: 'unavailable',
+            cases: [{ testName: 'Score > [US-027#1] truncates', suite: 'Score', file: '', status: 'fail', durationMs: 0, storyId: 'US-027', acIndex: 1 }],
+        })];
+        const violations = checkTestSufficiency({
+            executed, userStories: stories, trivialTestFiles: [], completedStoryIds: stories.map(s => s.id),
+        });
+
+        expect(violations).toEqual([]);
+    });
+
+    it('an unknown runner that exited 0 is unmeasured, not "no tests"', () => {
+        const executed = [makeReport({ framework: 'unknown', exitCode: 0, caseNames: 'unavailable', runnerErrorDetail: 'exit 0; this runner has no machine-readable report' })];
+        expect(checkTestSufficiency({ executed, userStories: stories, trivialTestFiles: [], completedStoryIds: [] })).toEqual([]);
     });
 });
 

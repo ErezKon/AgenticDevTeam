@@ -22,11 +22,11 @@ import { getRunContext, type RunContext } from './run-context';
 import { usageFromLLMResult } from './token-usage-extractor';
 import { describeContentBlocks, extractTextFromContentBlocks } from './structured-output';
 
-/** Model parameters worth recording (never credentials). */
+/** Model parameters worth recording (never credentials). `cache_control`: Anthropic automatic caching (Plan 30-06). */
 const PARAM_KEYS = [
     'model', 'model_name', 'temperature', 'top_p', 'top_k', 'max_tokens', 'max_completion_tokens',
     'maxOutputTokens', 'tool_choice', 'parallel_tool_calls', 'response_format', 'text',
-    'thinking', 'reasoning', 'reasoning_effort', 'stop', 'stop_sequences', 'stream',
+    'thinking', 'reasoning', 'reasoning_effort', 'stop', 'stop_sequences', 'stream', 'cache_control',
 ];
 
 /** Binary content blocks replaced by a size marker. */

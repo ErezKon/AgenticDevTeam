@@ -37,7 +37,7 @@ function makeMinimalState(overrides: Partial<ProjectStateType> = {}): ProjectSta
         approvals: [], pendingRerun: null, phaseFeedback: {}, cancelled: false,
         artifacts: [], transcript: [], tokenUsage: [],
         acceptance: null, latestGateReport: null,
-        unrecoverable: null, verificationErrors: [], dispatchRounds: [],
+        unrecoverable: null, verificationErrors: [], dispatchRounds: [], triageRounds: [],
         attemptedBugIds: [], bugAttempts: {},
         planViolations: [],
         repoContract: null, completionEvidence: [], salvageBranches: [],

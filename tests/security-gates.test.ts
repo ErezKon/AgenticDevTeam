@@ -101,6 +101,16 @@ describe('scanForSecrets', () => {
         expect(findings.length).toBe(0);
     }, TIMEOUT);
 
+    it('does NOT scan a salvaged worktree under .worktrees-failed/ (Plan 30-03)', () => {
+        const key = 'AKIAIOSFODNN7EXAMPLE';
+        fs.mkdirSync(path.join(repo.dir, '.worktrees-failed/app-feature-us-027/src'), { recursive: true });
+        fs.writeFileSync(path.join(repo.dir, '.worktrees-failed/app-feature-us-027/src/config.ts'), `const key = "${key}";\n`);
+        git(repo.dir, 'add .');
+        git(repo.dir, 'commit -m "salvage committed by mistake"');
+
+        expect(scanForSecrets(repo.dir)).toEqual([]);
+    }, TIMEOUT);
+
     it('finds exactly one finding when key is in src/ but also in .env.example and .conventions/', () => {
         const key = 'AKIAIOSFODNN7EXAMPLE';
         fs.mkdirSync(path.join(repo.dir, 'src'), { recursive: true });

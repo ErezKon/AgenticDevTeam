@@ -2,66 +2,32 @@
  * Deterministic test runner — executes real test suites and parses their output.
  *
  * Sub-Plan 09: QA's claim becomes irrelevant; the runner's output is the truth.
- * Supports Jest (--json), Vitest, Mocha, pytest (JUnit XML), Maven, Gradle,
- * Go (JSON), dotnet (TRX), and Rust (summary parse).
+ * Supports Jest (--json), Karma (agentjson reporter, test-runners/karma.ts),
+ * Vitest, Mocha, pytest (JUnit XML), Maven, Gradle, Go (JSON), dotnet (TRX),
+ * and Rust (summary parse).
  *
- * Never parses stdout prose — always machine-readable output files.
+ * Machine-readable output first. Plan 30-03: runner output is rendered
+ * (`renderTerminalOutput`) before anything reads it; it is a labelled fallback
+ * for Karma (`caseNames: 'unavailable'`) and the whole result for a runner we
+ * cannot ask for a report (framework `unknown`: exit code plus the summary).
+ * Node dependencies are installed before the suite runs.
  */
 import * as fs from 'fs';
 import * as path from 'path';
 import { getLogger } from '../utils/logger';
-import { safeChildEnv, execFileAsync } from '../utils/shell-exec';
-import type { StackRoot } from './quality-gates';
+import { safeChildEnv, execCapture } from '../utils/shell-exec';
+import { renderTerminalOutput, summariseTestOutput } from '../utils/terminal-output';
+import { GATE_COMMANDS, shouldSkipInstall, type StackRoot } from './quality-gates';
+import { isKarmaProject, prepareKarmaRun, readKarmaRun } from './test-runners/karma';
+import {
+    parseTraceTag, tallyCases,
+    type ExecutedTestCase, type ExecutedTestReport, type ParsedRun,
+} from './test-runners/executed-report';
 
 const log = getLogger('[TestRunner]', 199);
 
-// ─── Tag regex for traceability ──────────────────────────────────────────────
-
-/** Matches `[US-003#1]` or `[US-003#-1]` at the start of a test name. */
-const TAG_RE = /^\[([A-Za-z]+-\d+)#(-?\d+)\]\s*/;
-
-// ─── Types ──────────────────────────────────────────────────────────────────
-
-export interface ExecutedTestCase {
-    testName: string;
-    suite: string;
-    file: string;
-    status: 'pass' | 'fail' | 'skip';
-    durationMs: number;
-    error?: string;
-    /** Parsed from the test name annotation `[US-003#1]`, when present. */
-    storyId?: string;
-    acIndex?: number;
-}
-
-export interface ExecutedTestReport {
-    framework: string;
-    root: string;
-    total: number;
-    passed: number;
-    failed: number;
-    skipped: number;
-    cases: ExecutedTestCase[];
-    coverage?: { lines: number; statements: number; branches: number; functions: number };
-    /** Raw runner exit code. */
-    exitCode: number;
-    /** True when the runner itself failed to start (config error, missing dep). */
-    runnerError: boolean;
-    runnerErrorDetail?: string;
-    /** Count of tests that lack a traceability tag. */
-    untracedTests: number;
-    /** First 10 untraced test names. */
-    untracedTestNames: string[];
-}
-
-// ─── Tag parsing ────────────────────────────────────────────────────────────
-
-/** Extract `[US-003#1]` from a test name, returning storyId/acIndex or undefined. */
-export function parseTraceTag(name: string): { storyId: string; acIndex: number } | null {
-    const m = TAG_RE.exec(name);
-    if (!m) return null;
-    return { storyId: m[1], acIndex: parseInt(m[2], 10) };
-}
+/** Rendered output kept in a runner-error detail (it becomes the QA-runner-error bug's evidence). */
+const RUNNER_DETAIL_CHARS = 1500;
 
 // ─── Jest JSON parsing ──────────────────────────────────────────────────────
 
@@ -83,7 +49,7 @@ interface JestJsonResult {
     }>;
 }
 
-export function parseJestJson(raw: string, root: string): Omit<ExecutedTestReport, 'exitCode' | 'runnerError' | 'runnerErrorDetail' | 'coverage'> {
+export function parseJestJson(raw: string, root: string): ParsedRun {
     const data: JestJsonResult = JSON.parse(raw);
     const cases: ExecutedTestCase[] = [];
 
@@ -129,7 +95,7 @@ export function parseJestJson(raw: string, root: string): Omit<ExecutedTestRepor
  * Handles both `<testsuite>` (single) and `<testsuites>` (wrapper) formats.
  * Used for pytest, mocha, vitest (--reporter=junit), Maven surefire, Gradle.
  */
-export function parseJunitXml(xml: string, root: string, framework: string): Omit<ExecutedTestReport, 'exitCode' | 'runnerError' | 'runnerErrorDetail' | 'coverage'> {
+export function parseJunitXml(xml: string, root: string, framework: string): ParsedRun {
     const cases: ExecutedTestCase[] = [];
     // Match all <testcase ...>...</testcase> or self-closing <testcase ... />
     const testcaseRe = /<testcase\s+([^>]*?)(?:\/>|>([\s\S]*?)<\/testcase>)/g;
@@ -167,22 +133,7 @@ export function parseJunitXml(xml: string, root: string, framework: string): Omi
         });
     }
 
-    const passed = cases.filter(c => c.status === 'pass').length;
-    const failed = cases.filter(c => c.status === 'fail').length;
-    const skipped = cases.filter(c => c.status === 'skip').length;
-    const untraced = cases.filter(c => !c.storyId && c.status !== 'skip');
-
-    return {
-        framework,
-        root,
-        total: cases.length,
-        passed,
-        failed,
-        skipped,
-        cases,
-        untracedTests: untraced.length,
-        untracedTestNames: untraced.slice(0, 10).map(c => c.testName),
-    };
+    return tallyCases(framework, root, cases);
 }
 
 // ─── Go test JSON parsing ───────────────────────────────────────────────────
@@ -196,7 +147,7 @@ interface GoTestEvent {
     Output?: string;
 }
 
-export function parseGoTestJson(raw: string, root: string): Omit<ExecutedTestReport, 'exitCode' | 'runnerError' | 'runnerErrorDetail' | 'coverage'> {
+export function parseGoTestJson(raw: string, root: string): ParsedRun {
     const lines = raw.trim().split('\n').filter(Boolean);
     const cases: ExecutedTestCase[] = [];
     const testOutputs = new Map<string, string[]>();
@@ -230,22 +181,7 @@ export function parseGoTestJson(raw: string, root: string): Omit<ExecutedTestRep
         });
     }
 
-    const passed = cases.filter(c => c.status === 'pass').length;
-    const failed = cases.filter(c => c.status === 'fail').length;
-    const skipped = cases.filter(c => c.status === 'skip').length;
-    const untraced = cases.filter(c => !c.storyId && c.status !== 'skip');
-
-    return {
-        framework: 'go',
-        root,
-        total: cases.length,
-        passed,
-        failed,
-        skipped,
-        cases,
-        untracedTests: untraced.length,
-        untracedTestNames: untraced.slice(0, 10).map(c => c.testName),
-    };
+    return tallyCases('go', root, cases);
 }
 
 // ─── Coverage parsing ───────────────────────────────────────────────────────
@@ -299,6 +235,20 @@ export interface RunTestsOptions {
     reportDir: string;
 }
 
+/** Installs and suites run in CI mode without colour (the output is rendered anyway). */
+const TEST_ENV = { CI: 'true', FORCE_COLOR: '0', NODE_ENV: 'test' };
+
+/** Run a shell command in `cwd`; resolves (never rejects) with stdout, the combined output and the exit code. */
+async function execCommand(command: string, cwd: string, timeoutMs: number): Promise<{ stdout: string; output: string; exitCode: number }> {
+    const r = await execCapture(command, { cwd, timeout: timeoutMs, maxBuffer: 10 * 1024 * 1024, env: safeChildEnv(TEST_ENV) });
+    return { stdout: r.stdout, output: `${r.stdout}\n${r.stderr}`, exitCode: typeof r.exitCode === 'number' ? r.exitCode : 1 };
+}
+
+/** `sh: 1: ng: not found` / `sh: ng: command not found` → `ng` (else the command's first word). */
+function missingBinary(output: string, command: string): string {
+    return /(\S+): (?:command )?not found/.exec(output)?.[1] ?? command.split(/\s+/)[0];
+}
+
 /**
  * Execute the test suite for a single stack root and parse the results.
  *
@@ -307,108 +257,102 @@ export interface RunTestsOptions {
 export async function runTests(root: StackRoot, opts: RunTestsOptions): Promise<ExecutedTestReport> {
     const { timeoutMs, withCoverage, reportDir } = opts;
     const rootDir = root.dir;
+    const label = root.relDir || '.';
 
     // Determine the test command and framework
-    const { command, framework } = resolveTestCommand(rootDir, root.stack);
-    if (!command) {
-        log.info(`No test command found for ${root.relDir || '.'} (${root.stack})`);
-        return makeEmptyReport(root, 'no-test-command');
+    const { command: baseCommand, framework, script } = resolveTestCommand(rootDir, root.stack);
+    if (!baseCommand) {
+        log.info(`No test command found for ${label} (${root.stack})`);
+        return emptyReport(root.relDir, '', 'no-test-command');
     }
 
     // Ensure report directory exists
-    const rootSlug = root.relDir.replace(/\//g, '-') || 'root';
-    const rootReportDir = path.join(reportDir, rootSlug);
+    const rootReportDir = path.join(reportDir, root.relDir.replace(/\//g, '-') || 'root');
     fs.mkdirSync(rootReportDir, { recursive: true });
 
-    // Build the runner command with machine-readable output flags
-    const fullCommand = buildRunnerCommand(command, framework, rootReportDir, rootDir, withCoverage);
+    /** No usable result: the exact command, a headline and the rendered output summary (Plan 30-03 step 7). */
+    const runnerError = (command: string, exitCode: number, headline: string, rendered: string): ExecutedTestReport => {
+        log.warn(`Runner error in ${label}: ${headline}`);
+        const detail = `${headline}\n${summariseTestOutput(rendered, RUNNER_DETAIL_CHARS)}`;
+        return { ...emptyReport(root.relDir, command, detail), framework, exitCode, runnerError: true };
+    };
 
-    log.info(`Running tests in ${root.relDir || '.'}: ${fullCommand.slice(0, 200)}`);
-    let stdout = '';
-    let stderr = '';
-    let exitCode = 0;
-
-    try {
-        const result = await execFileAsync('/bin/sh', ['-c', fullCommand], {
-            cwd: rootDir,
-            timeout: timeoutMs,
-            maxBuffer: 10 * 1024 * 1024,
-            env: safeChildEnv({ CI: 'true', FORCE_COLOR: '0', NODE_ENV: 'test' }),
-            encoding: 'utf-8',
-        });
-        stdout = result.stdout;
-        stderr = result.stderr ?? '';
-    } catch (err: any) {
-        exitCode = err.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' ? 1 : (err.status ?? err.code ?? 1);
-        stdout = err.stdout ?? '';
-        stderr = err.stderr ?? '';
+    // Plan 30-03 step 4: dependencies first — the claudeopus5 QA run reached `ng test` without node_modules (exit 127).
+    // A workspace member is installed by its workspace root, as in the quality gates.
+    if (root.stack === 'node' && !root.isWorkspaceMember && !shouldSkipInstall('node', rootDir)) {
+        const install = GATE_COMMANDS.node.install!;
+        log.info(`Installing dependencies in ${label} before its test run`);
+        const installed = await execCommand(install, rootDir, timeoutMs);
+        if (installed.exitCode !== 0) {
+            return runnerError(install, installed.exitCode, `dependency install failed (exit ${installed.exitCode})`, renderTerminalOutput(installed.output));
+        }
     }
 
-    const combinedOutput = `${stdout}\n${stderr}`;
+    // Build the runner command with machine-readable output flags
+    const karma = framework === 'karma'
+        ? prepareKarmaRun({ rootDir, testScript: script ?? '', reportDir: rootReportDir, withCoverage })
+        : null;
+    const command = karma?.command ?? buildRunnerCommand(baseCommand, framework, rootReportDir, withCoverage);
+    log.info(`Running tests in ${label}: ${command.slice(0, 200)}`);
+    const { stdout, output, exitCode } = await execCommand(command, rootDir, timeoutMs);
+    const rendered = renderTerminalOutput(output);
+    const fail = (headline: string): ExecutedTestReport => runnerError(command, exitCode, headline, rendered);
+    const unmeasured = (why: string): ExecutedTestReport => ({
+        ...emptyReport(root.relDir, command, `${why}\n${summariseTestOutput(rendered, RUNNER_DETAIL_CHARS)}`),
+        framework, caseNames: 'unavailable',
+    });
+    const coverage = (): ExecutedTestReport['coverage'] => (withCoverage ? tryParseCoverage(rootDir, rootReportDir) : undefined);
+
+    if (exitCode === 127) return fail(`command not found: ${missingBinary(rendered, command)} — dependencies not installed?`);
+
+    // Karma: the agentjson report, else the totals in the rendered output (Plan 30-03 step 3).
+    if (karma) {
+        const parsed = readKarmaRun(karma, rendered, root.relDir);
+        if (exitCode !== 0 && !parsed?.failed) return fail(`\`${command}\` exited ${exitCode} without a failing spec`);
+        if (!parsed) return unmeasured('exit 0, but the output has no Karma totals');
+        return { ...parsed, command, exitCode, runnerError: false, coverage: coverage() };
+    }
+
+    // No report to ask for: the exit code and the rendered summary are the result (Plan 30-03 step 2).
+    if (framework === 'unknown') {
+        return exitCode !== 0 ? fail(`\`${command}\` exited ${exitCode}`) : unmeasured('exit 0; this runner has no machine-readable report');
+    }
 
     // Check for runner error (config error, missing dep)
-    if (exitCode !== 0 && isRunnerError(combinedOutput)) {
-        log.warn(`Runner error in ${root.relDir || '.'}: ${combinedOutput.slice(0, 200)}`);
-        return {
-            ...makeEmptyReport(root, combinedOutput.slice(0, 2000)),
-            framework,
-            exitCode,
-            runnerError: true,
-        };
-    }
+    if (exitCode !== 0 && isRunnerError(rendered)) return fail(`the runner could not start the suite (exit ${exitCode})`);
 
     // Parse results from the machine-readable output
     const parsed = parseRunnerOutput(framework, rootReportDir, rootDir, stdout);
-    if (!parsed) {
-        // Fallback: no machine-readable output found
-        if (exitCode === 0 && !stdout.trim()) {
-            return makeEmptyReport(root, 'no-output');
-        }
-        // Try to detect "no tests found" vs real failure
-        if (/No tests found/i.test(combinedOutput) || /exiting with code 1/i.test(combinedOutput)) {
-            return {
-                ...makeEmptyReport(root, 'no-tests-found'),
-                framework,
-                exitCode,
-                runnerError: false,
-            };
-        }
-        return {
-            ...makeEmptyReport(root, `Could not parse runner output (exit ${exitCode})`),
-            framework,
-            exitCode,
-            runnerError: exitCode !== 0,
-        };
-    }
+    if (parsed) return { ...parsed, root: root.relDir, command, exitCode, runnerError: false, coverage: coverage() };
 
-    // Merge coverage data
-    let coverage = parsed.coverage;
-    if (withCoverage && !coverage) {
-        coverage = tryParseCoverage(rootDir, rootReportDir);
+    // Fallback: no machine-readable output found
+    if (exitCode === 0 && !stdout.trim()) return emptyReport(root.relDir, command, 'no-output');
+    // Try to detect "no tests found" vs real failure
+    if (/No tests found/i.test(rendered) || /exiting with code 1/i.test(rendered)) {
+        return { ...emptyReport(root.relDir, command, 'no-tests-found'), framework, exitCode };
     }
-
-    return {
-        ...parsed,
-        root: root.relDir,
-        exitCode,
-        runnerError: false,
-        coverage,
-    };
+    if (exitCode !== 0) return fail(`could not parse the runner output (exit ${exitCode})`);
+    return { ...emptyReport(root.relDir, command, 'could not parse the runner output (exit 0)'), framework };
 }
 
 // ─── Test command resolution ────────────────────────────────────────────────
 
-function resolveTestCommand(rootDir: string, stack: string): { command: string | null; framework: string } {
+export interface PackageJson {
+    scripts?: Record<string, string>;
+    dependencies?: Record<string, string>;
+    devDependencies?: Record<string, string>;
+    jest?: unknown;
+}
+
+function resolveTestCommand(rootDir: string, stack: string): { command: string | null; framework: string; script?: string } {
     if (stack === 'node') {
         const pkgPath = path.join(rootDir, 'package.json');
         if (fs.existsSync(pkgPath)) {
             try {
-                const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
+                const pkg: PackageJson = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
                 const testScript = pkg.scripts?.test;
                 if (testScript && !/no test specified|exit 1/.test(testScript)) {
-                    // Detect framework from the test script
-                    const fw = detectNodeFramework(testScript, rootDir);
-                    return { command: 'npm test', framework: fw };
+                    return { command: 'npm test', framework: detectNodeFramework(testScript, rootDir, pkg), script: testScript };
                 }
             } catch { /* ignore parse errors */ }
         }
@@ -437,18 +381,24 @@ function resolveTestCommand(rootDir: string, stack: string): { command: string |
     return { command: null, framework: 'unknown' };
 }
 
-function detectNodeFramework(testScript: string, rootDir: string): string {
+const VITEST_CONFIGS = ['vitest.config.ts', 'vitest.config.js', 'vitest.config.mts', 'vitest.config.mjs'];
+const JEST_CONFIGS = ['jest.config.ts', 'jest.config.js', 'jest.config.cjs', 'jest.config.mjs', 'jest.config.json'];
+
+/**
+ * The framework behind a package's `test` script. Plan 30-03 step 2: Jest only when
+ * Jest is really there (the script, a dependency, a `jest` key or a config file) —
+ * Jest was the default, so the claudeopus5 Karma project ran with Jest flags. A
+ * script we cannot ask for a machine-readable report is `unknown`.
+ */
+export function detectNodeFramework(testScript: string, rootDir: string, pkg: PackageJson): string {
     if (/vitest/i.test(testScript)) return 'vitest';
     if (/mocha/i.test(testScript)) return 'mocha';
-    if (/jest/i.test(testScript)) return 'jest';
-    // Check for config files
-    if (fs.existsSync(path.join(rootDir, 'vitest.config.ts')) ||
-        fs.existsSync(path.join(rootDir, 'vitest.config.js'))) return 'vitest';
-    if (fs.existsSync(path.join(rootDir, 'jest.config.ts')) ||
-        fs.existsSync(path.join(rootDir, 'jest.config.js')) ||
-        fs.existsSync(path.join(rootDir, 'jest.config.cjs'))) return 'jest';
-    // Default to jest (most common)
-    return 'jest';
+    if (/\bjest\b|react-scripts\s+test|craco\s+test/i.test(testScript)) return 'jest';
+    if (isKarmaProject(testScript, rootDir)) return 'karma';
+    const hasFile = (names: string[]): boolean => names.some(name => fs.existsSync(path.join(rootDir, name)));
+    if (hasFile(VITEST_CONFIGS)) return 'vitest';
+    if (pkg.jest || 'jest' in { ...pkg.dependencies, ...pkg.devDependencies } || hasFile(JEST_CONFIGS)) return 'jest';
+    return 'unknown';
 }
 
 // ─── Runner command construction ────────────────────────────────────────────
@@ -457,7 +407,6 @@ function buildRunnerCommand(
     baseCommand: string,
     framework: string,
     reportDir: string,
-    _rootDir: string,
     withCoverage: boolean,
 ): string {
     const jsonOut = path.join(reportDir, 'jest-results.json');
@@ -524,7 +473,7 @@ function parseRunnerOutput(
     reportDir: string,
     rootDir: string,
     stdout: string,
-): (Omit<ExecutedTestReport, 'exitCode' | 'runnerError' | 'runnerErrorDetail'>) | null {
+): ParsedRun | null {
     switch (framework) {
         case 'jest': {
             // Try JSON file first, then stdout
@@ -618,7 +567,7 @@ function parseRunnerOutput(
 
 // ─── dotnet TRX parsing ─────────────────────────────────────────────────────
 
-function parseDotnetTrx(xml: string, root: string): Omit<ExecutedTestReport, 'exitCode' | 'runnerError' | 'runnerErrorDetail' | 'coverage'> {
+function parseDotnetTrx(xml: string, root: string): ParsedRun {
     const cases: ExecutedTestCase[] = [];
     const testRe = /<UnitTestResult\s+([^>]*)\/?>(?:([\s\S]*?)<\/UnitTestResult>)?/g;
     let match;
@@ -660,22 +609,7 @@ function parseDotnetTrx(xml: string, root: string): Omit<ExecutedTestReport, 'ex
         });
     }
 
-    const passed = cases.filter(c => c.status === 'pass').length;
-    const failed = cases.filter(c => c.status === 'fail').length;
-    const skipped = cases.filter(c => c.status === 'skip').length;
-    const untraced = cases.filter(c => !c.storyId && c.status !== 'skip');
-
-    return {
-        framework: 'dotnet',
-        root,
-        total: cases.length,
-        passed,
-        failed,
-        skipped,
-        cases,
-        untracedTests: untraced.length,
-        untracedTestNames: untraced.slice(0, 10).map(c => c.testName),
-    };
+    return tallyCases('dotnet', root, cases);
 }
 
 // ─── Coverage resolution ────────────────────────────────────────────────────
@@ -707,10 +641,12 @@ function tryParseCoverage(rootDir: string, reportDir: string): ExecutedTestRepor
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
-function makeEmptyReport(root: StackRoot, detail: string): ExecutedTestReport {
+/** A report for a root that produced no parseable results. */
+function emptyReport(root: string, command: string, detail: string): ExecutedTestReport {
     return {
         framework: 'unknown',
-        root: root.relDir,
+        root,
+        command,
         total: 0,
         passed: 0,
         failed: 0,

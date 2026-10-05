@@ -152,6 +152,32 @@ export function getGitignoreEntriesForStack(techDecisions?: TechDecision[]): str
     return [...common, ...extras];
 }
 
+// ─── Pipeline directories (Plan 30-04) ──────────────────────────────────────
+
+/**
+ * Directories that hold the pipeline's git worktrees: `.worktrees/` (live ones, and salvaged
+ * ones under `.worktrees/_failed/`) and `.worktrees-failed/`, the salvage location before Plan 30-04.
+ */
+export const WORKTREE_DIRS: readonly string[] = ['.worktrees', '.worktrees-failed'];
+
+/**
+ * Directories the pipeline creates inside a product repository. They are never product
+ * source: every managed `.gitignore` block lists them and `stageWorkspaceChanges()` never stages them.
+ */
+export const PIPELINE_DIRS: readonly string[] = ['.conventions', ...WORKTREE_DIRS, '.agent'];
+
+/**
+ * The managed `.gitignore` block: the stack entries plus every pipeline directory.
+ * Intake, the development node and the PR workflow all write this one list (Plan 30-04).
+ * The development node's own list lacked `.worktrees-failed/`; its rewrite of the block exposed a
+ * salvaged worktree, and the pre-sync auto-commit pushed it as a gitlink (claudeopus5, commit d721a0d).
+ */
+export function managedGitignoreEntries(techDecisions?: TechDecision[]): string[] {
+    const entries = getGitignoreEntriesForStack(techDecisions);
+    const pipeline = PIPELINE_DIRS.map(d => `${d}/`).filter(e => !entries.includes(e));
+    return [...entries, '', '# AgenticDevTeam pipeline directories', ...pipeline];
+}
+
 // ─── Gitignore management ────────────────────────────────────────────────────
 
 const GITIGNORE_MARKER_START = '# ─── AgenticDevTeam (do not edit this block) ───';
@@ -159,17 +185,21 @@ const GITIGNORE_MARKER_END   = '# ─── /AgenticDevTeam ───';
 
 /**
  * Ensure the project's `.gitignore` contains a managed block with the given
- * entries (e.g. `.conventions/`, `.worktrees/`).
+ * entries (normally `managedGitignoreEntries()`).
  *
  * - Creates the file if it does not exist.
  * - Appends the block if the marker is absent.
  * - Replaces the block in-place if it already exists (idempotent).
  * - Preserves all other content the project may have.
+ * - Writes only when the content changes (Plan 30-04), so an unchanged block
+ *   never dirties the checkout.
+ *
+ * @returns true when the file was written.
  */
 export function ensureProjectGitignore(
     workspacePath: string,
     entries: string[],
-): void {
+): boolean {
     const gitignorePath = path.join(workspacePath, '.gitignore');
     const block = [
         GITIGNORE_MARKER_START,
@@ -177,27 +207,25 @@ export function ensureProjectGitignore(
         GITIGNORE_MARKER_END,
     ].join('\n');
 
-    let existing = '';
-    if (fs.existsSync(gitignorePath)) {
-        existing = fs.readFileSync(gitignorePath, 'utf-8');
-    }
-
-    // Already contains the marker — replace the managed block
+    const existing = fs.existsSync(gitignorePath) ? fs.readFileSync(gitignorePath, 'utf-8') : '';
+    let updated: string;
     if (existing.includes(GITIGNORE_MARKER_START)) {
+        // Already contains the marker — replace the managed block
         const re = new RegExp(
             escapeRegex(GITIGNORE_MARKER_START) +
             '[\\s\\S]*?' +
             escapeRegex(GITIGNORE_MARKER_END),
         );
-        const updated = existing.replace(re, block);
-        fs.writeFileSync(gitignorePath, updated, 'utf-8');
-        return;
+        updated = existing.replace(re, () => block);
+    } else {
+        // No marker yet — append (with a leading newline if the file is non-empty)
+        const separator = existing.length > 0 && !existing.endsWith('\n') ? '\n\n' : existing.length > 0 ? '\n' : '';
+        updated = existing + separator + block + '\n';
     }
-
-    // No marker yet — append (with a leading newline if the file is non-empty)
-    const separator = existing.length > 0 && !existing.endsWith('\n') ? '\n\n' : existing.length > 0 ? '\n' : '';
-    fs.writeFileSync(gitignorePath, existing + separator + block + '\n', 'utf-8');
-    logToolAction(`${TAG} Added managed .gitignore block to ${gitignorePath}`);
+    if (updated === existing) return false;
+    fs.writeFileSync(gitignorePath, updated, 'utf-8');
+    logToolAction(`${TAG} Updated managed .gitignore block in ${gitignorePath}`);
+    return true;
 }
 
 /** Escape special regex characters in a string. */

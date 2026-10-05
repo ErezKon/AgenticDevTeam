@@ -8,6 +8,7 @@
  * on every bug-fix iteration — up to 4x the intended development cost.
  */
 import type { Assignment, Bug, PullRequest } from '../agents/_shared/base-schemas';
+import type { DispatchRound } from './gate-types';
 import { makeGateBug } from './bug-factory';
 
 // ─── Assignment Filtering ───────────────────────────────────────────────────
@@ -33,6 +34,21 @@ export function selectPendingAssignments(
     return result;
 }
 
+/**
+ * The story ids (`storyId` plus `additionalStoryIds`) the given assignments deliver.
+ * Plan 30-03: QA handed `completedAssignmentIds` to the test-sufficiency check as
+ * story ids, so no story ever counted as delivered.
+ */
+export function storyIdsOfAssignments(assignments: Assignment[], assignmentIds: string[]): string[] {
+    const wanted = new Set(assignmentIds);
+    const storyIds = new Set<string>();
+    for (const a of assignments) {
+        if (!wanted.has(a.id)) continue;
+        for (const id of [a.storyId, ...(a.additionalStoryIds ?? [])]) if (id) storyIds.add(id);
+    }
+    return [...storyIds];
+}
+
 // ─── Completion Evidence ────────────────────────────────────────────────────
 
 /**
@@ -43,9 +59,11 @@ export interface CompletionEvidence {
     assignmentId: string;
     /** Distinct source files (excluding docs/ and pipeline metadata) changed on the merged branch, per `git diff --name-only`. */
     filesChanged: number;
-    /** Files the assignment's declared modules require that now exist on the merged tree. */
+    /** Declared modules (resolved to paths through the repo contract) that exist on the merged tree. */
     declaredModulesPresent: number;
     declaredModulesTotal: number;
+    /** Plan 30-02: module ids the repo contract does not know — the module check is "n/a" (total 0). */
+    unresolvedModuleIds?: string[];
     gatePassed: boolean;
     merged: boolean;
 }
@@ -128,6 +146,138 @@ export function incompleteBugs(
         ));
     }
     return bugs;
+}
+
+/** How many merged PRs have claimed each assignment id. */
+function mergedAttemptCounts(prs: PullRequest[]): Record<string, number> {
+    const counts: Record<string, number> = {};
+    for (const pr of prs) {
+        if (pr.status !== 'merged') continue;
+        for (const id of pr.assignmentIds) counts[id] = (counts[id] ?? 0) + 1;
+    }
+    return counts;
+}
+
+/**
+ * Plan 30-02 step 8 — the intended Sub-Plan 06 §6 behaviour, wired into
+ * `developmentNode`. A merged assignment without completion evidence goes back
+ * to pending with an `INCOMPLETE-*` bug, until it has merged `maxAttempts`
+ * times; after that it is accepted as-is so the bug-fix loop stays bounded.
+ *
+ * @param mergedIds  assignment ids claimed by this round's merged PRs
+ * @param prs        every PR record so far, including this round's
+ */
+export function settleCompletion(
+    mergedIds: string[],
+    evidence: CompletionEvidence[],
+    prs: PullRequest[],
+    maxAttempts: number,
+): { completed: string[]; reopened: CompletionEvidence[]; bugs: Bug[] } {
+    const attempts = mergedAttemptCounts(prs);
+    const merged = new Set(mergedIds);
+    const reopened = completedIdsWithEvidence(evidence).incomplete
+        .filter(e => merged.has(e.assignmentId) && (attempts[e.assignmentId] ?? 0) < maxAttempts);
+    const reopenedIds = new Set(reopened.map(e => e.assignmentId));
+    return {
+        completed: mergedIds.filter(id => !reopenedIds.has(id)),
+        reopened,
+        bugs: incompleteBugs(reopened, attempts, maxAttempts),
+    };
+}
+
+// ─── PR history and bug attempts (Plan 30-05) ───────────────────────────────
+
+/** Consecutive unmerged rounds after which a branch is abandoned. */
+export const ABANDON_AFTER_UNMERGED_ROUNDS = 2;
+
+/** PR statuses that are not a failed attempt: merged, work still in flight, or a GitHub failure continue-run retries. */
+const NOT_A_FAILED_ATTEMPT = new Set<PullRequest['status']>(['merged', 'deferred', 'pr-creation-failed']);
+
+export interface AbandonedBranch {
+    branchName: string;
+    /** Consecutive failed attempts at the end of the branch's PR history. */
+    rounds: number;
+    lastStatus: PullRequest['status'];
+}
+
+/**
+ * Branches whose last `ABANDON_AFTER_UNMERGED_ROUNDS` PR records are all failed
+ * attempts (blocked, open, closed …). A deferred record ran work that the next
+ * round resumes, so it ends the run of failures. claudeopus5's us-027 branch was
+ * blocked round after round until the operator stopped the run.
+ */
+export function abandonedBranches(prs: PullRequest[]): AbandonedBranch[] {
+    const byBranch = new Map<string, PullRequest[]>();
+    for (const pr of prs) {
+        const records = byBranch.get(pr.branchName) ?? [];
+        records.push(pr);
+        byBranch.set(pr.branchName, records);
+    }
+    const abandoned: AbandonedBranch[] = [];
+    for (const [branchName, records] of byBranch) {
+        let rounds = 0;
+        for (let i = records.length - 1; i >= 0 && !NOT_A_FAILED_ATTEMPT.has(records[i].status); i--) rounds++;
+        if (rounds >= ABANDON_AFTER_UNMERGED_ROUNDS) abandoned.push({ branchName, rounds, lastStatus: records[records.length - 1].status });
+    }
+    return abandoned;
+}
+
+/**
+ * Assignments whose agent ran for the first time this round: claimed by this
+ * round's PR records (Plan 30-02: a record claims only executed assignments) and
+ * by no earlier record — a resumed branch re-claims what ran before.
+ */
+export function newlyExecutedIds(previousPrs: PullRequest[], roundPrs: PullRequest[]): string[] {
+    const before = new Set(previousPrs.flatMap(pr => pr.assignmentIds));
+    return [...new Set(roundPrs.flatMap(pr => pr.assignmentIds))].filter(id => !before.has(id));
+}
+
+/** A dispatch round's progress record: merged PRs, first executions and deferred work (Plan 30-05). */
+export function dispatchRoundOf(
+    previousPrs: PullRequest[],
+    round: { pullRequests: PullRequest[]; fileChanges: number; deferredAssignmentIds: string[]; completed: number },
+): DispatchRound {
+    return {
+        fileChanges: round.fileChanges,
+        merged: round.pullRequests.filter(pr => pr.status === 'merged').length,
+        executed: newlyExecutedIds(previousPrs, round.pullRequests).length,
+        deferred: round.deferredAssignmentIds.length,
+        completed: round.completed,
+    };
+}
+
+/**
+ * Plan 30-05 step 5: a bug's attempt count grows once per round in which an
+ * assignment that works on it (`bugIds`) actually ran. Triage used to count every
+ * bug it handed out, whether or not any work on it ran.
+ *
+ * @returns the new counts of the bugs worked on (the state reducer keeps the maximum)
+ */
+export function bugAttemptsAfterRound(
+    assignments: Assignment[],
+    executedIds: string[],
+    attempts: Record<string, number>,
+): Record<string, number> {
+    const executed = new Set(executedIds);
+    const worked = new Set(assignments.filter(a => executed.has(a.id)).flatMap(a => a.bugIds ?? []));
+    return Object.fromEntries([...worked].map(id => [id, (attempts[id] ?? 0) + 1]));
+}
+
+/**
+ * The open bugs a bug-fix assignment works on: its `bugIds` when the Team Leader
+ * set them, otherwise the open bug ids its description names.
+ */
+export function resolveBugIds(assignment: Assignment, openBugIds: string[]): string[] {
+    const listed = (assignment.bugIds ?? []).filter(id => openBugIds.includes(id));
+    return listed.length > 0 ? listed : openBugIds.filter(id => namesId(assignment.description ?? '', id));
+}
+
+/** True when `text` names `id` as a whole token, so `AC-US-001-1` is not found inside `AC-US-001-10`. */
+function namesId(text: string, id: string): boolean {
+    for (let at = text.indexOf(id); at !== -1; at = text.indexOf(id, at + 1)) {
+        if (!/[\w-]/.test(text[at - 1] ?? ' ') && !/[\w-]/.test(text[at + id.length] ?? ' ')) return true;
+    }
+    return false;
 }
 
 // ─── Bug-fix Namespacing ────────────────────────────────────────────────────

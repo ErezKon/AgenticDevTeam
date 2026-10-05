@@ -7,10 +7,19 @@ jest.mock('../src/config', () => ({
             cacheReadMultiplier: 0.1,
             cacheWriteMultiplier: 1.25,
         },
+        'claude-opus-5': { inputPer1k: 0.005, outputPer1k: 0.025 },
+        'claude-opus-5-1': { inputPer1k: 0.006, outputPer1k: 0.03 },
     },
 }));
+const mockWarn = jest.fn();
+jest.mock('../src/utils/logger', () => ({
+    getLogger: () => ({ info: () => undefined, warn: (...args: unknown[]) => mockWarn(...args), error: () => undefined, debug: () => undefined }),
+}));
 
-import { estimateCost, estimateRunCost } from '../src/utils/cost';
+import {
+    estimateCost, estimateRunCost, resolvePricing, billedCost, listCost, effectiveInputTokens,
+    uncachedInputTokens, unpricedModels,
+} from '../src/utils/cost';
 import type { RunUsageSummary } from '../src/utils/token-tracker';
 
 // ---- estimateCost -----------------------------------------------------------
@@ -72,31 +81,31 @@ describe('estimateCost', () => {
 // ---- estimateRunCost --------------------------------------------------------
 
 describe('estimateRunCost', () => {
-    it('sums costs across agents with proportional cache distribution', () => {
+    it('prices each agent with its OWN cache tokens (Plan 30-06 — no proportional spread)', () => {
         const summary: RunUsageSummary = {
             totalInputTokens: 2000,
             totalOutputTokens: 1000,
             totalTokens: 3000,
             totalCalls: 2,
-            totalCacheReadTokens: 400,
-            totalCacheCreationTokens: 200,
-            cacheHitRate: 0.2,
+            totalCacheReadTokens: 300,
+            totalCacheCreationTokens: 100,
+            cacheHitRate: 0.15,
             byAgent: [
                 {
                     agentId: 'agent-a',
                     model: 'test-model',
                     callCount: 1,
-                    inputTokens: 1000,    // 50% of totalInput
+                    inputTokens: 1000,
                     outputTokens: 500,
                     totalTokens: 1500,
-                    cacheReadTokens: 0,
-                    cacheCreationTokens: 0,
+                    cacheReadTokens: 300,
+                    cacheCreationTokens: 100,
                 },
                 {
                     agentId: 'agent-b',
                     model: 'test-model',
                     callCount: 1,
-                    inputTokens: 1000,    // 50% of totalInput
+                    inputTokens: 1000,
                     outputTokens: 500,
                     totalTokens: 1500,
                     cacheReadTokens: 0,
@@ -107,18 +116,12 @@ describe('estimateRunCost', () => {
             byModel: [],
         };
 
-        // Each agent gets 50% of cache tokens:
-        //   agentCacheRead = round(400 * 0.5) = 200
-        //   agentCacheWrite = round(200 * 0.5) = 100
-        // Per agent (test-model, default multipliers 0.1 read, 1.25 write):
-        //   uncachedInput = max(0, 1000 - 200 - 100) = 700
-        //   inputCost = (200 * 0.1 * 0.01 + 100 * 1.25 * 0.01 + 700 * 0.01) / 1000
-        //            = (0.2 + 1.25 + 7.0) / 1000 = 0.00845
-        //   outputCost = 500 / 1000 * 0.03 = 0.015
-        //   perAgent = 0.02345
-        // Total = 0.02345 * 2 = 0.0469
-        const cost = estimateRunCost(summary);
-        expect(cost).toBeCloseTo(0.0469, 10);
+        // agent-a (default multipliers): uncached 600
+        //   input = (300*0.1*0.01 + 100*1.25*0.01 + 600*0.01) / 1000 = (0.3 + 1.25 + 6) / 1000 = 0.00755
+        //   output = 0.015 → 0.02255
+        // agent-b: no cache → 0.01 + 0.015 = 0.025
+        // The old proportional spread gave both agents half of the run's cache tokens.
+        expect(estimateRunCost(summary)).toBeCloseTo(0.02255 + 0.025, 10);
     });
 
     it('handles a single-agent summary', () => {
@@ -178,58 +181,22 @@ describe('estimateRunCost', () => {
         expect(estimateRunCost(summary)).toBe(0);
     });
 
-    it('distributes cache tokens proportionally by input share', () => {
+    it('equals the sum over call records when each row is one agent on one model', () => {
+        const records = [
+            { model: 'cached-model', inputTokens: 600, outputTokens: 100, cacheReadTokens: 400, cacheCreationTokens: 0 },
+            { model: 'cached-model', inputTokens: 900, outputTokens: 200, cacheReadTokens: 500, cacheCreationTokens: 300 },
+        ];
         const summary: RunUsageSummary = {
-            totalInputTokens: 1000,
-            totalOutputTokens: 600,
-            totalTokens: 1600,
-            totalCalls: 2,
-            totalCacheReadTokens: 100,
-            totalCacheCreationTokens: 50,
-            cacheHitRate: 0.1,
-            byAgent: [
-                {
-                    agentId: 'heavy',
-                    model: 'test-model',
-                    callCount: 1,
-                    inputTokens: 800,    // 80%
-                    outputTokens: 400,
-                    totalTokens: 1200,
-                    cacheReadTokens: 0,
-                    cacheCreationTokens: 0,
-                },
-                {
-                    agentId: 'light',
-                    model: 'test-model',
-                    callCount: 1,
-                    inputTokens: 200,    // 20%
-                    outputTokens: 200,
-                    totalTokens: 400,
-                    cacheReadTokens: 0,
-                    cacheCreationTokens: 0,
-                },
-            ],
+            totalInputTokens: 1500, totalOutputTokens: 300, totalTokens: 1800, totalCalls: 2,
+            totalCacheReadTokens: 900, totalCacheCreationTokens: 300, cacheHitRate: 0.6,
+            byAgent: [{
+                agentId: 'dev', model: 'cached-model', callCount: 2, inputTokens: 1500, outputTokens: 300,
+                totalTokens: 1800, cacheReadTokens: 900, cacheCreationTokens: 300,
+            }],
             byPhase: [],
             byModel: [],
         };
-
-        // heavy: ratio=0.8 => cacheRead=round(100*0.8)=80, cacheWrite=round(50*0.8)=40
-        //   uncached = max(0, 800-80-40) = 680
-        //   inputCost = (80*0.1*0.01 + 40*1.25*0.01 + 680*0.01)/1000
-        //             = (0.08 + 0.5 + 6.8)/1000 = 0.00738
-        //   outputCost = 400/1000 * 0.03 = 0.012
-        //   sub = 0.01938
-        //
-        // light: ratio=0.2 => cacheRead=round(100*0.2)=20, cacheWrite=round(50*0.2)=10
-        //   uncached = max(0, 200-20-10) = 170
-        //   inputCost = (20*0.1*0.01 + 10*1.25*0.01 + 170*0.01)/1000
-        //             = (0.02 + 0.125 + 1.7)/1000 = 0.001845
-        //   outputCost = 200/1000 * 0.03 = 0.006
-        //   sub = 0.007845
-        //
-        // total = 0.01938 + 0.007845 = 0.027225
-        const cost = estimateRunCost(summary);
-        expect(cost).toBeCloseTo(0.027225, 10);
+        expect(estimateRunCost(summary)).toBeCloseTo(billedCost(records[0]) + billedCost(records[1]), 12);
     });
 
     it('handles empty byAgent array', () => {
@@ -246,5 +213,61 @@ describe('estimateRunCost', () => {
             byModel: [],
         };
         expect(estimateRunCost(summary)).toBe(0);
+    });
+});
+
+// ---- Plan 30-06: pricing resolution -----------------------------------------
+
+describe('resolvePricing (Plan 30-06)', () => {
+    beforeEach(() => mockWarn.mockClear());
+
+    it('resolves a point release by its longest priced prefix', () => {
+        // claude-opus-5-5 was priced at $0 in the claudeopus5 run (exact match only)
+        expect(resolvePricing('claude-opus-5-5')).toEqual({ inputPer1k: 0.005, outputPer1k: 0.025 });
+        expect(resolvePricing('claude-opus-5-1-20260301')).toEqual({ inputPer1k: 0.006, outputPer1k: 0.03 });
+        expect(estimateCost('claude-opus-5-5', 1000, 1000)).toBeCloseTo(0.03, 10);
+    });
+
+    it('matches a prefix only at a separator', () => {
+        expect(resolvePricing('claude-opus-50')).toBeNull();
+        expect(resolvePricing('test-modelx')).toBeNull();
+    });
+
+    it('never invents a price: unpriced models cost 0, with one warning per model', () => {
+        expect(estimateCost('mystery-model-9', 1000, 1000)).toBe(0);
+        expect(estimateCost('mystery-model-9', 5000, 5000)).toBe(0);
+        const warnings = mockWarn.mock.calls.filter(([msg]) => String(msg).includes('mystery-model-9'));
+        expect(warnings).toHaveLength(1);
+        expect(String(warnings[0][0])).toContain('MODEL_PRICING_OVERRIDES');
+    });
+
+    it('lists the unpriced models among a set', () => {
+        expect(unpricedModels(['test-model', 'claude-opus-5-5', 'zeta-x', 'alpha-y', 'zeta-x'])).toEqual(['alpha-y', 'zeta-x']);
+    });
+});
+
+describe('list price, billed cost, effective input (Plan 30-06)', () => {
+    const call = { model: 'test-model', inputTokens: 10_000, outputTokens: 1_000, cacheReadTokens: 8_000, cacheCreationTokens: 1_000 };
+
+    it('list price bills every input token at the full rate', () => {
+        // (10000 * 0.01 + 1000 * 0.03) / 1000
+        expect(listCost(call)).toBeCloseTo(0.13, 10);
+    });
+
+    it('billed cost applies the cache multipliers, so the saving is list − billed', () => {
+        // uncached 1000 → 0.01; read 8000 × 0.1 → 0.008; write 1000 × 1.25 → 0.0125; output 0.03
+        expect(billedCost(call)).toBeCloseTo(0.0605, 10);
+        expect(listCost(call) - billedCost(call)).toBeCloseTo(0.0695, 10);
+    });
+
+    it('effective input weighs cache reads at 0.1 and writes at 1.25', () => {
+        expect(uncachedInputTokens(call)).toBe(1_000);
+        // 1000 + 1.25 × 1000 + 0.1 × 8000
+        expect(effectiveInputTokens(call)).toBeCloseTo(3_050, 10);
+    });
+
+    it('effective input equals raw input without caching, and uses default multipliers for unpriced models', () => {
+        expect(effectiveInputTokens({ model: 'test-model', inputTokens: 5_000 })).toBe(5_000);
+        expect(effectiveInputTokens({ model: 'no-price', inputTokens: 2_000, cacheReadTokens: 1_000 })).toBeCloseTo(1_100, 10);
     });
 });

@@ -5,11 +5,11 @@
  * Sub-Plans 01 (ProductVerifyReport, honest GateReport) and 02 (TamperFinding)
  * to determine whether the generated product meets acceptance criteria.
  *
- * Also detects when a run is unrecoverable — no further pipeline work can
- * plausibly change the outcome — so the pipeline can halt early instead of
- * burning another hour and $50 on a dead run.
+ * The report also says whether the run is unrecoverable — no further pipeline
+ * work can plausibly change the outcome — so the pipeline can halt early instead
+ * of burning another hour and $50 on a dead run (`detectUnrecoverable()`,
+ * unrecoverable.ts since Plan 30-05).
  */
-import { getLogger } from '../utils/logger';
 import { mdTable } from '../utils/markdown-table';
 import {
     ACCEPT_MIN_TESTS,
@@ -17,13 +17,14 @@ import {
     ACCEPT_REQUIRE_E2E,
     MIN_AC_COVERAGE_PCT,
     MIN_AC_IMPLEMENTED_PCT,
-    UNRECOVERABLE_ZERO_ROUNDS,
 } from '../config';
 import { buildTraceabilityReport } from '../utils/traceability';
 import type { ProjectStateType } from './state';
 import type { GateReport } from './quality-gates';
 import type { Bug } from '../agents/_shared/schemas/bug.schema';
 import { makeGateBug } from './bug-factory';
+import { storyIdsOfAssignments } from './assignment-policy';
+import { detectUnrecoverable } from './unrecoverable';
 
 
 
@@ -212,18 +213,20 @@ export function evaluateAcceptance(state: ProjectStateType): AcceptanceReport {
 
     // ── SCOPE (Sub-Plan 04) ────────────────────────────────────────────
     // Check that every user story has at least one assignment whose branch
-    // merged. Uses additionalStoryIds when present.
+    // merged. Uses additionalStoryIds when present. Plan 30-05: the set of
+    // stories with merged work was created and never filled, so SCOPE failed
+    // for every run with stories and the loop ran to MAX_BUGFIX_ITERATIONS.
     {
         let passed = true;
         let inconclusive = false;
-        let detail = 'All stories have assignments';
+        let detail = 'Every story has merged work';
         const stories = state.userStories ?? [];
 
         if (stories.length === 0) {
             inconclusive = true;
             detail = 'No user stories to evaluate';
         } else {
-            const storyIdsWithMerge = new Set<string>();
+            const storyIdsWithMerge = new Set(storyIdsOfAssignments(state.assignments ?? [], state.completedAssignmentIds ?? []));
             const orphanedStories = stories.filter(s => !storyIdsWithMerge.has(s.id));
             if (orphanedStories.length > 0) {
                 passed = false;
@@ -419,93 +422,7 @@ export function evaluateAcceptance(state: ProjectStateType): AcceptanceReport {
     return report;
 }
 
-// ─── Unrecoverability Detection ─────────────────────────────────────────────
-
-/**
- * A run is unrecoverable when no remaining pipeline work can plausibly
- * change the outcome. Detecting this early prevents the 20-37 minute
- * zero-output dispatch rounds observed in both post-mortem runs.
- */
-export function detectUnrecoverable(
-    state: ProjectStateType,
-): { unrecoverable: boolean; reason?: string } {
-    // 1. Zero-progress dispatch: N consecutive rounds with 0 file changes AND 0 merged PRs
-    const rounds = state.dispatchRounds ?? [];
-    if (rounds.length >= UNRECOVERABLE_ZERO_ROUNDS) {
-        const tail = rounds.slice(-UNRECOVERABLE_ZERO_ROUNDS);
-        const allZero = tail.every(r => r.fileChanges === 0 && r.prs === 0);
-        if (allZero) {
-            return {
-                unrecoverable: true,
-                reason: `${UNRECOVERABLE_ZERO_ROUNDS} consecutive dispatch rounds produced no file changes and no merged PRs`,
-            };
-        }
-    }
-
-    // 2. Permanently blocked branch — PR open with merge conflicts and re-dispatch failed >= 2 times
-    // Match on error strings until Sub-Plan 06 adds proper error classification
-    const openPrs = (state.pullRequests ?? []).filter(pr => pr.status === 'open');
-    const conflictErrors = (state.transcript ?? []).filter(t =>
-        t.message.includes('merge conflicts') || t.message.includes('A pull request already exists'),
-    );
-    if (openPrs.length > 0 && conflictErrors.length >= 2) {
-        return {
-            unrecoverable: true,
-            reason: `Branch ${openPrs[0].branchName} has unresolved merge conflicts and re-dispatch has failed ${conflictErrors.length} times`,
-        };
-    }
-
-    // 3. Sourceless workspace after development — nothing to test, deploy, or verify
-    // Check if past the development phase
-    const pastDev = ['qa', 'bugfix-triage', 'devops', 'e2e', 'acceptance-gate', 'finalize'].includes(state.phase);
-    if (pastDev && state.fileChanges.length === 0 && (state.pullRequests ?? []).filter(pr => pr.status === 'merged').length === 0) {
-        return {
-            unrecoverable: true,
-            reason: 'Workspace appears sourceless after development — no file changes and no merged PRs',
-        };
-    }
-
-    // 4. Scaffold never landed — no stack root would be detected
-    // (checked at the development node level via looksSourceless — this is the state-level check)
-
-    // 5. All required acceptance criteria failed twice with identical blocker set
-    // This is checked by comparing bugAttempts — a bug attempted >= 2 times and still present
-    const bugAttempts = state.bugAttempts ?? {};
-    const multiAttemptBugs = Object.entries(bugAttempts).filter(([, count]) => count >= 2);
-    if (multiAttemptBugs.length > 0) {
-        // Check if these bugs are still open (not fixed)
-        const fixedSet = new Set(state.fixedBugIds ?? []);
-        const stillOpen = multiAttemptBugs.filter(([id]) => !fixedSet.has(id));
-        const acceptanceBugs = stillOpen.filter(([id]) => id.startsWith('ACCEPT-') || id.startsWith('GATE-'));
-        if (acceptanceBugs.length >= 3) {
-            return {
-                unrecoverable: true,
-                reason: `${acceptanceBugs.length} acceptance/gate bugs have been attempted ${acceptanceBugs[0][1]}+ times and remain unresolved: ${acceptanceBugs.slice(0, 3).map(([id]) => id).join(', ')}`,
-            };
-        }
-    }
-
-    return { unrecoverable: false };
-}
-
 // ─── Helpers ────────────────────────────────────────────────────────────────
-
-/**
- * Small shared helper: check if the run should halt early due to
- * unrecoverability under `RUN_FAIL_POLICY='halt'`. Returns a partial state
- * update that skips the node, or null if the node should proceed normally.
- */
-export function haltIfUnrecoverable(
-    state: ProjectStateType,
-    nodeLog: ReturnType<typeof getLogger>,
-    failPolicy: string,
-): Partial<ProjectStateType> | null {
-    if (failPolicy !== 'halt') return null;
-    if (!state.unrecoverable?.flag) return null;
-
-    nodeLog.warn(`Run is unrecoverable (${state.unrecoverable.reason}) and RUN_FAIL_POLICY=halt — skipping to finalize`);
-    return {};
-}
 
 /**
  * Convert acceptance blockers into Bug objects with stable ids for the

@@ -86,7 +86,7 @@ export const teamLeaderSystemPrompt = `
        - Reviewers must be from a RELEVANT domain (frontend reviewer for frontend code, etc.)
        - If only one reviewer of the right rank/domain exists, assign that one plus the closest match FROM THE SAME OR HIGHER RANK.
 
-    2. BRANCH STRATEGY — ONE BRANCH PER USER STORY (mandatory):
+    2. BRANCH STRATEGY — ONE BRANCH PER USER STORY (default):
        - All dev work targets the **system branch** (project/<system-name>), NOT main/master.
        - Create ONE feature branch per user story by default. If you must reduce branch count,
          BATCH stories onto one branch by putting the extra story ids in additionalStoryIds —
@@ -97,14 +97,22 @@ export const teamLeaderSystemPrompt = `
          (lowercase, hyphens, no spaces). Example: "simple-calculator/feature/us-001-user-auth".
        - Project scaffolding / dependency installation / tooling setup tasks all go on a
          SINGLE shared branch: "{project-slug}/chore/scaffold".
-       - Bug fixes: "{project-slug}/fix/<bug-id>-<short-description>", one branch per bug.
+       - FINAL INTEGRATION / app-wiring work goes on its own branch "{project-slug}/feature/integration",
+         depends on the feature assignments it wires together, and never reuses the scaffold's storyId.
+       - Bug fixes: "{project-slug}/fix/<bug-id>-<short-description>", one branch per bug. A fix for
+         a blocked PR is the exception: exactly ONE assignment on that PR's own branch (taskType 'fix').
        - Because assignments share a branch, order them with dependsOn and state in each
          description WHICH FILES that assignment owns, to avoid conflicts.
+       - The branchName you set is honoured exactly. A branch is dispatched only after every
+         branch it depends on (through dependsOn) has merged, so dependencies between branches
+         MUST NOT form a cycle (branch A waiting for B while B waits for A).
        - PRs are opened against the system branch. Feature branches are deleted after merge.
 
     3. TASK TYPE:
        - Set taskType on every assignment: 'feature', 'bug', 'fix', 'refactor', or 'chore'.
        - This drives the PR description format.
+       - taskType 'chore' describes the kind of work; only "{project-slug}/chore/scaffold" is the
+         scaffold. A 'chore' on a feature branch is ordinary feature-branch work.
 
     4. PARALLEL WORK on shared branches:
        - When multiple agents share a branch, specify which FILES each agent owns in the assignment description.
@@ -122,6 +130,8 @@ export const teamLeaderSystemPrompt = `
     If no such assignment exists, CREATE ONE:
     - Assign it to a Principal developer (cross-cutting, architectural work)
     - Set it as the LAST assignment (depends on all component assignments)
+    - Put it alone on the branch "{project-slug}/feature/integration" — never on the scaffold or a
+      feature branch shared with other work — and give it a storyId other than the scaffold's
     - Mark it as 'critical' priority
     - The description must list ALL components to import and wire together
     - It should reference the entry point file(s) that need modification
@@ -161,7 +171,29 @@ export const teamLeaderSystemPrompt = `
     - moduleIds lists the repo contract module ids this assignment owns (e.g. ["MOD-GHOST-AI", "MOD-MAZE"]).
     - additionalStoryIds should list any extra story ids batched onto this branch (besides storyId).
     - acIndexes may list the acceptance criteria indices this assignment covers (empty = all).
-    - Assignments that share a storyId MUST share the same branchName. This is a hard rule.
+    - Prefer one branch per story: assignments that share a storyId should normally share a branchName.
     - Always set coverageNote with your coverage self-check counts.
 </output_rules>
 `;
+
+/**
+ * Instructions for a bug-fix triage round (Plan 30-05). claudeopus5's triage
+ * opened new branches for a blocked PR's work, planned merge-conflict
+ * resolution for a PR blocked by review findings, and referred to files that
+ * did not exist.
+ */
+export function buildBugfixInstructions(projectSlug: string): string {
+    return `Create NEW assignments that fix the bugs under "Open Bugs" and get the branches under "Undelivered Branches" merged. Assign each to the most appropriate developer.
+
+Rules:
+- Every assignment's "storyId" MUST be one of the ids listed under "Valid Story IDs". NEVER put a bug id (e.g. "QA-no-tests", "BUG-003") in "storyId" — bug ids belong in "bugIds" and the description.
+- Set "bugIds" to the ids from the Open Bugs table that the assignment fixes.
+- A blocked PR (bug "PR-BLOCKED-<branch>") gets exactly ONE assignment: "branchName" is that PR's branch, taskType 'fix', and the description lists its blockers and the review comments to address. Do not open a new branch for a blocked PR's work, and do not plan merge-conflict resolution unless its blockers say so.
+- Create nothing for a branch marked ABANDONED or Deferred.
+- Every other fix goes on its own branch "${projectSlug}/fix/<bug-id>-<short-description>" (lowercase, hyphens).
+- Refer only to files listed under "Source Files" or files the fix itself creates. Never invent paths.
+
+IMPORTANT: When triaging lint errors about "unused imports" or "defined but never used" in the application entry point file (main.ts, App.tsx, index.ts, server.ts, etc.):
+- If the unused imports are core application components (services, managers, UI components, controllers), the fix is NOT to remove them — it is to ADD the integration code that uses them (game loop, app bootstrap, route mounting, etc.)
+- Only remove imports that are genuinely extraneous (duplicates, wrong file, superseded).`;
+}

@@ -1,5 +1,5 @@
 /**
- * Anthropic prompt caching (Plan 22, D1).
+ * Anthropic prompt caching (Plan 22, D1; reworked in Plan 30-06).
  *
  * ## Why
  *
@@ -7,37 +7,50 @@
  * `input_token_details = { cache_read: 0, cache_creation: 0 }`. The persona, the
  * tool schemas, the injected JSON response schema and the task context — roughly
  * 6 kB that is byte-identical on every turn of an invocation — were re-billed at
- * full price each time. The run's input:output token ratio was **23:1**
- * (2,320,436 in / 99,731 out) for a single branch of fifteen.
+ * full price each time (Plan 22). In the claudeopus5 run that static prefix was
+ * cached and nothing else: each of junior-angular's 912 calls re-sent ~8k uncached
+ * tokens of history after a constant 7,374-token cached prefix. The rolling history
+ * breakpoint was never placed, because it required the AI message's own text to
+ * reach the cache minimum, and the minimums table was wrong for Haiku 4.5, Opus 4.6
+ * and Opus 5 (Plan 30-06).
  *
  * ## How
  *
  * Anthropic assembles a request as `tools` → `system` → `messages` and caches the
  * longest matching prefix ending at a `cache_control` breakpoint (max 4 per
- * request). We place three:
+ * request). Two explicit breakpoints:
  *
  *   1. **end of the system message** — this also covers `tools`, because tools are
  *      serialised *before* `system`. One breakpoint, both blocks of fixed overhead.
- *   2. **end of the first human message** — the task + architecture context, fixed
- *      for the whole invocation.
- *   3. **rolling breakpoint on the newest AI message outside the recent window** —
- *      the compacted history prefix, which only changes when the window slides.
+ *   2. **end of the first human message** — the task, fixed for the whole invocation.
+ *
+ * The conversation is cached by Anthropic's **automatic caching**: a top-level
+ * `cache_control` on the request (the agent factory sets it as `modelSettings`)
+ * puts a breakpoint on the last cacheable block and moves it forward every turn.
+ * Behind a proxy that may not forward that field (`ANTHROPIC_AUTO_CACHE=false`),
+ * the last block of the last message gets an explicit breakpoint instead. Either
+ * way a request carries three breakpoints.
+ *
+ * A breakpoint is placed whatever the length of the block it ends: the minimum
+ * cacheable length applies to the whole prefix, and the API silently ignores a
+ * breakpoint below it. The minimums table is for diagnostics only.
  *
  * `@langchain/anthropic@1.5.x` forwards `cache_control` from any content block
- * verbatim (`utils/message_inputs.js`), and passes `SystemMessage.content` through
- * to the `system` request field unchanged, so block-level breakpoints are the
- * supported mechanism.
+ * verbatim (`utils/message_inputs.js`) and from the call options as a top-level
+ * request field (`invocationParams`).
  */
 import {
     AIMessage,
     HumanMessage,
     SystemMessage,
+    ToolMessage,
     isAIMessage,
     isHumanMessage,
+    isToolMessage,
     type BaseMessage,
 } from '@langchain/core/messages';
-import { HISTORY_KEEP_RECENT_TURNS } from '../../config';
-import { findTurnBoundary } from './history-compactor';
+import { longestIdPrefix } from '../../utils/model-id';
+import { getRunContext } from '../../utils/run-context';
 import { getLogger } from '../../utils/logger';
 
 const cacheLog = getLogger('[prompt-cache]', 226);
@@ -45,38 +58,33 @@ const cacheLog = getLogger('[prompt-cache]', 226);
 /** Anthropic's hard limit on `cache_control` breakpoints per request. */
 export const MAX_CACHE_BREAKPOINTS = 4;
 
-// ─── Model-aware cache minimums (Plan 24, C2) ──────────────────────────────
+/** An ephemeral (5-minute) cache breakpoint — on a block, or top-level for automatic caching. */
+export const EPHEMERAL = { type: 'ephemeral' as const };
+
+// ─── Minimum cacheable prefix (Plan 30-06 — diagnostics only) ───────────────
 
 /**
- * Minimum token count for a cacheable prefix, by model family.
- * Anthropic documents different minimums per model tier.
+ * Minimum cacheable prefix in tokens, by model id (Anthropic prompt-caching docs).
+ * Matched by longest prefix, so dated ids and point releases resolve too.
  */
-export const CACHE_MIN_TOKENS_BY_FAMILY: Record<string, number> = {
-    haiku: 2048,
-    sonnet: 1024,
-    opus: 1024,
+export const CACHE_MIN_TOKENS_BY_MODEL: Readonly<Record<string, number>> = {
+    'claude-opus-5': 512, 'claude-fable-5': 512, 'claude-mythos-5': 512,
+    'claude-opus-4-8': 1024, 'claude-sonnet-5': 1024, 'claude-sonnet-4-6': 1024, 'claude-sonnet-4-5': 1024,
+    'claude-opus-4-1': 1024, 'claude-opus-4': 1024, 'claude-sonnet-4': 1024,
+    'claude-opus-4-7': 2048, 'claude-mythos-preview': 2048, 'claude-3-5-haiku': 2048,
+    'claude-opus-4-6': 4096, 'claude-opus-4-5': 4096, 'claude-haiku-4-5': 4096,
 };
 
-/**
- * Return the minimum cacheable token count for a model name.
- * Matches model name against known family patterns; defaults to 1024.
- */
+/** Minimum cacheable prefix (tokens) of a model; 1024 when the table does not know it. */
 export function getMinCacheableTokens(model: string): number {
-    const lower = model.toLowerCase();
-    for (const [family, minTokens] of Object.entries(CACHE_MIN_TOKENS_BY_FAMILY)) {
-        if (lower.includes(family)) return minTokens;
-    }
-    return 1024;
+    const id = longestIdPrefix(model, Object.keys(CACHE_MIN_TOKENS_BY_MODEL));
+    return id ? CACHE_MIN_TOKENS_BY_MODEL[id] : 1024;
 }
 
-/** Rough chars-per-token estimate for the minimum check. */
+/** Rough chars-per-token estimate for the diagnostic. */
 const CHARS_PER_TOKEN_ESTIMATE = 4;
 
-const EPHEMERAL = { type: 'ephemeral' as const };
-
-import { getRunContext } from '../../utils/run-context';
-
-/** Set of agent IDs for which we have already logged breakpoint placement. */
+/** Set of agent IDs for which we have already logged the static-prefix diagnostic. */
 const _breakpointLoggedAgents = new Set<string>();
 
 /** Get the active breakpoint-logged set — per-run scoped or module default. */
@@ -142,6 +150,40 @@ export function blocksWithTrailingBreakpoint(content: unknown): TextBlock[] | nu
     return blocks;
 }
 
+/** A copy of `m` with a breakpoint on its last non-thinking block; null when it already has one or cannot take one. */
+function withTrailingBreakpoint(m: BaseMessage): BaseMessage | null {
+    if (hasCacheControl(m.content)) return null;
+    const blocks = blocksWithTrailingBreakpoint(m.content);
+    if (!blocks) return null;
+    const content = blocks as any;
+    if (isHumanMessage(m)) return new HumanMessage({ content, id: m.id });
+    if (isToolMessage(m)) return new ToolMessage({ content, tool_call_id: m.tool_call_id, name: m.name, status: m.status, id: m.id });
+    if (isAIMessage(m)) {
+        const toolCalls = m.tool_calls;
+        return new AIMessage({ content, ...(toolCalls?.length ? { tool_calls: toolCalls } : {}), id: m.id });
+    }
+    return null;
+}
+
+/**
+ * Log once per agent how its static prefix (tools + system) compares with the
+ * model's minimum. Below it, the system breakpoint caches nothing by itself; the
+ * task and conversation breakpoints still cover it once the prefix is longer.
+ */
+function logStaticPrefix(agentId: string, model: string, systemChars: number, toolsChars: number): void {
+    const logged = _activeLoggedAgents();
+    if (!agentId || logged.has(`sys:${agentId}`)) return;
+    logged.add(`sys:${agentId}`);
+    const approxTokens = Math.round((systemChars + toolsChars) / CHARS_PER_TOKEN_ESTIMATE);
+    const minTokens = getMinCacheableTokens(model);
+    cacheLog.debug(
+        `${agentId}: static prefix ≈${approxTokens} tokens (system ${systemChars} + tools ${toolsChars} chars) `
+        + (approxTokens < minTokens
+            ? `is below the ${minTokens}-token minimum of "${model}" — it is cached with the task and the conversation`
+            : `meets the ${minTokens}-token minimum of "${model}"`),
+    );
+}
+
 // ─── Public API ─────────────────────────────────────────────────────────────
 
 /**
@@ -151,114 +193,56 @@ export function blocksWithTrailingBreakpoint(content: unknown): TextBlock[] | nu
  * caches the tool schemas *and* the persona *and* the injected response schema —
  * the fixed preamble that dominates input cost.
  *
- * Plan 24, C2: accepts `model` and `tools` parameters. The minimum threshold is
- * model-aware and the combined char count of tools + system message is checked
- * (not just the system message alone) because tools are serialised first and
- * form part of the cached prefix.
- *
- * Returns the original message when it is too small to be worth caching or
- * already carries a breakpoint.
+ * Plan 30-06: placed whatever the size of the prompt (the minimum applies to the
+ * whole prefix); `model` and `tools` only feed a once-per-agent diagnostic.
+ * Returns the original message when it already carries a breakpoint.
  */
 export function withSystemCacheBreakpoint(
     systemMessage: SystemMessage,
     opts?: { model?: string; tools?: unknown[]; agentId?: string },
 ): SystemMessage {
-    const model = opts?.model ?? '';
-    const agentId = opts?.agentId ?? '';
-    const minTokens = getMinCacheableTokens(model);
-    const minChars = minTokens * CHARS_PER_TOKEN_ESTIMATE;
-
-    // Plan 24, C2: count tools + system message content together
-    const systemChars = contentChars(systemMessage.content);
-    const toolsChars = opts?.tools?.length ? JSON.stringify(opts.tools).length : 0;
-    const combinedChars = systemChars + toolsChars;
-
-    const logged = _activeLoggedAgents();
-    if (combinedChars < minChars) {
-        if (agentId && !logged.has(`sys:${agentId}`)) {
-            logged.add(`sys:${agentId}`);
-            cacheLog.debug(
-                `${agentId}: system breakpoint skipped — combined ${combinedChars} chars < ${minChars} min `
-                + `(model="${model}", family min=${minTokens} tokens)`,
-            );
-        }
-        return systemMessage;
-    }
     if (hasCacheControl(systemMessage.content)) return systemMessage;
     const blocks = blocksWithTrailingBreakpoint(systemMessage.content);
     if (!blocks) return systemMessage;
-
-    if (agentId && !logged.has(`sys:${agentId}`)) {
-        logged.add(`sys:${agentId}`);
-        cacheLog.debug(
-            `${agentId}: system breakpoint placed — combined ${combinedChars} chars >= ${minChars} min `
-            + `(system=${systemChars}, tools=${toolsChars}, model="${model}")`,
-        );
-    }
+    logStaticPrefix(
+        opts?.agentId ?? '', opts?.model ?? '',
+        contentChars(systemMessage.content), opts?.tools?.length ? JSON.stringify(opts.tools).length : 0,
+    );
     return new SystemMessage({ content: blocks as any });
 }
 
 /**
- * Add cache breakpoints to the message list: one on the first human message (the
- * task) and one rolling breakpoint on the newest AI message that sits outside the
- * recent window.
+ * Add explicit cache breakpoints to the message list: one on the first human
+ * message (the task) and — when automatic caching is off — one on the last
+ * message, whose last block then ends the cached conversation prefix.
  *
  * Operates on a copy — the persisted graph state is never mutated, matching the
  * invariant of `compactHistory` and `sanitizeStreamingContentBlocks`.
  *
- * Plan 24, C2: accepts `model` for model-aware minimum threshold.
- *
- * @param budget breakpoints still available after the system message.
+ * @param opts.autoCache the request carries a top-level `cache_control` (it moves
+ *                       along the conversation and takes one of the four slots).
+ * @param opts.budget    breakpoints still available after the system message.
  */
 export function withMessageCacheBreakpoints(
     messages: BaseMessage[],
-    budget: number = MAX_CACHE_BREAKPOINTS - 1,
-    opts?: { model?: string; agentId?: string },
+    opts: { autoCache: boolean; budget?: number },
 ): { messages: BaseMessage[]; breakpoints: number } {
+    const budget = opts.budget ?? MAX_CACHE_BREAKPOINTS - 1 - (opts.autoCache ? 1 : 0);
     if (budget <= 0 || messages.length === 0) return { messages, breakpoints: 0 };
 
-    const model = opts?.model ?? '';
-    const minTokens = getMinCacheableTokens(model);
-    const minChars = minTokens * CHARS_PER_TOKEN_ESTIMATE;
-
-    const targets = new Set<number>();
-
-    // 1. The first human message — the task and its context.
+    const targets: number[] = [];
     const firstHuman = messages.findIndex(isHumanMessage);
-    if (firstHuman >= 0 && contentChars(messages[firstHuman].content) >= minChars) {
-        targets.add(firstHuman);
-    }
+    if (firstHuman >= 0) targets.push(firstHuman);
+    if (!opts.autoCache && messages.length - 1 !== firstHuman) targets.push(messages.length - 1);
 
-    // 2. Rolling breakpoint: newest AI message strictly before the recent window.
-    //    Everything up to it is a stable prefix that survives until the window slides.
-    if (targets.size < budget) {
-        const boundary = findTurnBoundary(messages, HISTORY_KEEP_RECENT_TURNS);
-        for (let i = Math.min(boundary, messages.length) - 1; i > firstHuman; i--) {
-            const m = messages[i];
-            if (!isAIMessage(m)) continue;
-            if (contentChars(m.content) < minChars) continue;
-            targets.add(i);
-            break;
-        }
-    }
-
-    if (targets.size === 0) return { messages, breakpoints: 0 };
-
+    const out = [...messages];
     let breakpoints = 0;
-    const out = messages.map((m, i) => {
-        if (!targets.has(i) || breakpoints >= budget) return m;
-        if (hasCacheControl(m.content)) return m;
-        const blocks = blocksWithTrailingBreakpoint(m.content);
-        if (!blocks) return m;
+    for (const i of targets) {
+        if (breakpoints >= budget) break;
+        const marked = withTrailingBreakpoint(out[i]);
+        if (!marked) continue;
+        out[i] = marked;
         breakpoints++;
-        if (isHumanMessage(m)) return new HumanMessage({ content: blocks as any, id: m.id });
-        const toolCalls = (m as AIMessage).tool_calls;
-        return new AIMessage({
-            content: blocks as any,
-            ...(toolCalls?.length ? { tool_calls: toolCalls } : {}),
-            id: m.id,
-        });
-    });
-
+    }
     return { messages: breakpoints > 0 ? out : messages, breakpoints };
 }

@@ -11,7 +11,6 @@ import { buildReviewerAgent } from '../../agents/developers/reviewer-agent.build
 import { getDevAgent } from '../../agents/developers/registry';
 import { resolveConventionFiles } from '../../utils/coding-conventions';
 import { getEffectiveLimits } from '../../utils/run-budget';
-import { runQualityGates } from '../quality-gates';
 import type { GateReport } from '../quality-gates';
 import type { TamperFinding } from '../gate-integrity';
 import { gateReportToMarkdown } from '../quality-gates';
@@ -20,15 +19,16 @@ import { selectEscalationCandidate, type ReviewOutcome } from '../review-policy'
 import {
     STRONG_FIXER_MODEL, STRONG_FIXER_ENABLED, STRONG_FIXER_MAX_TOOL_CALLS, STRONG_FIXER_MAX_INPUT_TOKENS,
     PRINCIPAL_DEV_MODEL, PR_EXHAUSTION_STRATEGY, REVIEW_QUORUM,
-    PR_TEST_TIMEOUT_MS, PR_TEST_INSTALL_TIMEOUT_MS,
 } from '../../config';
 import { invokeDevAgent, invokeReviewerAgent, getModelForRank } from './agent-invoke';
-import { commitWorktree } from './commit';
+import { commitWorktree, headSha } from './commit';
 import { getReviewDiffContent, DIFF_EXCLUDE_SPECS } from './diff';
 import { buildStrongFixerMessage } from './dev-prompts';
+import { runBranchGates } from './gates';
+import { msg } from './transcript';
 import type {
     Assignment, FileChange, TranscriptMessage,
-    PhaseName, PRReview, GitContext, TechDecision,
+    PRReview, GitContext, TechDecision,
 } from '../../agents/_shared/base-schemas';
 import type { ReviewOutput } from '../../agents/developers/schemas/review-output.schema';
 import type { TokenCallRecord } from '../../utils/token-tracker';
@@ -41,11 +41,6 @@ const log = getLogger('[PR-Workflow]', 135);
  * One shot per branch — if the fixer produced nothing, re-running it is waste.
  */
 const strongFixerZeroWriteBranches = new Set<string>();
-
-function ts(): string { return new Date().toISOString(); }
-function msg(agentId: string, message: string): TranscriptMessage {
-    return { timestamp: ts(), agentId, phase: 'development' as PhaseName, message };
-}
 
 export interface StrongFixerInput {
     worktreeWorkspace: string;
@@ -79,6 +74,8 @@ export interface StrongFixerResult {
     newFileChanges: FileChange[];
     newTranscript: TranscriptMessage[];
     newTokenUsage: TokenCallRecord[];
+    /** Plan 30-02: the gates the fixer ran on its committed work, and the HEAD they ran at. */
+    gateEvidence?: { report: GateReport; sha: string };
 }
 
 /**
@@ -143,7 +140,7 @@ export async function runStrongFixer(input: StrongFixerInput): Promise<StrongFix
     }
 
     const fixerModel = STRONG_FIXER_MODEL || PRINCIPAL_DEV_MODEL;
-    log.info(`Strong fixer: running (${STRONG_FIXER_MAX_TOOL_CALLS} turns, ${Math.round(STRONG_FIXER_MAX_INPUT_TOKENS / 1000)}k tokens, blockers: ${fixerBlockerSummary || 'review-comments-only'})`);
+    log.info(`Strong fixer: running (${STRONG_FIXER_MAX_TOOL_CALLS} turns, soft landing at ${Math.round(STRONG_FIXER_MAX_INPUT_TOKENS / 1000)}k effective tokens, blockers: ${fixerBlockerSummary || 'review-comments-only'})`);
     newTranscript.push(msg('conductor', `Strong fixer invoked (model: ${fixerModel})`));
     emitRunEvent('pr:strong-fixer', { prNumber, model: fixerModel, branch: branchName });
 
@@ -179,8 +176,10 @@ export async function runStrongFixer(input: StrongFixerInput): Promise<StrongFix
         gateMarkdown, integrityMarkdown,
     );
 
+    const fixerCommitSubject = `strong fixer pass (model: ${fixerModel})`;
+    let gateEvidence: StrongFixerResult['gateEvidence'];
     try {
-        const { output: fixerOutput, tokenUsage: fixerTokenUsage } = await invokeDevAgent(
+        const { output: fixerOutput, tokenUsage: fixerTokenUsage, budgetCapped } = await invokeDevAgent(
             fixerAgent, fixerMsg, `strong-fixer-pr${prNumber}`,
             'strong-fixer', fixerModel,
             buildFixerFn, respawnCtx,
@@ -188,8 +187,9 @@ export async function runStrongFixer(input: StrongFixerInput): Promise<StrongFix
         if (fixerTokenUsage) newTokenUsage.push(fixerTokenUsage);
         const fixerChanges = reconcileClaims('strong-fixer', fixerOutput.fileChanges);
         newFileChanges.push(...fixerChanges);
-        log.info(`Strong fixer completed: ${fixerChanges.length} verified file change(s)`);
-        newTranscript.push(msg('strong-fixer', `Strong fixer applied ${fixerChanges.length} file changes`));
+        // Plan 30-02: a budget-capped fixer keeps its work — its gates and final review still run.
+        log.info(`Strong fixer completed: ${fixerChanges.length} verified file change(s)${budgetCapped ? ' (budget-capped — running its gates and final review anyway)' : ''}`);
+        newTranscript.push(msg('strong-fixer', `Strong fixer applied ${fixerChanges.length} file changes${budgetCapped ? ' (budget-capped)' : ''}`));
 
         // Plan 24 B2: track zero-write passes so we don't retry
         if (fixerChanges.length === 0) {
@@ -197,14 +197,17 @@ export async function runStrongFixer(input: StrongFixerInput): Promise<StrongFix
             log.info(`Strong fixer: zero writes on ${branchName} — branch marked for skip on retry`);
         }
 
+        // Commit before the gates so their report belongs to a known HEAD — the
+        // merge decision reuses it instead of running the gates again.
+        commitWorktree(worktreeWorkspace, branchName, projectSlug, primaryStoryId, 'fix', fixerCommitSubject, gitContext);
+
         // Run quality gates after the fixer's changes
         let fixerGateReport: GateReport | null = null;
         try {
-            fixerGateReport = await runQualityGates(worktreeWorkspace, {
-                timeoutMs: PR_TEST_TIMEOUT_MS,
-                installTimeoutMs: PR_TEST_INSTALL_TIMEOUT_MS,
-            });
-            log.info(`Quality gates after strong fixer: ${fixerGateReport?.passed ? 'passed' : 'failed'}`);
+            fixerGateReport = await runBranchGates(worktreeWorkspace);
+            const sha = headSha(worktreeWorkspace);
+            if (sha) gateEvidence = { report: fixerGateReport, sha };
+            log.info(`Quality gates after strong fixer: ${fixerGateReport.passed ? 'passed' : 'failed'}`);
         } catch (gateErr: any) {
             log.warn(`Quality gates after strong fixer failed: ${gateErr.message}`);
         }
@@ -284,9 +287,8 @@ export async function runStrongFixer(input: StrongFixerInput): Promise<StrongFix
         log.error(`Strong fixer failed: ${fixerErr.message}`);
         newTranscript.push(msg('conductor', `Strong fixer failed: ${fixerErr.message}`));
     } finally {
-        commitWorktree(worktreeWorkspace, branchName, projectSlug, primaryStoryId, 'fix',
-            `strong fixer pass (model: ${STRONG_FIXER_MODEL || PRINCIPAL_DEV_MODEL})`, gitContext);
+        commitWorktree(worktreeWorkspace, branchName, projectSlug, primaryStoryId, 'fix', fixerCommitSubject, gitContext);
     }
 
-    return { prStatus, newReviews, newOutcomes, newFileChanges, newTranscript, newTokenUsage };
+    return { prStatus, newReviews, newOutcomes, newFileChanges, newTranscript, newTokenUsage, gateEvidence };
 }

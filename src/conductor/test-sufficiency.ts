@@ -3,8 +3,15 @@
  *
  * Sub-Plan 09: prevents "0 tests found = pass" and ensures every story has
  * at least one tagged test.
+ *
+ * Plan 30-03: a broken runner produced 36 of the claudeopus5 run's 63 false bugs
+ * per round (one runner error plus a `story-untested` bug for each of 35 stories,
+ * because assignment ids were passed where story ids belong). Runner errors are
+ * now one violation carrying each command and its rendered output; the min-test
+ * and per-story checks need parsed cases; `story-untested` applies only to
+ * stories with merged work.
  */
-import type { ExecutedTestReport } from './test-runner';
+import type { ExecutedTestReport } from './test-runners/executed-report';
 import type { UserStory } from '../agents/_shared/schemas/user-story.schema';
 import type { Bug } from '../agents/_shared/schemas/bug.schema';
 import { makeGateBug } from './bug-factory';
@@ -24,6 +31,8 @@ export interface SufficiencyViolation {
         | 'coverage-below-floor' | 'all-tests-trivial' | 'story-untested';
     severity: 'critical' | 'major';
     detail: string;
+    /** How to reproduce, when it differs from the detail (the runner error's exact commands). */
+    steps?: string;
     /** For story-level violations, the story id. */
     storyId?: string;
 }
@@ -39,82 +48,76 @@ export function checkTestSufficiency(input: {
     executed: ExecutedTestReport[];
     userStories: UserStory[];
     trivialTestFiles: string[];
-    /** Assignment ids per story that were merged/completed. */
-    completedStoryIds?: string[];
+    /** Story ids with merged work (Plan 30-03): `story-untested` applies only to these. */
+    completedStoryIds: string[];
 }): SufficiencyViolation[] {
     if (!QA_ENFORCE_SUFFICIENCY) return [];
 
     const { executed, userStories, trivialTestFiles, completedStoryIds } = input;
     const violations: SufficiencyViolation[] = [];
-    const completedSet = new Set(completedStoryIds ?? []);
 
-    // ── Check 1: at least one root executed tests ────────────────────────
+    // ── Checks 1–2: runner errors (one violation for every failing root), else at least one root ran tests ──
+    const runnerErrors = executed.filter(e => e.runnerError);
     const rootsWithTests = executed.filter(e => !e.runnerError && e.total > 0);
-    if (rootsWithTests.length === 0) {
-        const hasRunnerError = executed.some(e => e.runnerError);
-        if (hasRunnerError) {
-            const errs = executed.filter(e => e.runnerError);
-            violations.push({
-                kind: 'runner-error',
-                severity: 'critical',
-                detail: `Test runner failed in ${errs.length} root(s): ${errs.map(e => e.runnerErrorDetail?.slice(0, 200) || 'unknown').join('; ')}`,
-            });
-        } else {
-            violations.push({
-                kind: 'no-tests',
-                severity: 'critical',
-                detail: `No tests were found or executed across ${executed.length} stack root(s).`,
-            });
-        }
-    }
-
-    // ── Check 2: no runner errors ────────────────────────────────────────
-    for (const e of executed) {
-        if (e.runnerError && rootsWithTests.length > 0) {
-            // Only add if we didn't already catch it above (all-roots-failing)
-            violations.push({
-                kind: 'runner-error',
-                severity: 'critical',
-                detail: `Test runner error in root "${e.root || '.'}": ${e.runnerErrorDetail?.slice(0, 200) || 'unknown'}`,
-            });
-        }
-    }
-
-    // ── Check 3: total non-trivial tests >= threshold ────────────────────
-    const allCases = executed.flatMap(e => e.cases);
-    const trivialSet = new Set(trivialTestFiles);
-    const nonTrivialCases = allCases.filter(c => !trivialSet.has(c.file));
-    const minTests = QA_MIN_TOTAL_TESTS > 0
-        ? QA_MIN_TOTAL_TESTS
-        : Math.max(5, userStories.length);
-
-    if (nonTrivialCases.length < minTests && rootsWithTests.length > 0) {
+    // A root that ran but could not name its cases (an unknown runner that exited 0) is unmeasured, not empty.
+    const unmeasured = executed.filter(e => !e.runnerError && e.caseNames === 'unavailable');
+    if (runnerErrors.length > 0) {
         violations.push({
-            kind: 'below-min-tests',
+            kind: 'runner-error',
             severity: 'critical',
-            detail: `Only ${nonTrivialCases.length} non-trivial test(s) executed; minimum is ${minTests} (max(5, storyCount=${userStories.length})).`,
+            detail: runnerErrors
+                .map(e => `Root "${e.root || '.'}": \`${e.command}\` (exit ${e.exitCode})\n${e.runnerErrorDetail || 'no output'}`)
+                .join('\n\n'),
+            steps: runnerErrors.map(e => `Run \`${e.command}\` in ${e.root || '.'}`).join('\n'),
+        });
+    } else if (rootsWithTests.length === 0 && unmeasured.length === 0) {
+        violations.push({
+            kind: 'no-tests',
+            severity: 'critical',
+            detail: `No tests were found or executed across ${executed.length} stack root(s).`,
         });
     }
 
-    // ── Check 4: each story has >= min tagged passing tests ──────────────
-    if (QA_MIN_TESTS_PER_STORY > 0 && userStories.length > 0) {
-        const taggedPassingByStory = new Map<string, number>();
-        for (const c of allCases) {
-            if (c.status === 'pass' && c.storyId) {
-                taggedPassingByStory.set(c.storyId, (taggedPassingByStory.get(c.storyId) || 0) + 1);
-            }
+    const allCases = executed.flatMap(e => e.cases);
+    const trivialSet = new Set(trivialTestFiles);
+
+    // Checks 3–4 need per-case results; without them they would only restate the runner problem (Plan 30-03).
+    if (rootsWithTests.some(e => e.caseNames !== 'unavailable')) {
+        // ── Check 3: total non-trivial tests >= threshold ────────────────
+        const nonTrivialCases = allCases.filter(c => !trivialSet.has(c.file));
+        const minTests = QA_MIN_TOTAL_TESTS > 0
+            ? QA_MIN_TOTAL_TESTS
+            : Math.max(5, userStories.length);
+
+        if (nonTrivialCases.length < minTests) {
+            violations.push({
+                kind: 'below-min-tests',
+                severity: 'critical',
+                detail: `Only ${nonTrivialCases.length} non-trivial test(s) executed; minimum is ${minTests} (max(5, storyCount=${userStories.length})).`,
+            });
         }
 
-        for (const story of userStories) {
-            const count = taggedPassingByStory.get(story.id) || 0;
-            if (count < QA_MIN_TESTS_PER_STORY) {
-                const isCompleted = completedSet.has(story.id);
-                violations.push({
-                    kind: 'story-untested',
-                    severity: isCompleted ? 'critical' : 'major',
-                    detail: `Story ${story.id} has ${count} tagged passing test(s); minimum is ${QA_MIN_TESTS_PER_STORY}.`,
-                    storyId: story.id,
-                });
+        // ── Check 4: each story with merged work has >= min tagged passing tests ──
+        if (QA_MIN_TESTS_PER_STORY > 0) {
+            const merged = new Set(completedStoryIds);
+            const taggedPassingByStory = new Map<string, number>();
+            for (const c of allCases) {
+                if (c.status === 'pass' && c.storyId) {
+                    taggedPassingByStory.set(c.storyId, (taggedPassingByStory.get(c.storyId) || 0) + 1);
+                }
+            }
+
+            // Undelivered work is not untested work.
+            for (const story of userStories.filter(s => merged.has(s.id))) {
+                const count = taggedPassingByStory.get(story.id) || 0;
+                if (count < QA_MIN_TESTS_PER_STORY) {
+                    violations.push({
+                        kind: 'story-untested',
+                        severity: 'critical',
+                        detail: `Story ${story.id} has merged work but ${count} tagged passing test(s); minimum is ${QA_MIN_TESTS_PER_STORY}.`,
+                        storyId: story.id,
+                    });
+                }
             }
         }
     }
@@ -166,7 +169,7 @@ export function sufficiencyViolationsToBugs(violations: SufficiencyViolation[]):
         `Test sufficiency: ${v.kind}${v.storyId ? ` (${v.storyId})` : ''}`,
         v.severity,
         'test-sufficiency',
-        v.detail,
+        v.steps ?? v.detail,
         getExpectedBehavior(v.kind),
         v.detail,
         v.storyId ? `Story ${v.storyId}` : 'Test suite',

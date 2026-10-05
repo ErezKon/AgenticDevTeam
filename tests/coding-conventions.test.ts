@@ -405,6 +405,12 @@ describe('getConventionReadInstructions', () => {
         // The digest should have content from the source files
         expect(result.length).toBeGreaterThan(50);
     });
+
+    it('keeps only the pointer line when the files have no rule lines (Plan 30-07)', () => {
+        expect(getConventionReadInstructions(['TypeScript.md'])).toBe(
+            '<coding_conventions>\nFull references exist at .conventions/*.md - read one ONLY if you need detail.\n</coding_conventions>',
+        );
+    });
 });
 
 // ─── Test 4b: getConventionReadInstructions() — fallback mode ────────────────
@@ -493,10 +499,16 @@ describe('buildConventionsDigest', () => {
         expect(digest).toContain('[React.md]');
     });
 
-    it('contains headings extracted from source files', () => {
+    it('keeps only imperative rule lines — no headings (Plan 30-07)', () => {
         const digest = buildConventionsDigest(['Universal.md']);
-        // Universal.md has headings like "Version Control", "Security", etc.
-        expect(digest).toMatch(/##\s/);
+        expect(digest).not.toMatch(/^##\s/m);
+        for (const line of digest.split('\n')) expect(line).toMatch(/^(\[[\w.]+\]|- .+)$/);
+        expect(digest).toMatch(/Don't Repeat Yourself/);
+    });
+
+    it('skips imperative words inside code blocks — a file without rules contributes nothing (Plan 30-07)', () => {
+        // TypeScript.md's only "Don't" is a `// Don't over-annotate` comment in an example
+        expect(buildConventionsDigest(['TypeScript.md'])).toBe('');
     });
 
     it('caches results — calling twice returns the same string', () => {

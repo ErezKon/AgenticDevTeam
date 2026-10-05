@@ -3,7 +3,11 @@
  *
  * Pure tests — no LLM, no git, no network.
  */
+import * as fs from 'fs';
+import * as path from 'path';
 import {
+    summariseBugs,
+    summariseUndeliveredBranches,
     summariseArchitecture,
     summariseTechStack,
     summariseDbDesign,
@@ -23,7 +27,7 @@ import {
 import type { ContextSection } from '../src/conductor/context-builder';
 import type {
     ArchitectureDoc, TechDecision, DbDesign, UserStory, Task,
-    FileChange, CodebaseAnalysis,
+    FileChange, CodebaseAnalysis, Bug, PullRequest,
 } from '../src/agents/_shared/base-schemas';
 import type { Epic } from '../src/agents/_shared/schemas/epic.schema';
 
@@ -497,5 +501,88 @@ describe('context stats', () => {
         recordContextChars('x', 42);
         _resetContextStats();
         expect(getContextStats()).toEqual({});
+    });
+});
+
+// ─── Bug-fix triage (Plan 30-05) ─────────────────────────────────────────────
+
+describe('summariseBugs (Plan 30-05)', () => {
+    const bug = (id: string, actualBehavior: string, storyId?: string): Bug => ({
+        id, title: `Title of ${id}`, severity: 'critical', reportedBy: 'test', stepsToReproduce: 'run it',
+        expectedBehavior: 'works', actualBehavior, suspectedArea: 'src', ...(storyId ? { storyId } : {}),
+    });
+
+    it('renders one table row per bug, with the story and a one-line detail', () => {
+        const table = summariseBugs([
+            bug('QA-runner-error', 'Root ".": `npm test` (exit 1)\nError: Cannot find module karma | jasmine'),
+            bug('AC-US-001-0', 'Status "failing" — the tagged test fails'),
+            bug('QA-story-untested-US-002', 'untested', 'US-002'),
+        ]);
+        const rows = table.split('\n');
+
+        expect(rows).toHaveLength(5);
+        expect(rows[0]).toBe('| Bug | Severity | Title | Story | Detail |');
+        expect(rows[2]).toBe('| QA-runner-error | critical | Title of QA-runner-error | - | Root ".": `npm test` (exit 1) Error: Cannot find module karma \\| jasmine |');
+        expect(rows[3]).toContain('| AC-US-001-0 | critical | Title of AC-US-001-0 | US-001 |');
+        expect(rows[4]).toContain('| US-002 |');
+    });
+
+    it('is a fraction of the JSON dump it replaces (claudeopus5: 63 bugs)', () => {
+        const bugs: Bug[] = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures', 'plan30', 'claudeopus5-triage-bugs.json'), 'utf-8'));
+        expect(summariseBugs(bugs).length).toBeLessThan(0.4 * JSON.stringify(bugs, null, 2).length);
+    });
+
+    it('says so when there is nothing to fix', () => {
+        expect(summariseBugs([])).toBe('(no open bugs)');
+    });
+});
+
+describe('summariseUndeliveredBranches (Plan 30-05)', () => {
+    const comment = (body: string, severity: string, line: number) => ({
+        id: `c-${line}`, reviewerId: 'principal-frontend', filePath: 'src/app/start-screen.component.ts', line, body, severity, resolved: false,
+    });
+    const pr = (fields: Partial<PullRequest> & Pick<PullRequest, 'branchName' | 'status'>): PullRequest => ({
+        id: 'PR-2', prNumber: 2, prUrl: '', title: 'feat', description: '', authorAgentId: 'junior-angular',
+        reviewerAgentIds: [], reviews: [], assignmentIds: [], taskType: 'feature', ...fields,
+    });
+
+    it('shows the blockers, the final review round\'s critical/major comments and the failing gate', () => {
+        const text = summariseUndeliveredBranches([pr({
+            branchName: 'app/feature/us-027', status: 'blocked', blockers: ['Quorum not met: 0/2 approvals (0 abstention(s))'],
+            reviews: [
+                { reviewerId: 'principal-frontend', status: 'changes_requested', iteration: 1, comments: [comment('Old finding, fixed in round 2', 'critical', 10)] },
+                {
+                    reviewerId: 'principal-frontend', status: 'changes_requested', iteration: 2,
+                    comments: [comment('Positive tabindex values\nbreak the tab order', 'major', 34), comment('Use :focus-visible', 'minor', 26)],
+                },
+            ],
+            failedGate: { step: 'test', command: 'npm test', summary: 'Executed 210 of 210 (1 FAILED)' },
+        })], new Set());
+
+        expect(text).toContain('### app/feature/us-027 — PR #2, blocked');
+        expect(text).toContain('Blockers: Quorum not met: 0/2 approvals (0 abstention(s))');
+        expect(text).toContain('- src/app/start-screen.component.ts:34 — [major] Positive tabindex values break the tab order');
+        expect(text).not.toContain('Old finding');
+        expect(text).not.toContain(':focus-visible');
+        expect(text).toContain('Failing gate: test (`npm test`)\n```text\nExecuted 210 of 210 (1 FAILED)\n```');
+        expect(text).not.toContain('ABANDONED');
+    });
+
+    it('marks abandoned and deferred branches and leaves merged ones out', () => {
+        const text = summariseUndeliveredBranches([
+            pr({ branchName: 'app/feature/a', status: 'blocked', blockers: ['review'] }),
+            pr({ branchName: 'app/feature/a', status: 'blocked', blockers: ['review'] }),
+            pr({ branchName: 'app/feature/b', status: 'deferred', prNumber: 0 }),
+            pr({ branchName: 'app/feature/c', status: 'merged' }),
+        ], new Set(['app/feature/a']));
+
+        expect(text).toContain('### app/feature/a — PR #2, blocked\nABANDONED');
+        expect(text).toContain('### app/feature/b — deferred\nDeferred:');
+        expect(text).not.toContain('app/feature/c');
+    });
+
+    it('says so when every branch merged', () => {
+        expect(summariseUndeliveredBranches([pr({ branchName: 'app/feature/c', status: 'merged' })], new Set()))
+            .toBe('(every dispatched branch merged)');
     });
 });

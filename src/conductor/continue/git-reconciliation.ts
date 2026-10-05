@@ -22,11 +22,13 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { getLogger } from '../../utils/logger';
-import { gitExec, gitExecVerbose } from '../../utils/git-exec';
+import { gitExec, gitExecVerbose, gitPush, refExists, deleteLocalBranch } from '../../utils/git-exec';
+import { stageWorkspaceChanges, removePipelineArtifacts, REPAIR_COMMIT_SUBJECT } from '../../utils/repo-hygiene';
 import { appendLedger } from '../../utils/run-ledger';
 import { systemBranch, isSystemBranch } from '../../utils/branch-naming';
 import { CONTINUE_GIT_RECONCILE, CONTINUE_CLOSE_STALE_PRS } from '../../config';
 import { GITHUB_MODE } from '../../utils/github-local';
+import type { GitContext } from '../../agents/_shared/base-schemas';
 import type { CollectedRunState, BranchStatus } from './state-collector';
 
 const log = getLogger('[GitReconciliation]', 177);
@@ -139,7 +141,13 @@ export function reconcileGitState(
         warnings.push(`Remote sync failed: ${syncCheck.details}`);
     }
 
+    // ── 8b. Pipeline worktrees an earlier run committed (Plan 30-04) ─────
+    const artifactCheck = repairPipelineArtifacts(workspacePath, systemBranch, state.gitContext);
+    checks.push(artifactCheck);
+    if (!artifactCheck.ok) warnings.push(artifactCheck.details);
+
     // ── 9. Close stale PRs (live mode only) ──────────────────────────────
+    // Plan 30-02: 'resumable' branches are excluded — their remote branch and PR are kept and reused.
     if (GITHUB_MODE === 'live' && CONTINUE_CLOSE_STALE_PRS) {
         const openPRBranches = collected.prBranchStatus
             .filter(b => b.status === 'open')
@@ -346,57 +354,30 @@ function cleanupWorktrees(workspacePath: string): CheckResult {
     };
 }
 
-/** Check 4: Ensure the workspace is on the system branch. */
+/**
+ * Check 4: Ensure the workspace is on the system branch. Plan 30-04: the local
+ * and remote-tracking refs are probed before the checkout, so trying a branch
+ * that does not exist no longer lands in `errors.jsonl`.
+ */
 function ensureSystemBranch(workspacePath: string, systemBranch: string): CheckResult {
+    const check = 'system-branch';
     const currentBranch = gitExec(workspacePath, 'rev-parse --abbrev-ref HEAD');
-    if (currentBranch.startsWith('Error:')) {
-        return {
-            check: 'system-branch',
-            ok: false,
-            details: `Cannot determine current branch: ${currentBranch}`,
-        };
-    }
+    if (currentBranch.startsWith('Error:')) return { check, ok: false, details: `Cannot determine current branch: ${currentBranch}` };
+    if (currentBranch === systemBranch) return { check, ok: true, details: `Already on system branch: ${systemBranch}` };
 
-    if (currentBranch === systemBranch) {
-        return {
-            check: 'system-branch',
-            ok: true,
-            details: `Already on system branch: ${systemBranch}`,
-        };
-    }
-
-    // Try to checkout the system branch
     log.info(`Switching from "${currentBranch}" to system branch "${systemBranch}"`);
-    let coResult = gitExec(workspacePath, `checkout ${systemBranch}`);
-    if (coResult.startsWith('Error:')) {
-        // Branch may not exist locally — try creating a tracking branch
-        coResult = gitExec(workspacePath, `checkout -b ${systemBranch} origin/${systemBranch}`);
-        if (coResult.startsWith('Error:')) {
-            // Last resort: the branch might just not exist remotely either
-            // Try checking out 'main' as a fallback
-            coResult = gitExec(workspacePath, 'checkout main');
-            if (coResult.startsWith('Error:')) {
-                return {
-                    check: 'system-branch',
-                    ok: false,
-                    details: `Cannot checkout system branch "${systemBranch}" or "main"`,
-                };
-            }
-            return {
-                check: 'system-branch',
-                ok: true,
-                details: `System branch "${systemBranch}" not found — fell back to "main"`,
-                action: 'checked out main',
-            };
-        }
+    // Last resort: 'main', when the system branch exists neither locally nor on the remote
+    for (const branch of [systemBranch, 'main']) {
+        const checkout = refExists(workspacePath, `refs/heads/${branch}`) ? `checkout ${branch}`
+            : refExists(workspacePath, `refs/remotes/origin/${branch}`) ? `checkout -b ${branch} origin/${branch}` : null;
+        if (!checkout) continue;
+        const coResult = gitExec(workspacePath, checkout);
+        if (coResult.startsWith('Error:')) return { check, ok: false, details: `Cannot checkout "${branch}": ${coResult}` };
+        return branch === systemBranch
+            ? { check, ok: true, details: `Switched to system branch: ${systemBranch}`, action: `checked out ${systemBranch}` }
+            : { check, ok: true, details: `System branch "${systemBranch}" not found — fell back to "main"`, action: 'checked out main' };
     }
-
-    return {
-        check: 'system-branch',
-        ok: true,
-        details: `Switched to system branch: ${systemBranch}`,
-        action: `checked out ${systemBranch}`,
-    };
+    return { check, ok: false, details: `Cannot checkout system branch "${systemBranch}" or "main"` };
 }
 
 /** Check 5: Ensure the working tree has no uncommitted changes. */
@@ -418,13 +399,13 @@ function ensureCleanWorkingTree(workspacePath: string): CheckResult {
         };
     }
 
-    // Auto-commit dirty changes
+    // Auto-commit dirty changes (Plan 30-04: never a pipeline directory or a nested repository)
     log.info('Working tree has uncommitted changes — auto-committing');
-    gitExec(workspacePath, 'add .');
-    const commitResult = gitExec(
-        workspacePath,
-        'commit -m "chore: auto-commit pre-continuation"',
-    );
+    const stage = stageWorkspaceChanges(workspacePath);
+    if (!stage.error && stage.staged.length === 0) {
+        return { check: 'clean-working-tree', ok: true, details: 'Only pipeline directories or nested repositories changed — nothing to commit' };
+    }
+    const commitResult = stage.error ? `Error: ${stage.error}` : gitExec(workspacePath, 'commit -m "chore: auto-commit pre-continuation"');
     if (commitResult.startsWith('Error:')) {
         return {
             check: 'clean-working-tree',
@@ -480,20 +461,15 @@ function cleanupStaleBranches(
         if (branch === systemBranch) continue; // never delete the system branch
 
         switch (status) {
-            case 'merged':
-                // Already in main — delete local branch if it exists
-                deleteLocalBranch(workspacePath, branch, cleaned, errors);
+            case 'merged':          // already in the system branch
+            case 'open':            // re-created on dispatch
+            case 'failed-salvaged': // salvage patches already in outputs/
+            case 'resumable': {     // Plan 30-02: keep origin/<branch> and its PR — dispatch resumes from the remote head
+                const del = deleteLocalBranch(workspacePath, branch);
+                if (del.error) errors.push(`Failed to delete ${branch}: ${del.error}`);
+                else if (del.deleted) { cleaned.push(branch); log.info(`Deleted stale local branch: ${branch}`); }
                 break;
-
-            case 'open':
-                // Will be re-created on dispatch — delete local branch
-                deleteLocalBranch(workspacePath, branch, cleaned, errors);
-                break;
-
-            case 'failed-salvaged':
-                // Salvage patches already in outputs/ — delete local branch
-                deleteLocalBranch(workspacePath, branch, cleaned, errors);
-                break;
+            }
 
             case 'pr-creation-failed':
                 // Branch code is pushed but PR creation failed — keep the branch
@@ -523,24 +499,22 @@ function cleanupStaleBranches(
     };
 }
 
-/** Helper: delete a local branch, recording the result. */
-function deleteLocalBranch(
-    workspacePath: string,
-    branch: string,
-    cleaned: string[],
-    errors: string[],
-): void {
-    // Check if the branch exists locally
-    const exists = gitExec(workspacePath, `rev-parse --verify ${branch}`);
-    if (exists.startsWith('Error:')) return; // doesn't exist — nothing to do
-
-    const result = gitExec(workspacePath, `branch -D ${branch}`);
-    if (result.startsWith('Error:')) {
-        errors.push(`Failed to delete ${branch}: ${result}`);
-    } else {
-        cleaned.push(branch);
-        log.info(`Deleted stale local branch: ${branch}`);
-    }
+/**
+ * Check 8b (Plan 30-04): remove the pipeline worktrees an earlier run committed —
+ * claudeopus5's system branch carries `.worktrees-failed/…` as a gitlink (commit
+ * d721a0d) — and push the repair commit, so new worktrees no longer inherit them.
+ */
+function repairPipelineArtifacts(workspacePath: string, systemBranch: string, gitContext?: GitContext | null): CheckResult {
+    const check = 'pipeline-artifacts';
+    const repair = removePipelineArtifacts(workspacePath);
+    if (repair.error) return { check, ok: false, details: `Pipeline-artifact repair skipped: ${repair.error}` };
+    if (repair.removed.length === 0) return { check, ok: true, details: 'No pipeline artifacts in the index' };
+    const push = gitPush(workspacePath, systemBranch, gitContext);
+    const pushed = !push.startsWith('Error:');
+    return {
+        check, ok: pushed, action: `committed "${REPAIR_COMMIT_SUBJECT}"`,
+        details: `Removed ${repair.removed.join(', ')} from the index — ${pushed ? `pushed to ${systemBranch}` : `push failed: ${push}`}`,
+    };
 }
 
 /** Check 8: Sync workspace with remote. */

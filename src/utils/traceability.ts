@@ -86,7 +86,7 @@ export interface TraceabilityReport {
     orphanedTasks: string[];
     /** Tasks not referenced in any assignment's taskIds. */
     unassignedTasks: string[];
-    /** Branches that are blocked/conflicted, with PR info. */
+    /** Undelivered branches (latest record blocked, open or deferred) with the real blockers (Plans 30-02/30-03). */
     blockedDeliveries: { branchName: string; prNumber: number; status: string; reason: string }[];
     /** Discrepancies between agent-claimed and runner-executed results. */
     claimedVsExecuted: ClaimedVsExecuted[];
@@ -370,19 +370,17 @@ export function buildTraceabilityReport(state: ProjectStateType): TraceabilityRe
         }
     }
 
-    // Blocked deliveries: PRs that are blocked/open with details
-    const blockedDeliveries: TraceabilityReport['blockedDeliveries'] = [];
-    for (const pr of state.pullRequests ?? []) {
-        if (pr.status === 'blocked' || pr.status === 'open') {
-            blockedDeliveries.push({
-                branchName: pr.branchName,
-                prNumber: pr.prNumber,
-                status: pr.status,
-                reason: pr.status === 'blocked' ? 'Merge conflicts or review blocked'
-                    : 'PR still open at end of run',
-            });
-        }
-    }
+    // Undelivered branches: each branch's latest record if blocked/open/deferred, with its real blockers (Plan 30-03).
+    // A deferred branch (Plan 30-02) is listed, but its criteria stay 'planned-only': unfinished, not blocked.
+    const deliveryGapReasons: Record<string, string> = {
+        blocked: 'PR blocked (no blockers recorded)', open: 'PR still open at end of run',
+        deferred: 'Branch budget ran out before every assignment ran — resumes next round',
+    };
+    const latestByBranch = new Map((state.pullRequests ?? []).map(pr => [pr.branchName, pr] as const));
+    const blockedDeliveries: TraceabilityReport['blockedDeliveries'] = [...latestByBranch.values()]
+        .filter(pr => pr.status in deliveryGapReasons)
+        .map(pr => ({ branchName: pr.branchName, prNumber: pr.prNumber, status: pr.status,
+            reason: pr.blockers?.length ? pr.blockers.join('; ') : deliveryGapReasons[pr.status] }));
 
     // Claimed vs executed: compare agent self-reports against runner data
     const claimedVsExecuted: ClaimedVsExecuted[] = [];
@@ -542,7 +540,7 @@ export function renderTraceabilityMarkdown(report: TraceabilityReport): string {
         lines.push('');
         lines.push(mdTable(
             ['Branch', 'PR', 'Status', 'Reason'],
-            blockedDeliveries.map(bd => [bd.branchName, `#${bd.prNumber}`, bd.status, bd.reason]),
+            blockedDeliveries.map(bd => [bd.branchName, bd.prNumber ? `#${bd.prNumber}` : '--', bd.status, bd.reason]),
         ));
         lines.push('');
     }

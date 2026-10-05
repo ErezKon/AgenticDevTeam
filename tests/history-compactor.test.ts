@@ -384,6 +384,14 @@ describe('compactHistory — stats', () => {
 
         expect(stats.compactedChars).toBe(stats.originalChars);
     });
+
+    it('reports the tool calls whose results it stubbed (Plan 30-07)', () => {
+        const { stubbedToolCallIds, stats } = compactHistory(buildHistory(6, 3000), { keepRecent: 3, maxChars: 100000 });
+        expect(stubbedToolCallIds).toEqual(['tc-0', 'tc-1', 'tc-2']);
+        expect(stats.toolResultsStubbed).toBe(3);
+
+        expect(compactHistory([taskMsg(), new AIMessage('Done!')]).stubbedToolCallIds).toEqual([]);
+    });
 });
 
 // ─── Immutability ────────────────────────────────────────────────────────────

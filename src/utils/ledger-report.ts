@@ -135,9 +135,14 @@ export function renderRunReport(entries: LedgerEntry[], systemName: string): str
     if (zeroFileLines.length > 0) {
         lines.push(`Agents that produced 0 files: ${zeroFileLines.join(', ')}`);
     }
-    const failedAgents = agentEntries.filter(e => e.outcome !== 'ok');
+    // Plan 30-02: a budget-capped invocation kept its valid output — it did not fail.
+    const failedAgents = agentEntries.filter(e => e.outcome !== 'ok' && e.outcome !== 'ok-budget-capped');
     if (failedAgents.length > 0) {
         lines.push(`Failed invocations: ${failedAgents.length}`);
+    }
+    const cappedAgents = agentEntries.filter(e => e.outcome === 'ok-budget-capped');
+    if (cappedAgents.length > 0) {
+        lines.push(`Budget-capped invocations (valid output kept): ${cappedAgents.length}`);
     }
     lines.push('');
 

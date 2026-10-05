@@ -21,8 +21,12 @@ const log = getLogger('[StateCollector]', 177);
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
-/** Status of a feature branch from the previous run. */
-export type PRBranchStatus = 'merged' | 'open' | 'failed-salvaged' | 'pr-creation-failed' | 'unknown';
+/**
+ * Status of a feature branch from the previous run. `resumable` (Plan 30-02): a
+ * blocked, open or deferred branch whose head is on the remote — development
+ * resumes from `origin/<branch>` and reuses its PR.
+ */
+export type PRBranchStatus = 'merged' | 'open' | 'resumable' | 'failed-salvaged' | 'pr-creation-failed' | 'unknown';
 
 /** A branch and its inferred status. */
 export interface BranchStatus {
@@ -434,7 +438,9 @@ function inferPRBranchStatus(collected: CollectedRunState): BranchStatus[] {
     if (pullRequests.length === 0) return [];
 
     const localBranches = new Set(collected.gitBranches.local);
+    const remoteBranches = new Set(collected.gitBranches.remote.map(r => r.replace(/^origin\//, '')));
     const salvageBranches = new Set<string>(collected.stateSnapshot?.salvageBranches ?? []);
+    const resumableStatuses = new Set<string>(['open', 'approved', 'escalated_open', 'blocked', 'deferred']);
 
     return pullRequests.map(pr => {
         let status: PRBranchStatus;
@@ -444,11 +450,14 @@ function inferPRBranchStatus(collected: CollectedRunState): BranchStatus[] {
         } else if (pr.status === 'pr-creation-failed') {
             // Branch code is pushed but PR creation failed — continue-run should retry PR creation
             status = 'pr-creation-failed';
+        } else if (resumableStatuses.has(pr.status) && remoteBranches.has(pr.branchName)) {
+            // Plan 30-02: checked before salvage — a salvaged blocked branch still resumes from its remote head
+            status = 'resumable';
         } else if (salvageBranches.has(pr.branchName)) {
             status = 'failed-salvaged';
         } else if (pr.status === 'open' || pr.status === 'approved' || pr.status === 'escalated_open') {
             status = 'open';
-        } else if (pr.status === 'blocked' || pr.status === 'closed') {
+        } else if (pr.status === 'blocked' || pr.status === 'closed' || pr.status === 'deferred') {
             // Check if the branch still exists locally
             status = localBranches.has(pr.branchName) ? 'open' : 'failed-salvaged';
         } else {

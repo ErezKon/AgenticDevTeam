@@ -25,7 +25,32 @@ jest.mock('../src/config', () => ({
     SHELL_ALLOW_HOST: true,
     SHELL_DEFAULT_TIMEOUT_S: 60,
     SHELL_MAX_TIMEOUT_S: 900,
+    MAX_TOOL_RESULT_CHARS: 10_000,
 }));
+
+/**
+ * Spy on both spawn paths — `bash -o pipefail -c` (execFile) where bash exists,
+ * `exec` otherwise (Plan 30-07) — and answer every spawn with success.
+ */
+function spyOnSpawns(): { exec: jest.SpyInstance; execFile: jest.SpyInstance; spawned: () => { command: string; options: any } } {
+    const cp = require('child_process');
+    const succeed = ((...args: unknown[]) => {
+        const cb = args[args.length - 1] as Function;
+        cb(null, 'ok', '');
+        return { pid: 1 };
+    }) as any;
+    const exec = jest.spyOn(cp, 'exec').mockImplementation(succeed);
+    const execFile = jest.spyOn(cp, 'execFile').mockImplementation(succeed);
+    const spawned = () => {
+        if (execFile.mock.calls.length > 0) {
+            const [, args, options] = execFile.mock.calls[0];
+            return { command: (args as string[])[(args as string[]).length - 1], options };
+        }
+        const [command, options] = exec.mock.calls[0];
+        return { command, options };
+    };
+    return { exec, execFile, spawned };
+}
 
 // ─── Test 1: isDeniedCommand denylist table ──────────────────────────────────
 
@@ -81,89 +106,70 @@ describe('isDeniedCommand', () => {
 // ─── Test 2: Timeout clamping ────────────────────────────────────────────────
 
 describe('timeout clamping', () => {
-    let execSpy: jest.SpyInstance;
+    let spies: ReturnType<typeof spyOnSpawns>;
 
     beforeEach(() => {
         _resetHostWarning();
-        // Spy on child_process.exec to capture actual timeout values
-        const cp = require('child_process');
-        execSpy = jest.spyOn(cp, 'exec').mockImplementation(
-            ((...args: unknown[]) => {
-                const cb = args[args.length - 1] as Function;
-                cb(null, 'ok', '');
-                return { pid: 1 };
-            }) as any,
-        );
+        spies = spyOnSpawns();
     });
 
     afterEach(() => {
-        execSpy.mockRestore();
+        spies.exec.mockRestore();
+        spies.execFile.mockRestore();
     });
 
     it('clamps excessive timeout to SHELL_MAX_TIMEOUT_S', async () => {
         const shellTool = createShellTool('/tmp/test-workspace');
         await shellTool.invoke({ command: 'echo test', timeoutSeconds: 99999 });
 
-        expect(execSpy).toHaveBeenCalled();
-        const callOpts = execSpy.mock.calls[0][1];
         // Should be clamped to 900 * 1000 = 900000 ms
-        expect(callOpts.timeout).toBe(900 * 1000);
+        expect(spies.spawned().options.timeout).toBe(900 * 1000);
     });
 
     it('uses default timeout when none specified', async () => {
         const shellTool = createShellTool('/tmp/test-workspace');
         await shellTool.invoke({ command: 'echo test' });
 
-        expect(execSpy).toHaveBeenCalled();
-        const callOpts = execSpy.mock.calls[0][1];
         // Default is 60 * 1000 = 60000 ms
-        expect(callOpts.timeout).toBe(60 * 1000);
+        expect(spies.spawned().options.timeout).toBe(60 * 1000);
     });
 
     it('uses provided timeout when within range', async () => {
         const shellTool = createShellTool('/tmp/test-workspace');
         await shellTool.invoke({ command: 'echo test', timeoutSeconds: 120 });
 
-        expect(execSpy).toHaveBeenCalled();
-        const callOpts = execSpy.mock.calls[0][1];
-        expect(callOpts.timeout).toBe(120 * 1000);
+        expect(spies.spawned().options.timeout).toBe(120 * 1000);
     });
 });
 
 // ─── Test 3: Denied command never reaches exec ──────────────────────────────
 
 describe('denied command never reaches exec', () => {
-    let execSpy: jest.SpyInstance;
+    let spies: ReturnType<typeof spyOnSpawns>;
 
     beforeEach(() => {
         _resetHostWarning();
-        const cp = require('child_process');
-        execSpy = jest.spyOn(cp, 'exec').mockImplementation(
-            ((...args: unknown[]) => {
-                const cb = args[args.length - 1] as Function;
-                cb(null, 'ok', '');
-                return { pid: 1 };
-            }) as any,
-        );
+        spies = spyOnSpawns();
     });
 
     afterEach(() => {
-        execSpy.mockRestore();
+        spies.exec.mockRestore();
+        spies.execFile.mockRestore();
     });
 
-    it('returns error string and does not call exec for denied command', async () => {
+    it('returns error string and does not spawn anything for a denied command', async () => {
         const shellTool = createShellTool('/tmp/test-workspace');
         const result = await shellTool.invoke({ command: 'rm -rf /' });
 
         expect(result).toContain('denied');
-        expect(execSpy).not.toHaveBeenCalled();
+        expect(spies.exec).not.toHaveBeenCalled();
+        expect(spies.execFile).not.toHaveBeenCalled();
     });
 
-    it('calls exec for allowed command', async () => {
+    it('runs an allowed command verbatim', async () => {
         const shellTool = createShellTool('/tmp/test-workspace');
         await shellTool.invoke({ command: 'npm test' });
 
-        expect(execSpy).toHaveBeenCalled();
-        expect(execSpy.mock.calls[0][0]).toBe('npm test');
+        expect(spies.spawned().command).toBe('npm test');
     });
 });

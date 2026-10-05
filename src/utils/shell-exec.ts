@@ -9,8 +9,9 @@
  * to stop blocking the Node.js event loop during gate execution.
  *
  * Also the single home of the traced `child_process` primitives
- * (`execSync`, `execFileSync`, `execFileAsync`, `execCapture`): every child
- * process the pipeline spawns goes through them so DEBUG_MODE can record it.
+ * (`execSync`, `execFileSync`, `execFileAsync`, `execCapture`, `execFileCapture`):
+ * every child process the pipeline spawns goes through them so DEBUG_MODE can
+ * record it.
  */
 import {
     execSync as cpExecSync,
@@ -45,6 +46,22 @@ export function safeChildEnv(extra: Record<string, string> = {}): NodeJS.Process
     return { ...env, ...extra };
 }
 
+/**
+ * Environment for commands whose output a model reads (Plan 30-07): CI mode, no
+ * colour, no npm funding/audit/update notices, no Angular CLI analytics prompt.
+ * Both NO_COLOR and FORCE_COLOR=0, because tools honour one or the other — and a
+ * FORCE_COLOR of 0 does not trigger Node's "NO_COLOR is ignored" warning.
+ */
+export const NON_INTERACTIVE_ENV: Readonly<Record<string, string>> = {
+    CI: '1',
+    NO_COLOR: '1',
+    FORCE_COLOR: '0',
+    NG_CLI_ANALYTICS: 'false',
+    NPM_CONFIG_FUND: 'false',
+    NPM_CONFIG_AUDIT: 'false',
+    NPM_CONFIG_UPDATE_NOTIFIER: 'false',
+};
+
 // ─── Traced child-process primitives ────────────────────────────────────────
 //
 // Drop-in replacements for the `child_process` functions. With DEBUG_MODE off
@@ -68,10 +85,11 @@ function firstToken(command: string): string {
     return path.basename(token.replace(/^["']|["']$/g, ''));
 }
 
-/** Program name for an execFile call — looks through `sh -c "<script>"`. */
+/** Program name for an execFile call — looks through `sh -c "<script>"` (and `bash -o pipefail -c …`). */
 function programOf(file: string, args: readonly unknown[]): string {
     const base = path.basename(file);
-    if (/^(?:ba|z|da)?sh$/.test(base) && args[0] === '-c' && typeof args[1] === 'string') return firstToken(args[1]);
+    const script = args.indexOf('-c') + 1;
+    if (/^(?:ba|z|da)?sh$/.test(base) && script > 0 && typeof args[script] === 'string') return firstToken(args[script] as string);
     return base;
 }
 
@@ -151,28 +169,50 @@ export function execFileAsync(
     }, call);
 }
 
+/** Output and exit code of a finished command. */
+export interface CaptureResult {
+    stdout: string;
+    stderr: string;
+    exitCode: number;
+}
+
+/** An exec/execFile callback as a CaptureResult: a non-zero exit, a kill, a timeout or a spawn error exits non-zero. */
+function captured(error: { code?: unknown } | null, stdout: string | Buffer | undefined, stderr: string | Buffer | undefined): CaptureResult {
+    return {
+        stdout: stdout?.toString() ?? '',
+        stderr: stderr?.toString() ?? '',
+        exitCode: typeof error?.code === 'number' ? error.code : (error ? 1 : 0),
+    };
+}
+
+const captureTrace = (r: CaptureResult) =>
+    ({ exitCode: r.exitCode, ok: r.exitCode === 0, stdout: outputText(r.stdout), stderr: outputText(r.stderr) });
+
 /**
  * Run a shell command via `child_process.exec` and resolve — never reject —
  * with its output and exit code (non-zero on failure or timeout). Traced.
  */
-export function execCapture(
-    command: string,
-    options: ExecOptions,
-): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-    const call = () => new Promise<{ stdout: string; stderr: string; exitCode: number }>((resolve) => {
-        cpExec(command, options, (error, stdout, stderr) => {
-            resolve({
-                stdout: stdout?.toString() ?? '',
-                stderr: stderr?.toString() ?? '',
-                exitCode: error?.code ?? (error ? 1 : 0),
-            });
-        });
+export function execCapture(command: string, options: ExecOptions): Promise<CaptureResult> {
+    const call = () => new Promise<CaptureResult>((resolve) => {
+        cpExec(command, options, (error, stdout, stderr) => resolve(captured(error, stdout, stderr)));
+    });
+    if (!isDebugMode()) return call();
+    return traceAsync({ fields: execFields(firstToken(command), command, options), start: true, onResult: captureTrace }, call);
+}
+
+/**
+ * `execCapture` for a program and its arguments, which are not parsed by a shell
+ * — the shell tool runs `bash -o pipefail -c <command>` through it (Plan 30-07).
+ */
+export function execFileCapture(file: string, args: readonly string[], options: ExecFileOptions): Promise<CaptureResult> {
+    const call = () => new Promise<CaptureResult>((resolve) => {
+        cpExecFile(file, args, options, (error, stdout, stderr) => resolve(captured(error, stdout, stderr)));
     });
     if (!isDebugMode()) return call();
     return traceAsync({
-        fields: execFields(firstToken(command), command, options),
+        fields: { ...execFields(programOf(file, args), [file, ...args].join(' '), options), args: [...args] },
         start: true,
-        onResult: (r) => ({ exitCode: r.exitCode, ok: r.exitCode === 0, stdout: outputText(r.stdout), stderr: outputText(r.stderr) }),
+        onResult: captureTrace,
     }, call);
 }
 

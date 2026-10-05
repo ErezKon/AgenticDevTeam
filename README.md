@@ -12,6 +12,7 @@
 - [Maintaining Existing Projects](#maintaining-existing-projects)
 - [Agent Roster](#agent-roster)
 - [Run Modes](#run-modes)
+- [QA Test Execution](#qa-test-execution)
 - [Bug-Fix Loop](#bug-fix-loop)
 - [Git Branching & PR Workflow](#git-branching--pr-workflow)
 - [Multi-Repo Project Targeting](#multi-repo-project-targeting)
@@ -77,7 +78,7 @@ graph TB
     end
 
     subgraph Development Phase
-        DISP[Dispatcher<br/>Topo-sort + Concurrency]
+        DISP[Dispatcher<br/>Branch DAG + Concurrency]
         PFE[Principal FE]
         PBE[Principal BE]
         SFE[Senior FE]
@@ -161,8 +162,8 @@ flowchart LR
 | 3 | **Product Manager** | `productManagerNode` | Periodic snapshot + budget check → convert architecture + epics into user stories with acceptance criteria and granular tasks |
 | 4 | **DBA** | `dbaNode` | Periodic snapshot + budget check → design database — entities, relationships, indexes, migration scripts, and ERD diagram |
 | 5 | **Team Leader** | `teamLeaderNode` | Periodic snapshot + budget check → assign tasks to developers based on rank, specialty, dependencies, and complexity |
-| 6 | **Development** | `developmentNode` | Periodic snapshot + budget check → fan-out assignments to developer agents with topological sorting and concurrency control. Provider failures stop dispatch and set `_stopReason` for continue-run |
-| 7 | **QA** | `qaNode` | Periodic snapshot + budget check → QA Lead creates test plan → QA Unit writes tests on a PR branch; the conductor runs them via test-runner parsers and parses the output independently → QA E2E drives Playwright browser tests |
+| 6 | **Development** | `developmentNode` | Periodic snapshot + budget check → plan the round's branch DAG (scaffold first, each branch after the branches it depends on, see [Dispatch Order](#dispatch-order)) and run every branch through the PR workflow. A branch that does not merge skips only its dependents (`DISPATCH_HALT_POLICY=dependents`). Provider failures stop dispatch and set `_stopReason` for continue-run |
+| 7 | **QA** | `qaNode` | Periodic snapshot + budget check → QA Lead creates test plan → QA Unit writes tests on a PR branch; the conductor runs them via test-runner parsers and parses the output independently (see [QA Test Execution](#qa-test-execution)) → QA E2E drives Playwright browser tests |
 | 8 | **Bug-fix Triage** | `bugfixTriageNode` | Periodic snapshot + budget check → Team Leader re-assigns critical/major bugs to developers (loops back to Development) |
 | 9 | **DevOps** | `devopsNode` | Periodic snapshot + budget check → generate Dockerfiles, docker-compose, K8s manifests; build images; run containers; health-check |
 | 10 | **Finalize** | `finalizeNode` | Tear down containers, write summary, token report (HTML + JSON), traceability matrix, state snapshot, run manifest. Uses `_stopReason` for `'budget-exhausted'` manifest status |
@@ -313,6 +314,25 @@ sequenceDiagram
 
 ---
 
+## QA Test Execution
+
+QA's verdict comes from running the product's test suite, never from the QA agent's own report. QA reports only failures it actually measured:
+
+- **Supported runners:** Jest, Karma/Jasmine, Vitest, Mocha, pytest, Maven, Gradle, Go, dotnet, Rust. Jest is used only when the project really has it; a runner the pipeline cannot ask for a machine-readable report is `unknown`. Its exit code and output summary are the result, and per-test checks are skipped.
+- **Karma (Angular `ng test`)** runs through a wrapper config written next to the run's test reports, never into the repository. The wrapper loads the project's karma config, forces a single run and adds a JSON reporter (`karma-results.json`). If that file is missing, the totals and the failed specs are read from the output.
+- **Dependencies are installed first** when `node_modules` is missing or stale. Exit code 127 is reported as `command not found: <bin> — dependencies not installed?`.
+- **Runner output is rendered** the way a terminal shows it: progress redraws, colours and noise are removed before the output reaches a log, a bug or an agent. In the claudeopus5 run, 16 kB of Karma output became 1.3 kB.
+- **No derived false bugs:**
+  - A broken runner produces one `QA-runner-error` bug. It carries each command and its output.
+  - Per-story checks apply only to stories with merged work, and only when test case names are known.
+  - The AC coverage gate is `inconclusive` when the runner failed.
+  - A blocked PR produces one bug with its real blockers.
+- **Product verification runs after the build.** The smoke test serves the directory that holds `index.html` (for Angular, `dist/<project>/browser`). It explains a 404 instead of timing out.
+- **Salvaged worktrees are never scanned** as product roots or by the secret scan. Since Plan 30-04 they live in `.worktrees/_failed/`, and only when their work is not on the remote. The old location was `.worktrees-failed/`.
+- **Every QA report carries its bug-fix iteration** (Plan 30-05). Without it, executed test failures were ignored from the first bug-fix round on.
+
+---
+
 ## Bug-Fix Loop
 
 After QA completes, if there are test failures:
@@ -330,6 +350,13 @@ flowchart TD
 - The Team Leader creates new assignments targeting the specific bugs
 - Only critical and major severity bugs trigger the loop
 - Bounded by `MAX_BUGFIX_ITERATIONS` (default: 3) to prevent infinite loops
+- **The Team Leader gets only actionable bugs** (Plan 30-05). Triage reads what the latest evaluation reported, so a bug that is no longer reported is not triaged again, and a regression is. It drops bugs about stories whose assigned work has not merged yet, because that work is dispatched again anyway. It lets a root cause absorb what follows from it: a failed test runner absorbs the "untested" bugs, and an empty build absorbs the failed smoke test. A blocked PR becomes one bug. In claudeopus5's first triage, 63 bugs came down to 3.
+- **The Team Leader sees what is really there:** a compact bug table, each undelivered branch with its blockers, final-round review comments and failing gate step, and the system branch's real file list. A blocked PR gets one fix assignment on its own branch.
+- **The loop stops when it stops merging.** The run is unrecoverable (`RUN_FAIL_POLICY=halt` then finalizes) in any of these cases:
+  - `UNRECOVERABLE_ZERO_ROUNDS` rounds merged no PR. Unmerged file changes are not progress.
+  - A branch stayed unmerged for two rounds (abandoned), and all remaining work waits for it. An abandoned branch and its dependents are not dispatched again.
+  - Two triage rounds see the same open bugs.
+  - Three bugs that were worked on twice are still open. A bug's attempt count grows only when an assignment working on it actually ran.
 
 ---
 
@@ -363,6 +390,15 @@ flowchart LR
 - **Shared branches** — multiple agents on the same feature share one branch
 - **TDD enforcement** — developers write tests first (red), implement (green), then refactor
 - **PR creation resilience** — transient GitHub failures (5xx, network errors) are retried up to 3 times with exponential backoff. If all retries fail, the run stops gracefully with a `pr-creation-failed` PR entry persisted in state — continue-run retries just the PR creation without re-running dev agents
+- **Honest branch lifecycle (Plan 30-02)** — a PR claims only the assignments whose agent actually ran. When a branch's budget runs out (wall cap `MAX_BRANCH_WALL_MS + MAX_BRANCH_WALL_PER_ASSIGNMENT_MS × (assignments − 1)`, or `MAX_BRANCH_COST_USD`), the remaining assignments are **deferred**: the executed work is pushed, the PR record gets status `deferred`, and no gates, PR or review run
+- **Resumable re-dispatch** — a branch that is already on the remote (blocked, open or deferred) resumes from `origin/<branch>` in the next round or continue-run: assignments its durable commits show as done are skipped, the latest system branch is merged in first, and the existing PR is reused
+- **Verified pushes** — every push is checked; a non-fast-forward rejection is integrated (rebase, merge as fallback) and retried once. A branch that still cannot be pushed gets no PR, review or merge (`PR-PUSH-REJECTED-*`, `branch:push-failed` event)
+- **Fresh merge evidence** — gates re-run when review fixes, escalation or the strong fixer moved HEAD after the last gate run, and the merge is blocked ("remote head stale") unless the PR head GitHub would merge is the commit that was gated and reviewed
+- **Valid output is never discarded** — an agent that crosses `MAX_INVOCATION_INPUT_TOKENS` after producing valid output keeps it (`ok-budget-capped` in the ledger); only an invocation with no valid output is stopped
+- **Soft landing (Plan 30-06)** — once an invocation has spent `INVOCATION_SOFT_LANDING_EFFECTIVE_TOKENS` (350k) effective input tokens (cached tokens weighted by their price), its next model call can use no tool: the agent returns its final JSON, the output is kept as budget-capped and nothing respawns. The strong fixer lands at `STRONG_FIXER_MAX_INPUT_TOKENS` (250k)
+- **Dependencies installed once per branch (Plan 30-07)** — the conductor runs the install when it creates a worktree; the agents are told the dependencies are installed instead of each running `npm install`
+- **Pipeline internals never reach the product repo (Plan 30-04)** — every commit is staged by one helper. It never stages `.worktrees/`, `.worktrees-failed/`, `.conventions/` or `.agent/`, and it refuses nested git repositories (gitlinks) that `.gitmodules` does not declare. It never completes a merge with a file that still has conflict markers. Intake, the development node and the PR workflow all write the same `.gitignore` block, and only when it changes. A repository an earlier run polluted is repaired at intake and on continue-run.
+- **Blocked PRs carry their reasons (Plan 30-05)** — an unmerged PR records its blockers and its first failing gate step, with the rendered output. Unresolvable base conflicts are `blocked` too. Bug-fix triage shows the Team Leader all of it.
 
 ### Review Rules
 
@@ -371,6 +407,17 @@ flowchart LR
 | Junior | 2 Senior developers |
 | Senior | 2 Principal developers |
 | Principal | 2 other Principal developers |
+
+### Dispatch Order
+
+Before any branch runs, the dispatcher builds a plan (`dispatch-plan.ts`) and records it as a `dispatch:plan` event and a `dispatch-plan` ledger entry:
+
+- **The scaffold is a branch name.** Only `<slug>/chore/scaffold` is the scaffold; `taskType: 'chore'` on a feature branch is ordinary feature work. The scaffold runs first and every other branch waits for it.
+- **Explicit branches win.** The Team Leader's `branchName` is honoured. An assignment without one follows the first non-scaffold branch of its story. Work is never moved onto or off the scaffold.
+- **Branches form a DAG.** A branch starts only after every branch it depends on (through `dependsOn`) has finished; independent branches share a layer, and same-layer branches that own a common module are serialised.
+- **Wiring work.** Entry-point / wiring work that needs only the scaffold is a *bootstrap* branch that features wait for. Wiring that depends on feature work (e.g. a FINAL INTEGRATION assignment) is a *finalizer*: nothing waits for it and it runs last — put it on its own `<slug>/feature/integration` branch.
+- **No cycles.** A barrier edge that would close a cycle is skipped; a cycle the Team Leader wrote is broken deterministically, logged as an ERROR and reported by plan coverage as a critical `dependency-cycle` finding.
+- **Failures.** With `DISPATCH_HALT_POLICY=dependents` (default) a branch that does not merge skips only the branches that depend on it (their assignments stay pending, `dispatch:skipped-dependents`); a failed scaffold therefore still blocks everything. `strict` halts all remaining dispatch, `scaffold-only` halts only for the scaffold, `off` never halts.
 
 ### Required Configuration
 
@@ -500,7 +547,7 @@ flowchart LR
 1. **Collect** all artifacts from the stopped run's output directory (`state.json`, `run-manifest.json`, `ledger.jsonl`, token usage, git state). Stopped runs are listed with their `stopReason` so the user can see *why* the run stopped (e.g. `budget-exhausted:cost`, `provider-billing`)
 2. **Reconstruct** a valid `ProjectState` from the collected artifacts, rehydrating secrets (tokens, keys) from the current `.env`
 3. **Resolve** which phase to resume from — the first phase without evidence of completion
-4. **Reconcile** the workspace git state — remove stale worktrees, lock files, branches; sync with remote
+4. **Reconcile** the workspace git state — remove stale worktrees, lock files, branches; sync with remote; remove pipeline worktrees an earlier run committed (Plan 30-04: one `chore: remove pipeline worktree artifacts` commit, pushed to the system branch)
 5. **Resume** the pipeline from the resolved phase — `cancelled` and `_stopReason` are cleared; completed nodes skip automatically
 
 ### Reconstruction Confidence
@@ -568,7 +615,7 @@ When a run stops due to budget exhaustion or a provider failure:
 ### Limitations
 
 - **Workspace must exist on disk.** If the generated project directory was deleted, continuation is not possible (fatal error with clear message).
-- **Partial development recovery.** Completed assignments are skipped; pending assignments are re-dispatched. Stale worktrees and branches are cleaned up automatically.
+- **Partial development recovery.** Completed assignments are skipped; pending assignments are re-dispatched. Stale worktrees and branches are cleaned up automatically. Blocked, open and deferred branches whose head is still on the remote are `resumable`: their remote branch and PR are kept, and development resumes from `origin/<branch>` without re-running the assignments that already executed (Plan 30-02).
 - **Token budget carries forward.** The continued run accounts for tokens already spent in the original run.
 
 ---
@@ -587,6 +634,8 @@ In a ReAct agent loop, every tool-call step re-sends the entire conversation his
 
 Every tool result is truncated to `MAX_TOOL_RESULT_CHARS` (default: 10,000) using a head/tail split that preserves both the beginning and end of the output. Shell output uses a **tail-weighted split** (20% head, 80% tail) because build/test failures print at the end. Truncated results include a marker so agents know content was elided and can request specific regions via `read_file` with `offset`/`limit`.
 
+Plan 30-07: before that, shell output is **rendered the way a terminal shows it** (progress redraws replayed, escape codes dropped — one 16 kB Karma run renders to ~1.3 kB), and a long test or build run is cut to its failure blocks and summary lines. Commands run in `bash -o pipefail` (so `npm test | tail -20` reports the tests' exit code) with a non-interactive environment: `CI=1`, no colour, no npm funding/audit/update notices, no Angular CLI analytics prompt. Quality-gate output is stored the same way, so repair prompts, PR bodies and bugs carry the failures instead of the last 2,000 raw characters.
+
 #### 2. ReAct History Compaction (`wrapModelCall` middleware)
 
 Before each LLM call, a `history-compaction` middleware compacts the message history:
@@ -598,6 +647,8 @@ Before each LLM call, a `history-compaction` middleware compacts the message his
 
 The compaction operates on a **copy** of the message history -- the durable `messages` state used by checkpointing, token extraction, and output parsing is untouched.
 
+**Cache-stable epochs (Plan 30-06, `HISTORY_COMPACTION_MODE=epoch`, default).** Recompacting on every call changed the prompt prefix every turn, so the history was never read from Anthropic's prompt cache. Now the compacted view is frozen and only appended to — each request extends the previous one byte for byte — until `HISTORY_EPOCH_MAX_TURNS` (8) turns were appended or the view exceeds `HISTORY_MAX_CHARS`; then it is recompacted once, down to `HISTORY_EPOCH_TARGET_CHARS` (60 % of the ceiling). Together with Anthropic's automatic caching (`ANTHROPIC_AUTO_CACHE`), the conversation is billed at the cache-read rate. A read whose result the compactor stubbed can be read again; a repeat of a read still visible in the history gets a one-line pointer instead of a second copy.
+
 #### 3. Compact Personas
 
 Developer personas are reduced from ~7,000 chars to ~2,500 chars by:
@@ -608,7 +659,7 @@ Developer personas are reduced from ~7,000 chars to ~2,500 chars by:
 
 #### 4. Conventions Digest
 
-Instead of agents reading `.conventions/*.md` files through the tool loop (where each ~11K-char file is replayed for the rest of the loop), a compact digest of imperative rules (`MUST`, `NEVER`, `ALWAYS`) is injected directly into the prompt (~1,500 chars). Full convention files remain on disk as an escape hatch.
+Instead of agents reading `.conventions/*.md` files through the tool loop (where each ~11K-char file is replayed for the rest of the loop), a compact digest of imperative rules (`MUST`, `NEVER`, `ALWAYS`, `Don't`) is injected directly into the prompt (at most ~1,500 chars). Plan 30-07: only rule lines are kept — no headings, nothing from code examples — and when the files have none, only the pointer to the full files remains. Full convention files remain on disk as an escape hatch.
 
 #### 5. Git Tool Removal
 
@@ -646,6 +697,9 @@ All compaction features default to **on**. To disable any feature, set its envir
 | `HISTORY_KEEP_RECENT_TURNS` | `3` | Increase to keep more whole model turns verbatim |
 | `HISTORY_KEEP_RECENT_WRITE_ARGS` | `2` | Increase to keep more recent write arguments un-elided |
 | `HISTORY_MAX_CHARS` | `60000` | Raise the hard ceiling for compacted history |
+| `HISTORY_COMPACTION_MODE` | `epoch` | `sliding` recompacts on every call (the pre-Plan-30-06 behaviour; the history is never cached) |
+| `HISTORY_EPOCH_MAX_TURNS` | `8` | Turns appended to a frozen view before it is recompacted |
+| `HISTORY_EPOCH_TARGET_CHARS` | `36000` | Character target of an epoch recompaction (0.6 × `HISTORY_MAX_CHARS`) |
 | `CONVENTIONS_INLINE_DIGEST` | `true` | Revert to agents reading convention files via `read_file` |
 | `DEV_GIT_TOOLS_ENABLED` | `false` | Set `true` to restore git tools for dev agents |
 | `PERSONA_COMPACT` | `true` | Revert to the verbose ~7,000-char persona |
@@ -656,6 +710,8 @@ All compaction features default to **on**. To disable any feature, set its envir
 ### Measurement
 
 The finalize summary includes a `History Compaction` block reporting total chars stubbed, tool results stubbed, and write args stubbed. The HTML token report includes an **Invocation Efficiency** table showing per-agent growth factor (last-call input / first-call input), average calls per invocation, and respawn counts. The target growth factor after compaction is under 2.0x (baseline was ~4.5x).
+
+Plan 30-06 made the report's money honest: **List price** is every input token at the full rate and **Billed cost** applies the cache multipliers (the savings card is the difference — the claudeopus5 report showed $1.10 of savings where the run had saved about $12 on its priced models), each agent row is priced with its own cache tokens and model, and a model with no price is named in a warning instead of silently costing $0. New cards show **Effective Input** (cache reads × 0.1, writes × 1.25), the **median uncached input per call**, **tokens spent on branches that did not merge** and the number of **budget-capped invocations**; two tables attribute tokens to each **development round** and each **branch** (with its latest outcome). The branch cost cap (`MAX_BRANCH_COST_USD`), the run diagnosis and the finalize usage report use the billed cost too.
 
 ---
 
@@ -698,11 +754,11 @@ Tier 1 (`llmOutput`) wins when present, so providers that populate both are neve
 
 ### Runaway detection
 
-`developmentNode` records one `DispatchRound` per round counting **merged** PRs only (`PR-SKIPPED-*` placeholders are recorded for every no-commit branch and are not progress). `detectUnrecoverable()` is evaluated at the top of `bugfixTriageNode` as well as in the acceptance gate, so a QA → triage → development loop that produces nothing halts after `UNRECOVERABLE_ZERO_ROUNDS` (default 2) rounds under `RUN_FAIL_POLICY=halt`.
+`developmentNode` records one `DispatchRound` per round: **merged** PRs (`PR-SKIPPED-*` placeholders, recorded for every no-commit branch, never count), assignments run for the first time, and deferred assignments. File changes that did not merge are not progress (Plan 30-05). `detectUnrecoverable()` (`conductor/unrecoverable.ts`) is evaluated at the top of `bugfixTriageNode` and in the acceptance gate. Under `RUN_FAIL_POLICY=halt`, a QA → triage → development loop stops when it is no longer merging work. That means `UNRECOVERABLE_ZERO_ROUNDS` (default 2) rounds without a merged PR, an abandoned branch that all remaining work waits for, the same open bugs in two triage rounds, or three bugs still open after two real attempts.
 
 ### Provider failure resilience
 
-Provider errors during development dispatch are classified by severity. Fatal errors (`auth`, `model-not-found`) stop immediately. Recoverable errors (`billing`, `quota`) trigger `awaitProviderRecovery()`, which probes the provider's `/models` endpoint with exponential backoff via `createProviderProbe()`. If recovery fails, the dispatcher sets `providerFailureKind` on its result, `developmentNode` translates it to `{ cancelled: true, _stopReason }`, and the pipeline finishes gracefully via `finalizeNode`. The run can be continued once the provider issue is resolved.
+Provider errors during development dispatch are classified by severity. Fatal errors (`auth`, `model-not-found`) stop immediately. Recoverable errors (`billing`, `quota`) trigger `awaitProviderRecovery()`, which probes the provider's `/models` endpoint with exponential backoff via `createProviderProbe()`. If recovery fails, the dispatcher stops with `stopReason: 'provider-<kind>'`, `developmentNode` translates it to `{ cancelled: true, _stopReason }`, and the pipeline finishes gracefully via `finalizeNode`. The run can be continued once the provider issue is resolved.
 
 ---
 
@@ -772,7 +828,9 @@ AgenticDevTeam/
 │   │   │   ├── base-schemas.ts             # 20+ Zod schemas for all domain entities
 │   │   │   ├── persona.ts                  # Developer persona prompt builder (compact + verbose)
 │   │   │   ├── history-compactor.ts        # ReAct history compaction (middleware)
-│   │   │   ├── tool-loop-guard.ts          # Tool-call ceiling + isCeilingReached for respawn
+│   │   │   ├── history-epoch.ts            # Cache-stable epoch compaction (Plan 30-06)
+│   │   │   ├── tool-loop-guard.ts          # Tool-call ceiling + isCeilingReached for respawn; soft-landing termination
+│   │   │   ├── branch-read-cache.ts        # Per-agent-instance read cache, visibility-aware (Plan 30-07)
 │   │   │   └── artifact.ts                 # Mission report writer
 │   │   ├── registry.ts                     # Master 20-agent registry
 │   │   ├── codebase-analyzer/              # Codebase Analyzer agent (maintain mode)
@@ -784,7 +842,8 @@ AgenticDevTeam/
 │   │   │   ├── registry.ts                 # 11 developer agent definitions
 │   │   │   ├── dev-agent.builder.ts        # Dev agent constructor (+ git tools)
 │   │   │   ├── reviewer-agent.builder.ts   # Code reviewer agent constructor
-│   │   │   ├── dispatcher.ts               # Branch-grouped fan-out with PR workflow
+│   │   │   ├── dispatch-plan.ts            # Pure planner: branches, kinds, branch DAG, cycle breaking
+│   │   │   ├── dispatcher.ts               # Runs the plan layer by layer through the PR workflow
 │   │   │   └── schemas/
 │   │   │       ├── dev-output.schema.ts    # Developer agent output schema
 │   │   │       └── review-output.schema.ts # Reviewer agent output schema
@@ -795,7 +854,7 @@ AgenticDevTeam/
 │   │   ├── _shared/truncate.ts             # Head/tail tool-result truncation
 │   │   ├── fs/workspace-tools.ts           # Sandboxed read/write/edit/list/search (+offset/limit)
 │   │   ├── git/git-tools.ts               # Git CLI tools (branch, commit, push, diff)
-│   │   ├── shell/shell-tools.ts            # Command execution in workspace
+│   │   ├── shell/shell-tools.ts            # Command execution in workspace (bash -o pipefail, rendered output)
 │   │   ├── diagram/diagram-tools.ts        # Mermaid label sanitization
 │   │   ├── requirements/parse-requirements.ts  # .md/.txt/.pdf/.docx parser
 │   │   └── mcp/playwright-mcp.ts           # Playwright MCP client
@@ -816,7 +875,9 @@ AgenticDevTeam/
 │   │   ├── token-callback.ts               # LangChain callback for token recording (two-tier provider lookup)
 │   │   ├── token-usage-extractor.ts        # Shared usage normalisation + per-invocation aggregation
 │   │   ├── token-report.ts                 # HTML + JSON token usage report (+ Invocation Efficiency table)
-│   │   ├── cost.ts                         # USD cost estimation per model
+│   │   ├── token-report-sections.ts        # Report totals (list vs billed, effective input), round/branch tables (Plan 30-06)
+│   │   ├── cost.ts                         # USD cost per model: billed (cache-aware) and list price; prefix-matched pricing
+│   │   ├── model-id.ts                     # Model-id prefix matching (pricing, cache minimums)
 │   │   ├── run-budget.ts                   # Run budget tracking (token/cost/wall-clock limits, 4 levels)
 │   │   ├── run-snapshot.ts                 # state.json + run-manifest.json writer + writePeriodicSnapshot()
 │   │   ├── run-ledger.ts                   # Append-only JSONL evidence ledger for post-mortem diagnostics
@@ -837,8 +898,11 @@ AgenticDevTeam/
 │   │   ├── traceability.ts                 # Requirements traceability matrix
 │   │   ├── codebase-analysis-writer.ts     # Write analysis markdown to project + outputs
 │   │   ├── repo-contract-writer.ts         # Write, read, and render .agent/repo-contract.json + Markdown
-│   │   ├── fs-walk.ts                      # Shared filesystem walker (walkDir, collectFiles, isTestFile)
+│   │   ├── fs-walk.ts                      # Shared filesystem walker (walkDir, collectFiles, isTestFile, PRUNE_DIRS)
+│   │   ├── terminal-output.ts              # Render captured runner output as a terminal shows it + summarise for bugs
+│   │   ├── angular-workspace.ts            # angular.json target lookup (test builder, build outputPath)
 │   │   ├── source-graph.ts                 # Import extraction, graph building, transitive reachability
+│   │   ├── dependency-graph.ts             # Wait-for graphs: wouldCreateCycle, deterministic cycle breaking
 │   │   ├── markdown-table.ts               # Shared mdTable() + mdSection() with pipe-escaping
 │   │   ├── shell-exec.ts                   # Shared ExecFn, safeChildEnv, defaultExec, isToolAvailable + traced child_process drop-ins (the only child_process importer)
 │   │   ├── branch-naming.ts                # Canonical slugify, systemBranch, featureBranch, isSystemBranch
@@ -1056,6 +1120,10 @@ Connect to `ws://localhost:3000/ws` for real-time updates. Events are grouped by
 | `pr:conflict` | `branch, baseBranch` | Merge conflict detected |
 | `pr:strong-fixer` | `prNumber, model, branch` | Strong fixer pass started |
 | `pr:salvage` | `branch, salvageDir, reason` | Branch salvaged to worktree |
+| **Dispatch** | | |
+| `dispatch:plan` | `branches, order, layers, skippedEdges, brokenEdges, warnings` | The round's branch DAG is planned |
+| `dispatch:skipped-dependents` | `branchName, reason, dependents` | A branch did not merge; its dependents are skipped this round |
+| `dispatch:halted` | `branchName, status, policy` | `DISPATCH_HALT_POLICY` stopped all remaining dispatch |
 | **Gates** | | |
 | `gate:result` | `gate, passed, ...` | A quality/assembly/product gate finishes |
 | `acceptance:result` | `status, blockers` | Acceptance gate result |
@@ -1066,7 +1134,9 @@ Connect to `ws://localhost:3000/ws` for real-time updates. Events are grouped by
 | `transcript` | `agentId, phase, message` | Agent transcript message |
 | `traceability:update` | `stories, coverage` | Test traceability updated |
 | `e2e:status` | `status, mode?` | E2E test result |
-| `branch:pushed` | `branchName, commit` | A branch was pushed |
+| `branch:pushed` | `branchName, commit` | A branch was pushed (only after the push was verified) |
+| `branch:push-failed` | `branchName, error` | A push was still rejected after integrating the remote branch (Plan 30-02, priority) |
+| `branch:budget-exceeded` | `branchName, reason, checkpoint, deferredAssignmentIds?` | The branch budget ran out; unstarted assignments are deferred |
 
 ---
 
@@ -1125,13 +1195,15 @@ npm run build
 | `GOOGLE_BASE_URL` | — | Optional base URL override for Google (proxy support) |
 | `LLM_PROVIDER_DETECTION` | `auto` | Provider detection: `auto` (detect from model name) or `openai` (force all through OpenAI endpoint) |
 | **Anthropic Prompt Caching (Plan 22)** | | |
-| `ANTHROPIC_PROMPT_CACHE_ENABLED` | `true` | Place `cache_control` breakpoints on the system prompt (also covers tool schemas), the task message and the stable history prefix. Without it the fixed ~6 kB preamble is re-billed on every call |
+| `ANTHROPIC_PROMPT_CACHE_ENABLED` | `true` | Place `cache_control` breakpoints on the system prompt (also covers tool schemas) and the task message, and cache the conversation (see `ANTHROPIC_AUTO_CACHE`). Without it the fixed ~6 kB preamble is re-billed on every call |
+| `ANTHROPIC_AUTO_CACHE` | `true` without `ANTHROPIC_BASE_URL`, else `false` | Cache the conversation with Anthropic's automatic caching (a top-level `cache_control` that moves forward each turn, Plan 30-06). Behind a proxy that may not support it, an explicit breakpoint on the last message is used instead |
 | `SANITY_ASSERT_CACHE` | `true` | Log an ERROR when Anthropic reports zero cache reads — a cache that silently never engages is expensive and otherwise invisible |
 | `SANITY_ASSERT_CACHE_AFTER` | `20` | Number of Anthropic calls after which the zero-cache assertion fires |
 | **Strong Model PR Fixer (Plan 20)** | | |
 | `STRONG_FIXER_MODEL` | — | Model for the strong fixer agent (e.g. `claude-opus-4-20250514`). Empty uses `PRINCIPAL_DEV_MODEL` |
 | `STRONG_FIXER_ENABLED` | `true` | Enable/disable the strong model PR fixer |
 | `STRONG_FIXER_MAX_TOOL_CALLS` | `18` | **Model-turn** ceiling for the strong fixer agent (Plan 22 changed the unit from tool calls to turns) |
+| `STRONG_FIXER_MAX_INPUT_TOKENS` | `250000` | The strong fixer's soft-landing threshold in effective input tokens (enforced since Plan 30-06) |
 | `PR_EXHAUSTION_STRATEGY` | `escalate-then-fix` | PR exhaustion strategy: `escalate-then-fix`, `fix-only`, or `escalate-only` |
 | `OAUTH_TOKEN_URL` | — | OAuth2 token endpoint URL |
 | `OAUTH_CLIENT_ID` | — | OAuth2 client ID |
@@ -1143,6 +1215,8 @@ npm run build
 | `RUN_MODE` | `human` | Default run mode: `autonomous` or `human` |
 | `MAX_BUGFIX_ITERATIONS` | `3` | Max QA → bugfix → dev cycles |
 | `MAX_CONCURRENT_DEVS` | `2` | Max parallel developer agents |
+| `SEQUENTIAL_DISPATCH` | `true` | Dispatch one branch at a time (forces `MAX_CONCURRENT_DEVS` to 1) |
+| `DISPATCH_HALT_POLICY` | `dependents` | When a branch does not merge: `dependents` skips only the branches that depend on it, `strict` halts all remaining dispatch, `scaffold-only` halts only for the scaffold, `off` never halts (see [Dispatch Order](#dispatch-order)) |
 | `GENERATED_PROJECTS_DIR` | `./generated-projects` | Where generated codebases are written |
 | `OUTPUTS_DIR` | `./outputs` | Where run logs and artifacts are saved |
 | `DOCKER_HOST` | — | Docker daemon URL (default: local socket) |
@@ -1184,6 +1258,9 @@ See [`.env.example`](.env.example) for the full template.
 | `HISTORY_KEEP_RECENT_WRITE_ARGS` | `2` | Number of most-recent write turns whose tool-call arguments are never elided (Plan 22) |
 | `HISTORY_COMPACTION_ENABLED` | `true` | Enable the middleware that compacts ReAct history before each LLM call |
 | `HISTORY_MAX_CHARS` | `60000` | Hard character ceiling for the assembled ReAct history passed to the LLM |
+| `HISTORY_COMPACTION_MODE` | `epoch` | `epoch`: frozen, append-only compacted view, recompacted only at a trigger, so the history is read from the prompt cache (Plan 30-06). `sliding`: recompacted on every call |
+| `HISTORY_EPOCH_MAX_TURNS` | `8` | Model turns appended to a frozen view before it is recompacted |
+| `HISTORY_EPOCH_TARGET_CHARS` | `36000` | Character target of an epoch recompaction (default 0.6 × `HISTORY_MAX_CHARS`) |
 | `CONVENTIONS_INLINE_DIGEST` | `true` | Inject a distilled conventions digest instead of agents reading convention files |
 | `DEV_GIT_TOOLS_ENABLED` | `false` | Give developer agents git tools (the PR workflow already commits/pushes) |
 | `PERSONA_COMPACT` | `true` | Use the short persona variant (~2,500 chars vs ~7,000) for developer agents |
@@ -1218,7 +1295,7 @@ See [`.env.example`](.env.example) for the full template.
 | `REPO_CONTRACT_MAX_MODULES` | `60` | Cap on declared modules in the contract |
 | `CONTRACT_PROMPT_MAX_CHARS` | `6000` | Char budget for the contract section injected into agent prompts |
 | **PR Workflow / Work Preservation (Plan 19 Sub-Plan 06)** | | |
-| `WORKTREE_SALVAGE_MAX` | `10` | Max failed worktrees retained under `.worktrees-failed/` for salvage |
+| `WORKTREE_SALVAGE_MAX` | `10` | Max unmerged worktrees retained for salvage. Only one whose work is not all on the remote is kept, detached, under `.worktrees/_failed/` (Plan 30-04) |
 | `PR_SALVAGE_PATCHES` | `true` | Export `git format-patch` bundles for every branch that fails to merge |
 | `MERGE_CONFLICT_FIX_ATTEMPTS` | `1` | Dev-agent attempts at resolving a merge conflict before reporting blocked |
 | `ASSIGNMENT_MAX_ATTEMPTS` | `3` | Max times a single assignment may be re-dispatched |
@@ -1226,9 +1303,9 @@ See [`.env.example`](.env.example) for the full template.
 | **QA Real Execution (Plan 19 Sub-Plan 09)** | | |
 | `QA_ENFORCE_SUFFICIENCY` | `true` | Enforce test-sufficiency rules (min counts, coverage floor, per-story coverage) |
 | `QA_MIN_TOTAL_TESTS` | `0` | Minimum total non-trivial executed tests. 0 = derive as `max(5, storyCount)` |
-| `QA_MIN_TESTS_PER_STORY` | `1` | Minimum tagged passing tests per user story |
+| `QA_MIN_TESTS_PER_STORY` | `1` | Minimum tagged passing tests per user story with merged work |
 | `QA_MIN_COVERAGE_PCT` | `40` | Minimum line-coverage percentage. 0 = off |
-| `QA_TEST_TIMEOUT_MS` | `600000` | Timeout (ms) for a single test-runner invocation |
+| `QA_TEST_TIMEOUT_MS` | `600000` | Timeout (ms) for a single test-runner invocation, and separately for the dependency install before it |
 | `QA_MAX_INVOCATIONS` | `12` | Max qa-unit invocations per QA phase |
 | `QA_TESTS_VIA_PR` | `true` | Route QA-authored tests through the PR workflow |
 | **Requirements Traceability (Plan 19 Sub-Plan 10)** | | |

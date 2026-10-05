@@ -15,7 +15,8 @@ import { startRunBudget } from '../../utils/run-budget';
 import { refreshTokenReport } from '../../utils/token-report';
 import { tokenTracker } from '../../utils/token-tracker';
 import { slugify, systemBranch as buildSystemBranch } from '../../utils/branch-naming';
-import { createProjectWorkspace, createRunOutputDir, ensureProjectGitignore, getGitignoreEntriesForStack } from '../../utils/workspace';
+import { createProjectWorkspace, createRunOutputDir, ensureProjectGitignore, managedGitignoreEntries } from '../../utils/workspace';
+import { removePipelineArtifacts } from '../../utils/repo-hygiene';
 import { parseRequirementsFile } from '../../tools/requirements/parse-requirements';
 import { setLocalBareRepoPath } from '../pr-workflow';
 
@@ -225,6 +226,10 @@ export async function intakeNode(state: ProjectStateType): Promise<Partial<Proje
         }
         intakeLog.info(`System branch: ${systemBranch} (greenfield)`);
     }
+    // Plan 30-04: an earlier run may have committed a pipeline worktree (claudeopus5: a gitlink
+    // in d721a0d). The repair commit goes out with the push below.
+    const repair = removePipelineArtifacts(gitRoot);
+    if (repair.error) intakeLog.warn(`Pipeline-artifact check of ${systemBranch} skipped: ${repair.error}`);
     const pushResult = gitPush(gitRoot, systemBranch, gitContext);
     if (pushResult.startsWith('Error:')) {
         intakeLog.error(`Failed to push system branch ${systemBranch}: ${pushResult}`);
@@ -232,14 +237,7 @@ export async function intakeNode(state: ProjectStateType): Promise<Partial<Proje
         intakeLog.info(`Pushed system branch: ${systemBranch}`);
     }
 
-    const defaultGitignoreEntries = [
-        ...getGitignoreEntriesForStack(),
-        '.conventions/',
-        '.worktrees/',
-        '.worktrees-failed/',
-        '.agent/',
-    ];
-    ensureProjectGitignore(workspacePath, defaultGitignoreEntries);
+    ensureProjectGitignore(workspacePath, managedGitignoreEntries());
 
     try {
         gitExec(gitRoot, 'worktree prune');
@@ -260,11 +258,14 @@ export async function intakeNode(state: ProjectStateType): Promise<Partial<Proje
                 }
             }
         }
+        // Salvage location before Plan 30-04 (salvage now lives in .worktrees/_failed/, swept above)
         const failedDir = path.join(gitRoot, '.worktrees-failed');
         if (fs.existsSync(failedDir)) {
             fs.rmSync(failedDir, { recursive: true, force: true });
             intakeLog.info('Pruned .worktrees-failed/ from previous run');
         }
+        // Drop the registrations of the worktree directories removed above
+        gitExec(gitRoot, 'worktree prune');
     } catch (sweepErr) {
         intakeLog.warn(`Worktree sweep failed (non-fatal): ${sweepErr}`);
     }

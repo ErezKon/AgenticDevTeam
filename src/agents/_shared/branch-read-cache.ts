@@ -1,121 +1,101 @@
 /**
- * Branch-scoped read cache (Plan 24, C6).
+ * Read cache of one agent instance (Plan 24, C6; re-keyed in Plan 30-07).
  *
- * A module-level cache keyed by `(worktreePath, relPath)` that survives agent
- * instance lifetimes.  When a `read_file` returns the same content as the
- * cached entry, the result is replaced with `[CACHED]` and no budget is
- * consumed.
+ * Until Plan 30-07 this was a process-global map keyed by agent id, meant to
+ * survive agent instance lifetimes. That was the bug: a fresh instance — a
+ * respawn, the next assignment, a repair agent — reading a file for the first
+ * time was told "[CACHED — file unchanged since your last read. Do not re-read.]"
+ * because an earlier instance had read it; and an agent whose earlier read had
+ * since been stubbed out of its history by compaction got the same empty stub, so
+ * re-reading could never return the content — the agent looped into BLOCKED.
  *
- * Invalidation: any mutating tool call (`write_file`, `edit_file`, `create_file`,
- * `delete_file`, or a non-read `run_command`) on a given worktree path clears
- * all cached entries for that worktree.
+ * Now each agent instance owns its cache (its loop guard creates it, and it goes
+ * away with the agent), so it is scoped to the run and the worktree the instance
+ * works in. Each entry remembers which tool call returned the content and in which
+ * turn. The compactor reports the tool calls whose results it stubbed or dropped
+ * (`forget`), so the cache knows whether the model can still see a read:
+ *   - still visible → a one-line pointer replaces a repeat of the identical read;
+ *   - stubbed, dropped or changed → the read returns its content.
  */
-import { getLogger } from '../../utils/logger';
+import { createHash } from 'crypto';
 
-const log = getLogger('[branch-read-cache]', 226);
+/** An earlier identical read the model can still see in its history. */
+export interface VisibleRead {
+    /** The agent turn (model call) that returned it. */
+    turn: number;
+}
 
-// ─── Types ──────────────────────────────────────────────────────────────────
+/** What a repeated read finds in the cache. */
+export type CachedRead =
+    | ({ kind: 'visible' } & VisibleRead)
+    /** No tool call id was recorded (a direct tool invocation): position unknown, content kept. */
+    | { kind: 'cached'; content: string };
 
-interface CacheEntry {
-    /** Content hash (simple string length + first/last chars for fast comparison). */
+export interface ReadCache {
+    /** A repeat of `key` with no mutation since: where its result is, or null when none is known. */
+    previous(key: string): CachedRead | null;
+    /**
+     * Record a read that executed. When its content is identical to an earlier
+     * result of `key` that is still visible, that read is returned (and kept);
+     * otherwise this result is stored and null is returned.
+     */
+    record(key: string, content: string, toolCallId: string | undefined, turn: number): VisibleRead | null;
+    /** The model sees `key`'s latest result only shrunk: a repeat must return the content again. */
+    demote(key: string): void;
+    /** Results the compactor stubbed or dropped. Returns the keys whose reads are no longer visible. */
+    forget(toolCallIds: Iterable<string>): string[];
+}
+
+interface Entry {
     hash: string;
-    /** The full content (for exact match verification). */
     content: string;
+    toolCallId?: string;
+    turn: number;
 }
 
-// ─── Module-level cache ─────────────────────────────────────────────────────
-
-/** Cache keyed by `worktreePath::relPath`. */
-const _cache = new Map<string, CacheEntry>();
-
-/** Track known worktree paths for invalidation grouping. */
-const _worktreeEntries = new Map<string, Set<string>>();
-
-// ─── Helpers ────────────────────────────────────────────────────────────────
-
-function cacheKey(worktreePath: string, relPath: string): string {
-    return `${worktreePath}::${relPath}`;
+function hashOf(content: string): string {
+    return createHash('sha1').update(content).digest('hex');
 }
 
-/**
- * Compute a fast hash for content comparison. Uses length + a sample of chars
- * rather than a full crypto hash, since false positives are caught by the
- * exact comparison and the cost of a false negative is just a normal read.
- */
-function contentHash(content: string): string {
-    const len = content.length;
-    if (len === 0) return '0::';
-    const head = content.slice(0, 64);
-    const tail = content.slice(-64);
-    return `${len}::${head}::${tail}`;
-}
+/** Create the read cache of one agent instance. */
+export function createReadCache(): ReadCache {
+    const entries = new Map<string, Entry>();
+    const keyByCall = new Map<string, string>();
 
-// ─── Public API ─────────────────────────────────────────────────────────────
+    const store = (key: string, entry: Entry): void => {
+        const old = entries.get(key);
+        if (old?.toolCallId) keyByCall.delete(old.toolCallId);
+        entries.set(key, entry);
+        if (entry.toolCallId) keyByCall.set(entry.toolCallId, key);
+    };
 
-/**
- * Check if a read result matches the cache for a given worktree + path.
- * Returns `true` (cache hit) if the content is identical to the cached entry.
- */
-export function branchReadCacheHit(worktreePath: string, relPath: string, content: string): boolean {
-    const key = cacheKey(worktreePath, relPath);
-    const entry = _cache.get(key);
-    if (!entry) return false;
-
-    // Fast hash check first, then exact comparison
-    const hash = contentHash(content);
-    if (hash !== entry.hash) return false;
-    return content === entry.content;
-}
-
-/**
- * Store a read result in the cache for a given worktree + path.
- */
-export function branchReadCacheStore(worktreePath: string, relPath: string, content: string): void {
-    const key = cacheKey(worktreePath, relPath);
-    _cache.set(key, { hash: contentHash(content), content });
-
-    // Track this entry under its worktree for invalidation
-    let entries = _worktreeEntries.get(worktreePath);
-    if (!entries) {
-        entries = new Set();
-        _worktreeEntries.set(worktreePath, entries);
-    }
-    entries.add(key);
-}
-
-/**
- * Invalidate all cached entries for a worktree path.
- * Called when any mutating tool call is made on that worktree.
- */
-export function branchReadCacheInvalidate(worktreePath: string): void {
-    const entries = _worktreeEntries.get(worktreePath);
-    if (!entries || entries.size === 0) return;
-
-    log.debug(`invalidating ${entries.size} cached read(s) for worktree "${worktreePath}"`);
-    for (const key of entries) {
-        _cache.delete(key);
-    }
-    entries.clear();
-}
-
-/**
- * Invalidate a single file's cached entry (for targeted invalidation).
- */
-export function branchReadCacheInvalidateFile(worktreePath: string, relPath: string): void {
-    const key = cacheKey(worktreePath, relPath);
-    if (_cache.delete(key)) {
-        const entries = _worktreeEntries.get(worktreePath);
-        entries?.delete(key);
-    }
-}
-
-/** Get the current cache size (for diagnostics). */
-export function branchReadCacheSize(): number {
-    return _cache.size;
-}
-
-/** Clear the entire cache (for testing). */
-export function _resetBranchReadCache(): void {
-    _cache.clear();
-    _worktreeEntries.clear();
+    return {
+        previous(key) {
+            const e = entries.get(key);
+            if (!e) return null;
+            return e.toolCallId ? { kind: 'visible', turn: e.turn } : { kind: 'cached', content: e.content };
+        },
+        record(key, content, toolCallId, turn) {
+            const hash = hashOf(content);
+            const e = entries.get(key);
+            if (e?.toolCallId && e.hash === hash) return { turn: e.turn };
+            store(key, { hash, content, toolCallId, turn });
+            return null;
+        },
+        demote(key) {
+            const e = entries.get(key);
+            if (e) store(key, { ...e, toolCallId: undefined });
+        },
+        forget(toolCallIds) {
+            const forgotten: string[] = [];
+            for (const id of toolCallIds) {
+                const key = keyByCall.get(id);
+                if (key === undefined) continue;
+                keyByCall.delete(id);
+                entries.delete(key);
+                forgotten.push(key);
+            }
+            return forgotten;
+        },
+    };
 }

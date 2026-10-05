@@ -18,20 +18,16 @@ import { invokeDevAgent, invokeReviewerAgent, getModelForRank } from './agent-in
 import { commitWorktree } from './commit';
 import { getReviewDiffContent } from './diff';
 import { buildEscalationMessage } from './dev-prompts';
+import { msg } from './transcript';
 import type {
     Assignment, FileChange, TranscriptMessage,
-    PhaseName, PRReview, GitContext, TechDecision,
+    PRReview, GitContext, TechDecision,
 } from '../../agents/_shared/base-schemas';
 import type { ReviewOutput } from '../../agents/developers/schemas/review-output.schema';
 import type { TokenCallRecord } from '../../utils/token-tracker';
 import type { DevRank } from '../../agents/_shared/persona';
 
 const log = getLogger('[PR-Workflow]', 135);
-
-function ts(): string { return new Date().toISOString(); }
-function msg(agentId: string, message: string): TranscriptMessage {
-    return { timestamp: ts(), agentId, phase: 'development' as PhaseName, message };
-}
 
 export interface EscalationInput {
     worktreeWorkspace: string;
@@ -52,6 +48,8 @@ export interface EscalationInput {
     prBody: string;
     respawnCtx: { worktreeDir: string; baseRef: string };
     allReviews: PRReview[];
+    /** Review iterations that actually ran before escalation (Plan 30-02). */
+    iterationsRun: number;
     reconcileClaims: (who: string, claimed?: FileChange[]) => FileChange[];
 }
 
@@ -72,7 +70,7 @@ export async function runEscalation(input: EscalationInput): Promise<EscalationR
         worktreeWorkspace, baseRef, branchName, baseBranch,
         projectSlug, primaryStoryId, assignments, reviewerAgentIds,
         contextPrompt, apiKey, gitContext, techStack, isMaintainMode,
-        prNumber, prTitle, prBody, respawnCtx, allReviews, reconcileClaims,
+        prNumber, prTitle, prBody, respawnCtx, allReviews, iterationsRun, reconcileClaims,
     } = input;
 
     const newReviews: PRReview[] = [];
@@ -97,9 +95,10 @@ export async function runEscalation(input: EscalationInput): Promise<EscalationR
         return { prStatus, newReviews, newOutcomes, newFileChanges, newTranscript, newTokenUsage };
     }
 
+    // Plan 30-02: report the iterations that ran — the log said "after 5 iterations" when 1 had.
     const reviewLimit = getEffectiveLimits().maxReviewIterations;
-    log.warn(`PR #${prNumber} has unresolved CRITICALs after ${reviewLimit} iterations. Escalating developer...`);
-    newTranscript.push(msg('conductor', `Escalating: unresolved CRITICALs after max iterations`));
+    log.warn(`PR #${prNumber} has unresolved CRITICALs after ${iterationsRun} of ${reviewLimit} review iteration(s). Escalating developer...`);
+    newTranscript.push(msg('conductor', `Escalating: unresolved CRITICALs after ${iterationsRun} review iteration(s)`));
 
     const originalDevId = assignments[0].devAgentId;
     const escalatedDevId = selectEscalationCandidate(
@@ -153,7 +152,7 @@ export async function runEscalation(input: EscalationInput): Promise<EscalationR
                 `\n## Base Branch: ${baseBranch} (already applied to all diff tools — never pass a baseBranch argument yourself)`,
                 `\n## PR Description\n\n${prBody.slice(0, 2000)}`,
                 `\n## Diff\n\n${escalatedDiffContent}`,
-                `\n## Context: This is an escalated review after ${reviewLimit} iterations. A higher-rank dev has already applied fixes.`,
+                `\n## Context: This is an escalated review after ${iterationsRun} review iteration(s). A higher-rank dev has already applied fixes.`,
             ].join('\n');
 
             try {
@@ -186,7 +185,7 @@ export async function runEscalation(input: EscalationInput): Promise<EscalationR
                         severity: c.severity ?? 'info',
                         resolved: false,
                     })),
-                    iteration: reviewLimit + 1,
+                    iteration: iterationsRun + 1,
                 });
 
                 if (escalatedOutcome.kind === 'approved') {

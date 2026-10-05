@@ -16,6 +16,7 @@ import * as crypto from 'crypto';
 import { getLogger } from '../utils/logger';
 import { mdTable } from '../utils/markdown-table';
 import { gitExec } from '../utils/git-exec';
+import { PRUNE_DIRS } from '../utils/fs-walk';
 import { detectStacks, type StackKind } from './quality-gates';
 import {
     SECURITY_GATES_ENABLED,
@@ -96,11 +97,12 @@ export const SECRET_PATTERNS: SecretPattern[] = [
 
 // ─── Files to skip ──────────────────────────────────────────────────────────
 
-/** Paths that should never be scanned for secrets. */
+/** Paths that should never be scanned for secrets (`.worktrees-failed/` holds salvaged worktrees — Plan 30-03). */
 const SKIP_PATHS = [
     '.env.example',
     '.conventions/',
     '.worktrees/',
+    '.worktrees-failed/',
     'node_modules/',
     '.git/',
 ];
@@ -132,16 +134,14 @@ function shouldSkipPath(relativePath: string): boolean {
 
 // ─── Filesystem walk fallback (when git is unavailable) ─────────────────────
 
-const WALK_PRUNE = new Set(['node_modules', '.git', '.worktrees', '.worktrees-failed', 'dist', 'build', 'coverage', '__pycache__']);
-
-/** Recursively walk the workspace and return relative file paths. */
+/** Recursively walk the workspace and return relative file paths (shared PRUNE_DIRS, plus every dot directory). */
 function walkFilesForSecretScan(root: string, dir: string): string[] {
     const results: string[] = [];
     let entries: fs.Dirent[];
     try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return results; }
     for (const entry of entries) {
         if (entry.isDirectory()) {
-            if (WALK_PRUNE.has(entry.name) || entry.name.startsWith('.')) continue;
+            if (PRUNE_DIRS.has(entry.name) || entry.name.startsWith('.')) continue;
             results.push(...walkFilesForSecretScan(root, path.join(dir, entry.name)));
         } else if (entry.isFile()) {
             results.push(path.relative(root, path.join(dir, entry.name)));
@@ -156,8 +156,8 @@ function walkFilesForSecretScan(root: string, dir: string): string[] {
  * Regex sweep for hard-coded credentials over git-tracked text files.
  *
  * Offline and dependency-free by design: no scanner binary is assumed. Skips
- * .env.example, .conventions/, .worktrees/, node_modules/, lock files, and
- * anything git does not track.
+ * .env.example, .conventions/, .worktrees/, .worktrees-failed/, node_modules/,
+ * lock files, and anything git does not track.
  */
 export function scanForSecrets(workspacePath: string): SecurityFinding[] {
     const findings: SecurityFinding[] = [];

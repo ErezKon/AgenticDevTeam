@@ -178,6 +178,30 @@ export function gitExecVerbose(
     }
 }
 
+// ─── Probes (Plan 30-04) ────────────────────────────────────────────────────
+
+/**
+ * True when `ref` (e.g. `refs/heads/<branch>`) exists. A probe: `--verify --quiet`
+ * marks it `probe: true` in the debug trace (shell-exec `PROBE_RE`), so a missing
+ * ref is an answer and never lands in `errors.jsonl`.
+ */
+export function refExists(workspacePath: string, ref: string): boolean {
+    return !gitExec(workspacePath, `rev-parse --verify --quiet ${ref}`).startsWith('Error:');
+}
+
+/**
+ * Delete a local branch if it exists. Probing first replaces the expected
+ * `branch -D` failures on missing branches that filled the claudeopus5 `errors.jsonl`.
+ *
+ * @returns `deleted` false when there was no such branch; `error` when git refused
+ *          (e.g. the branch is still checked out in a worktree).
+ */
+export function deleteLocalBranch(workspacePath: string, branchName: string): { deleted: boolean; error?: string } {
+    if (!refExists(workspacePath, `refs/heads/${branchName}`)) return { deleted: false };
+    const out = gitExec(workspacePath, `branch -D ${branchName}`);
+    return out.startsWith('Error:') ? { deleted: false, error: out } : { deleted: true };
+}
+
 /**
  * Push the current HEAD to `refs/heads/<branchName>` on the remote,
  * authenticating via the token in `gitContext` (falls back to env vars).
