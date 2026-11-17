@@ -148,6 +148,7 @@ src/
     pr/                            # PR workflow modules (Sub-Plan 25-08)
       index.ts                     # Barrel re-export
       orchestrator.ts              # Top-level PR lifecycle orchestrator; Plan 26: per-assignment invocations, gate-blocking, dev-failure tracking
+      branch-policy.ts             # Plan 30-L/M/P/T: blockingGateSteps() (no PR while gates or product verification fail under strict/permissive), branchWallCap() (cap scales with assignment count), unresolvedBlockingComments() (only each reviewer's LATEST review blocks — comments are never flagged `resolved`)
       worktree.ts                  # Worktree creation, disposal, salvage, eviction
       pr-github.ts                 # Octokit wrapper, PR creation/retry/merge, postComment
       pr-body.ts                   # PR title & description builders (pure, testable)
@@ -221,7 +222,8 @@ src/
       registry.ts                  # 11 developer agent definitions
       dev-agent.builder.ts         # Developer agent constructor
       reviewer-agent.builder.ts    # Code reviewer agent constructor
-      dispatcher.ts                # Branch-grouped fan-out + concurrency; Plan 27-B: sequential dispatch + halt-on-failure
+      dispatcher.ts                # Branch-grouped fan-out + concurrency; Plan 27-B: sequential dispatch + halt-on-failure; Plan 30-J: bootstrap = scaffold-only deps; Plan 30-K: DispatchResult.dispatchHalt
+      dispatch-progress.ts         # Plan 30-I: mergeDispatchProgress() — progress snapshots append onto the full state (never a partial state.json)
       schemas/                     # dev-output.schema.ts, review-output.schema.ts
     qa/                            # QA Lead + Unit + E2E agents
     devops/                        # DevOps agent
@@ -269,7 +271,7 @@ src/
     fs-walk.ts                     # Shared filesystem walker (PRUNE_DIRS, SOURCE_EXTENSIONS, walkDir, collectFiles, isTestFile)
     source-graph.ts                # Import extraction + resolution + graph building + transitive reachability
     markdown-table.ts              # Shared mdTable() + mdSection() with automatic pipe-escaping
-    shell-exec.ts                  # Shared ExecFn type, safeChildEnv, defaultExec/isToolAvailable; Plan 25-11: async AsyncExecFn, defaultExecAsync, isToolAvailableAsync (execFile + promises); traced child_process drop-ins (execSync, execFileSync, execFileAsync, execCapture) — the ONLY module that imports child_process
+    shell-exec.ts                  # Shared ExecFn type, safeChildEnv, defaultExec/isToolAvailable; Plan 25-11: async AsyncExecFn, defaultExecAsync, isToolAvailableAsync (execFile + promises); traced child_process drop-ins (execSync, execFileSync, execFileAsync, execCapture) — the ONLY module that imports child_process; Plan 30-S: POSIX execCapture spawns `/bin/sh -c` as a process-group leader and SIGKILLs the GROUP on timeout/overflow (exec() drops `detached` and only signals the shell → orphaned watch-mode runners)
     branch-naming.ts               # Canonical slugify, systemBranch, featureBranch, projectSlugFromBranch, isSystemBranch
     artifact-writer.ts             # writeOutputFile + appendOutputLine for output-dir artifacts
     workspace-index.ts             # buildWorkspaceIndex() — pre-built file index passed to all gates
@@ -278,7 +280,8 @@ src/
     ledger-report.ts               # Produces outputs/<run>/run-report.md from ledger data
     run-diagnosis.ts               # Automated failure-cause summary (run-diagnosis.md)
     repo-contract-writer.ts        # Write, read, and render .agent/repo-contract.json + Markdown
-    crash-handlers.ts              # flushTokenReportOnExit + installProcessHandlers + graceful shutdown hooks (shared between cli.ts and index.ts); Plan 27-G: onGracefulShutdown() hook registry, SIGINT/SIGTERM save state with _stopReason: 'manual-kill'
+    crash-handlers.ts              # flushTokenReportOnExit + installProcessHandlers + graceful shutdown hooks (shared between cli.ts and index.ts); Plan 27-G: onGracefulShutdown() hook registry, SIGINT/SIGTERM save state with _stopReason: 'manual-kill'; Plan 30-F: registrations capture the RunContext and gracefulShutdown() re-enters it (runWithContextSync) — registerRunShutdown() per run, returning a disposer the autonomous runners call in `finally` (Plan 30-V)
+    preflight.ts                   # Plan 30-A/C/G: runPreflight() before intake — Node >= 20.10 + AbortSignal.any (error), unpriced configured models, no headless browser, low free disk (warnings)
 
   templates/
     codebase-analysis.template.ts  # Markdown renderer for CodebaseAnalysis
@@ -437,7 +440,7 @@ These are load-bearing. Changing any of them reintroduces a failure mode that is
 
 | Invariant | Where | Why |
 |-----------|-------|-----|
-| Anthropic requests carry `cache_control` breakpoints on the system message, the task message and a rolling history point | `prompt-cache.ts`, wired in `agent-factory.ts` | Anthropic serialises `tools` → `system` → `messages`, so the **system** breakpoint also caches the tool schemas and the injected response schema. Without breakpoints the ~6 kB fixed preamble is re-billed on every call: the pacmanclaude run reported `cache_read: 0` on all 227 Anthropic calls and billed **2.32M input / 99.7K output** (23:1) for one branch of fifteen. Max 4 breakpoints per request. Flag: `ANTHROPIC_PROMPT_CACHE_ENABLED`. Plan 26 A1: `blocksWithTrailingBreakpoint()` now skips `thinking` and `redacted_thinking` blocks (placing `cache_control` on them causes Anthropic API rejection). |
+| Anthropic requests carry `cache_control` breakpoints on the system message, the task message and a rolling history point | `prompt-cache.ts`, wired in `agent-factory.ts` | Anthropic serialises `tools` → `system` → `messages`, so the **system** breakpoint also caches the tool schemas and the injected response schema. Without breakpoints the ~6 kB fixed preamble is re-billed on every call: the pacmanclaude run reported `cache_read: 0` on all 227 Anthropic calls and billed **2.32M input / 99.7K output** (23:1) for one branch of fifteen. Max 4 breakpoints per request. Flag: `ANTHROPIC_PROMPT_CACHE_ENABLED`. Plan 26 A1: `blocksWithTrailingBreakpoint()` now skips `thinking` and `redacted_thinking` blocks (placing `cache_control` on them causes Anthropic API rejection). Plan 30-R: the cache minimum applies to the **cumulative prefix**, so the rolling history breakpoint goes on the newest pre-window AI turn with any non-thinking content (short text + `tool_calls` is normal). Requiring the message itself to be ≥ 4 096 chars meant it never fired, leaving ~60 % of input uncached (expect `3 breakpoint(s)` in the debug log once history exists). |
 | `cacheReadTokens` / `cacheCreationTokens` are recorded on every `TokenCallRecord`, and a zero-cache run logs an ERROR | `token-usage-extractor.ts`, `token-callback.ts`, `token-report.ts` | These numbers were present on every Anthropic response and discarded, so a total cache miss was invisible. `SANITY_ASSERT_CACHE` fires once after `SANITY_ASSERT_CACHE_AFTER` (20) Anthropic calls with zero cache reads. |
 | `opts.timeout` reaches Anthropic (`clientOptions.timeout`) and Google (`timeout`) | `llm-provider.ts` | It was applied to `ChatOpenAI` only, so `LLM_REQUEST_TIMEOUT_MS` was silently OpenAI-exclusive. |
 | `ChatAnthropic` is created **with** `streaming: true` + A2 sanitiser guard | `llm-provider.ts` | Anthropic's HTTP endpoint times out after ~10 minutes on non-streaming requests, killing long agent runs. Streaming residue (`input_json_delta`, id-less `tool_use`) is stripped by `sanitizeStreamingContentBlocks()` before every LLM call. Token accounting for streaming uses the `usage_metadata` fallback (D's two-tier lookup). |
@@ -539,6 +542,9 @@ The implementation is split into focused modules under `src/conductor/pr/` (Sub-
 ### Scaffold Barrier (dispatcher.ts)
 
 - `injectScaffoldDependencies()` ensures every non-scaffold assignment depends on all scaffold assignments
+- Bootstrap barrier (Plan 24 E4, corrected in Plan 30-J): an assignment is bootstrap only if it owns an entry module or matches a bootstrap keyword **and depends on scaffold work only**. `isBootstrapAssignment(a, all)` / `isBootstrapBranch(branch, assignments, all)` must receive the full plan. In pacman-live-analysis-3 a keyword match ("toggle wiring") on an assignment depending on the 18-dependency integration assignment ran the final integration branch first and created cycles (`topoSort: … cyclic dependencies`)
+- Progress snapshots (Plan 30-I): the dispatcher merges its progress onto the `lastKnownState` captured at entry (`mergeDispatchProgress`) and writes the **full** state; never pass a partial object to `writePeriodicSnapshot` — it replaces `state.json` wholesale
+- Dispatch order (Plans 30-O / 30-U, `dispatch-order.ts`): branches are topologically sorted as units (`orderBranchLayers`) — a branch starts only after every branch its assignments depend on. The scaffold is a **root** (no dependencies, always layer 0). One-branch-per-story collapsing (`canonicalBranchName`) never crosses the scaffold boundary — the TL reuses the scaffold's story id for feature work. Cycles are broken at one node: most dependents (the foundation) first. A chore on a feature branch is not scaffold when the plan names a `…/chore/scaffold` branch (`isScaffoldAssignment(a, all)`).
 - Scaffold branches run first (sequentially); `syncWorkspaceToBranch()` called after each merge
 - `findOverlappingBranches()` detects branches with shared `moduleIds` and serialises them
 - `CONFIG_OWNERSHIP_SCAFFOLD_ONLY` prevents feature branches from modifying root config files
@@ -559,7 +565,7 @@ The implementation is split into focused modules under `src/conductor/pr/` (Sub-
 Prevents agents from infinite tool-call loops with per-tool scoping and split budgets:
 - Tracks total invocations per `toolName::args` key
 - **Read-only tools** (read_file, list_dir, search_code, git tools) cache results; duplicates return `[CACHED]` (free — no budget consumed)
-- **Mutating tools** (write_file, edit_file, etc.) clear all caches (workspace changed)
+- **Mutating tools** (write_file, edit_file, etc.) clear all caches (workspace changed); a mutating `run_command` (npm install, builds) also resets the repeat counts (Plan 30-H) — otherwise the next identical read hit the warning threshold with an empty cache and returned a "loop" error, and agents edited blind
 - 3rd identical call blocks ONLY that specific `(tool, args)` — other tools keep working
 - **Split budgets** (`TOOL_BUDGETS_JSON`): separate read/write/shell/turn ceilings per rank — principal 80/40/20/45, senior 70/35/18/40, junior 60/30/16/35 (Plan 27-C: raised ~2x from Plan 22)
 - **Complexity multipliers** (Plan 27-C): trivial=1.0, simple=1.0, moderate=1.0, complex=1.5, very-complex=2.0. The 0.75x penalty for trivial/simple was removed — TL complexity estimates are unreliable and the penalty was catastrophically low
@@ -1068,7 +1074,8 @@ Provider billing/auth fails  ─┘    writePeriodicSnapshot()    ├─→ grap
 | **Provider billing/quota** (recoverable) | `dispatcher.ts` | `awaitProviderRecovery(createProviderProbe())` probes `/models` endpoint; on failure sets `providerFailureKind`; `developmentNode` returns `{ cancelled: true, _stopReason: 'provider-billing' }` |
 | **Provider auth/model-not-found** (fatal) | `dispatcher.ts` | Immediate stop — `providerFailureKind` set, `run:provider-stop` emitted |
 | **HITL deny** | Graph HITL interrupt | `cancelled = true` (no `_stopReason`) |
-| **Ctrl+C / SIGINT / SIGTERM** (Plan 27-G) | `gracefulShutdown()` in `crash-handlers.ts` | Runs `onGracefulShutdown()` hooks, saves `state.json` with `_stopReason: 'manual-kill'`, writes `invariant` ledger entry, flushes token report, exits 130/143 |
+| **Ctrl+C / SIGINT / SIGTERM** (Plan 27-G, fixed in 30-F) | `gracefulShutdown()` in `crash-handlers.ts` | For each run registered with `registerRunShutdown()` (inside its `RunContext`), re-enters that context via `runWithContextSync()` — signal handlers run outside every AsyncLocalStorage scope, so `getRunContext()` there is always `undefined` — then saves `state.json` from `lastKnownState` with `_stopReason: 'manual-kill'` (`'crashed'` for uncaught errors), writes the `graceful-shutdown` ledger invariant with the real phase, flushes the token report, exits 130/143 |
+| **Dispatch halt** (Plan 30-K) | `dispatcher.ts` → `developmentNode` | `DISPATCH_HALT_POLICY` stopped dispatch on a non-merged branch → `DispatchResult.dispatchHalt` → `{ cancelled: true, _stopReason: 'dispatch-halted:<branch>' }` → finalize (status `failed`). Previously development returned normally and QA → bug-fix triage re-dispatched the same blocked branch |
 | **Crash / uncaught exception** | `gracefulShutdown()` in `crash-handlers.ts` | Best-effort state snapshot + token report, exits with code 1 |
 
 ### Architecture
@@ -1351,6 +1358,8 @@ The system evolved through 16+ iteration plans. Key milestones:
 | 25-06 | Utility deduplication: migrated all consumers to shared utilities (shell-exec 3 files, markdown-table 11 files/23 tables, bug-factory 7 files/19 sites, branch-naming 6 files/13 sites, artifact-writer 8 files/13 sites). Fixed continue-run slug mismatch bug, added missing pipe-escaping to 9 of 11 table sites, added missing error handling to 3 output-write sites |
 | 25-10 | Unified Gate abstraction: `gate-types.ts` exports `GateStatus`, `FindingSeverity`, `GateFinding`, `GateOutcome<R>`, `WorkspaceIndex`; every gate module exports a `*GateOutcome()` adapter; `workspace-index.ts` builds a shared file index once; `gate:result` events carry a `gate` discriminator. Removed dead code: `layout-lint.ts`, `REPO_CONTRACT_MODE`, `CONTRACT_STUB_SCAFFOLD` |
 | 25-14 | RunContext & Singleton Elimination: `AsyncLocalStorage`-based per-run context, `RunContext` class, all singletons context-aware, index.ts key-space collision fix + LRU eviction, history-compactor per-run memo, prompt-cache per-run breakpoint set |
+| 29 | Debug mode (`DEBUG_MODE`): structured, redacted trace of every LLM/tool/exec/http/node/route record in `outputs/<run>/debug/` |
+| 30 | Live-run forensics loop (`pacman-live-analysis[-n]`): run preflight (Node floor, pricing, browser, disk), idempotent `new-repo`, `claude-opus-5-5` pricing, signal-safe graceful shutdown, full-state dispatch snapshots, scaffold-only bootstrap rule, plan-aware scaffold classification + branch-level dispatch order, dispatch halt → finalize, no PR while gates/product verification fail, product verification after the gates' build, SCOPE acceptance criterion restored (was always failing since Plan 25), rolling history cache breakpoint actually placed, process-group kill for shell timeouts, latest-review-only merge blockers, size-scaled + cache-aware branch budgets, `PR_MAX_REVIEWERS`, loop-guard re-read after shell mutation |
 
 When referenced in code comments, these plans are cited as "fixes A1", "fixes A2", etc. (referring to sub-plans within Plan 16).
 
@@ -1377,8 +1386,10 @@ When referenced in code comments, these plans are cited as "fixes A1", "fixes A2
 13. **`completed` now means accepted by the acceptance gate** — never a false positive. The `finalStatus` is one of `completed`, `failed`, `partial`, or `inconclusive`, determined by the deterministic acceptance gate.
 14. **`.agent/` is gitignored in generated projects** — the `repo-contract.json` and other machine-generated files live there and must not be committed.
 15. **Singletons are per-run in server mode** — `token-tracker`, `event-bus`, `run-budget`, `run-ledger`, `response-log`, `logger`, `run-snapshot`, `debug-trace`, `history-compactor` memo/stats, and `prompt-cache` breakpoint set are scoped per-run via `RunContext` + `AsyncLocalStorage` (Plan 25-14). Module-level globals remain as CLI-mode defaults. New singletons must follow the `_active()` pattern or use `RunContext` to avoid cross-run contamination. Code invoked later from outside the run's async scope (HITL `session.getState()` / `session.resume()`) must re-enter it with `runWithContext(ctx, …)` — `makeSession()` does; before it did, every per-run singleton went dark after the first HITL approval.
-16. **Spawn child processes only through `shell-exec.ts`** (`execSync`, `execFileSync`, `execFileAsync`, `execCapture`) or the higher-level `gitExec()` / `defaultExec()` / `defaultExecAsync()` — never import `child_process` directly. These drop-ins are what make `DEBUG_MODE` traces complete; a direct import is invisible to the trace. They resolve `child_process` at call time, so `jest.mock('child_process')` / `jest.spyOn` keep working.
+16. **Spawn child processes only through `shell-exec.ts`** (`execSync`, `execFileSync`, `execFileAsync`, `execCapture`) or the higher-level `gitExec()` / `defaultExec()` / `defaultExecAsync()` — never import `child_process` directly. These drop-ins are what make `DEBUG_MODE` traces complete; a direct import is invisible to the trace. They resolve `child_process` at call time, so `jest.mock('child_process')` / `jest.spyOn` keep working. Exception (Plan 30-S): POSIX `execCapture` uses `spawn`, not `exec` — spy on the `execCapture` seam itself when testing the shell tool.
 17. **`logger.debug()` is gated by `DEBUG_MODE`** — debug lines are dropped unless `DEBUG_MODE=true`. Use `info` for anything a normal run must show.
+18. **Signal handlers have no RunContext** (Plan 30-F) — anything that must run at SIGINT/SIGTERM time must capture the context at registration (`registerRunShutdown()` / `onGracefulShutdown()`) and re-enter it with `runWithContextSync()`; calling `getRunContext()` inside the handler always returns `undefined`.
+19. **Runtime matters** (Plan 30-A) — run with Node ≥ 20.10 (`nvm use 20`); `npm install` with an old npm rewrites `package-lock.json` to `lockfileVersion: 1`. Browser-based test runners need `google-chrome`/`chromium` on PATH or `CHROME_BIN` (now passed through `safeChildEnv`).
 
 ---
 

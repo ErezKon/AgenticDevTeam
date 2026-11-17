@@ -3,6 +3,9 @@
   "version": "1.0.0",
   "description": "Multi-agent AI system that ingests requirements and autonomously designs, builds, tests, and containerizes a complete software product.",
   "main": "src/index.ts",
+  "engines": {
+    "node": ">=20.10.0"
+  },
   "scripts": {
     "start": "tsx src/index.ts",
     "cli": "tsx src/cli.ts",

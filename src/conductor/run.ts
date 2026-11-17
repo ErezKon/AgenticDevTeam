@@ -10,9 +10,10 @@ import { writeStateSnapshot, writeRunManifest } from '../utils/run-snapshot';
 import { appendLedger } from '../utils/run-ledger';
 import { collectRunState, reconstructState, reconcileGitState } from './continue';
 import { rehydrateSingletons } from './continue/singleton-rehydration';
-import { RunContext, runWithContext, getRunContext } from '../utils/run-context';
-import { onGracefulShutdown } from '../utils/crash-handlers';
+import { RunContext, runWithContext } from '../utils/run-context';
+import { registerRunShutdown } from '../utils/crash-handlers';
 import { trace, serializeError, writeDebugSummary } from '../utils/debug-trace';
+import { runPreflight } from '../utils/preflight';
 import type { RepoTarget, PhaseName } from '../agents/_shared/base-schemas';
 import type { ProjectStateType } from './state';
 
@@ -223,20 +224,12 @@ export async function runAutonomous(opts: RunOptions): Promise<ProjectStateType>
 
     return runWithContext(ctx, async () => {
         log.info(`Starting autonomous run for "${opts.systemName}"...`);
+        // Plan 30-A: fail before intake creates a repo/workspace on a broken runtime.
+        runPreflight();
 
-        // Plan 27-G: register graceful shutdown hook for this run
-        onGracefulShutdown(() => {
-            const runCtx = getRunContext();
-            if (runCtx?.lastKnownState?.outputPath) {
-                try {
-                    writeStateSnapshot(runCtx.lastKnownState.outputPath, {
-                        ...runCtx.lastKnownState,
-                        cancelled: true,
-                        _stopReason: 'manual-kill',
-                    });
-                } catch { /* best-effort */ }
-            }
-        });
+        // Plan 27-G / 30-F: graceful shutdown saves this run's state (context captured here).
+        // Disposed when the run ends, so a later Ctrl+C cannot overwrite its final state (F27).
+        const disposeShutdown = registerRunShutdown();
 
         const conductor = createConductor({ mode: 'autonomous' });
         const config = { configurable: { thread_id: threadId } };
@@ -262,6 +255,8 @@ export async function runAutonomous(opts: RunOptions): Promise<ProjectStateType>
             // Mark the run as failed and flush the token report with whatever
             // data was collected before the crash — ensures the report exists.
             return handleRunCrash(conductor, config, err, log, 'Autonomous run failed');
+        } finally {
+            disposeShutdown();
         }
     });
 }
@@ -274,20 +269,10 @@ export async function runHumanInTheLoop(opts: RunOptions): Promise<RunSession> {
 
     return runWithContext(ctx, async () => {
         log.info(`Starting HITL run for "${opts.systemName}"...`);
+        runPreflight();
 
-        // Plan 27-G: register graceful shutdown hook for this run
-        onGracefulShutdown(() => {
-            const runCtx = getRunContext();
-            if (runCtx?.lastKnownState?.outputPath) {
-                try {
-                    writeStateSnapshot(runCtx.lastKnownState.outputPath, {
-                        ...runCtx.lastKnownState,
-                        cancelled: true,
-                        _stopReason: 'manual-kill',
-                    });
-                } catch { /* best-effort */ }
-            }
-        });
+        // Plan 27-G / 30-F: graceful shutdown saves this run's state (context captured here)
+        registerRunShutdown();
 
         const conductor = createConductor({ mode: 'human' });
         const config = { configurable: { thread_id: threadId } };
@@ -348,6 +333,7 @@ export async function continueRun(
     return runWithContext(ctx, async () => {
         const continueLog = getLogger('[ContinueRun]', 177);
         continueLog.info(`Continuing run from: ${opts.outputPath}`);
+        runPreflight();
 
         // ── 1. Collect artifacts ─────────────────────────────────────────────
         const collected = collectRunState(opts.outputPath);
@@ -395,19 +381,8 @@ export async function continueRun(
             }
         }
 
-        // Plan 27-G: register graceful shutdown hook for the continued run
-        onGracefulShutdown(() => {
-            const runCtx = getRunContext();
-            if (runCtx?.lastKnownState?.outputPath) {
-                try {
-                    writeStateSnapshot(runCtx.lastKnownState.outputPath, {
-                        ...runCtx.lastKnownState,
-                        cancelled: true,
-                        _stopReason: 'manual-kill',
-                    });
-                } catch { /* best-effort */ }
-            }
-        });
+        // Plan 27-G / 30-F: graceful shutdown saves the continued run's state (context captured here)
+        const disposeShutdown = registerRunShutdown();
 
         // ── 4. Build the graph and invoke ────────────────────────────────────
         const resolvedMode = opts.mode ?? 'autonomous';
@@ -442,6 +417,8 @@ export async function continueRun(
                 return finalState as ProjectStateType;
             } catch (err: any) {
                 return handleRunCrash(conductor, config, err, continueLog, 'Continued autonomous run failed');
+            } finally {
+                disposeShutdown();
             }
         }
 

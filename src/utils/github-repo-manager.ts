@@ -66,21 +66,24 @@ export async function createGitHubRepo(
     logger.info(`Creating ${isPrivate ? 'private' : 'public'} repo: ${owner}/${repoName}`);
 
     let data: any;
-    if (isUserRepo) {
-        const response = await octokit.repos.createForAuthenticatedUser({
-            name: repoName,
-            private: isPrivate,
-            auto_init: true,
-        });
+    try {
+        const response = isUserRepo
+            ? await octokit.repos.createForAuthenticatedUser({ name: repoName, private: isPrivate, auto_init: true })
+            : await octokit.repos.createInOrg({ org: owner, name: repoName, private: isPrivate, auto_init: true });
         data = response.data;
-    } else {
-        const response = await octokit.repos.createInOrg({
-            org: owner,
-            name: repoName,
-            private: isPrivate,
-            auto_init: true,
-        });
-        data = response.data;
+    } catch (err: any) {
+        if (!isNameTakenError(err)) throw err;
+        // Plan 30-B: an interrupted/crashed intake leaves the repo behind; rerunning
+        // with the same name used to die here with GitHub 422.
+        const reusable = await findReusableRepo(octokit, owner, repoName, isPrivate);
+        if (typeof reusable === 'string') {
+            throw new Error(
+                `Repository ${owner}/${repoName} already exists and ${reusable} — choose a different ` +
+                'repository name or select "Existing GitHub repository".',
+            );
+        }
+        logger.warn(`Repository ${owner}/${repoName} already exists but carries no work (left by an interrupted run) — reusing it`);
+        return reusable;
     }
 
     logger.info(`Repo created: ${data.full_name} (${data.html_url})`);
@@ -91,6 +94,41 @@ export async function createGitHubRepo(
         cloneUrl: data.clone_url,
         defaultBranch: data.default_branch ?? 'main',
     };
+}
+
+/** GitHub's 422 for a duplicate repository name ("name already exists on this account"). */
+function isNameTakenError(err: any): boolean {
+    if (err?.status !== 422) return false;
+    return /already exists/i.test(`${JSON.stringify(err?.response?.data ?? {})} ${err?.message ?? ''}`);
+}
+
+/**
+ * A repo is reusable only when it provably carries no work: at most one commit
+ * (GitHub's auto-init) on the default branch, every other branch pointing at that
+ * same commit, and the requested visibility. Returns the reason when it is not.
+ */
+async function findReusableRepo(
+    octokit: Octokit,
+    owner: string,
+    repoName: string,
+    isPrivate: boolean,
+): Promise<CreateRepoResult | string> {
+    const { data: repo } = await octokit.repos.get({ owner, repo: repoName });
+    if (repo.private !== isPrivate) return `is ${repo.private ? 'private' : 'public'}`;
+    const defaultBranch = repo.default_branch ?? 'main';
+
+    let commits: Array<{ sha: string }> = [];
+    try {
+        ({ data: commits } = await octokit.repos.listCommits({ owner, repo: repoName, sha: defaultBranch, per_page: 2 }));
+    } catch (err: any) {
+        if (err?.status !== 409) throw err; // 409 = "Git Repository is empty"
+    }
+    if (commits.length > 1) return 'contains work';
+
+    const { data: branches } = await octokit.repos.listBranches({ owner, repo: repoName, per_page: 100 });
+    if (branches.some(b => b.commit.sha !== commits[0]?.sha)) return 'contains work on other branches';
+
+    return { fullName: repo.full_name, htmlUrl: repo.html_url, cloneUrl: repo.clone_url, defaultBranch };
 }
 
 /**

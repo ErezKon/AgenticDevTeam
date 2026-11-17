@@ -24,7 +24,7 @@ import {
     GITHUB_OWNER, GITHUB_REPO,
     SECURITY_GATE_IN_PR,
     SNAPSHOT_MAX_FILES, SNAPSHOT_MAX_CHARS, RECONCILE_FILE_CHANGES,
-    MAX_BRANCH_COST_USD, MAX_BRANCH_WALL_MS,
+    MAX_BRANCH_COST_USD,
     REVIEW_MERGE_POLICY, REVIEW_QUORUM,
     GATE_INTEGRITY_MODE,
     PR_TEST_TIMEOUT_MS, PR_TEST_INSTALL_TIMEOUT_MS,
@@ -45,6 +45,7 @@ import { estimateCost } from '../../utils/cost';
 import { ensureProjectGitignore, getGitignoreEntriesForStack } from '../../utils/workspace';
 import type { CompletionEvidence } from '../assignment-policy';
 import type { GateReport } from '../quality-gates';
+import { blockingGateSteps, branchWallCap, unresolvedBlockingComments } from './branch-policy';
 import type {
     Assignment, FileChange, ArtifactRef, TranscriptMessage,
     PhaseName, PullRequest,
@@ -165,15 +166,18 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
 
     // ── Plan 24 D2: per-branch budget tracking ──────────────────────────
     const branchStartMs = Date.now();
+    const branchWallCapMs = branchWallCap(assignments.length);
+    // Plan 30-M: cache-aware — cache reads bill at 0.05–0.1× input; ignoring them
+    // overstated a ~50 %-cached branch by 1.6–1.8× and stopped branches early.
     const estimateBranchCost = (): number => {
         let total = 0;
-        for (const t of allTokenUsage) total += estimateCost(t.model, t.inputTokens, t.outputTokens);
+        for (const t of allTokenUsage) total += estimateCost(t.model, t.inputTokens, t.outputTokens, t.cacheReadTokens, t.cacheCreationTokens);
         return total;
     };
     const checkBranchBudget = (checkpoint: string): string | null => {
-        if (MAX_BRANCH_WALL_MS > 0) {
+        if (branchWallCapMs > 0) {
             const elapsedMs = Date.now() - branchStartMs;
-            if (elapsedMs >= MAX_BRANCH_WALL_MS) return `wall time ${(elapsedMs / 1000).toFixed(0)}s >= cap ${(MAX_BRANCH_WALL_MS / 1000).toFixed(0)}s at ${checkpoint}`;
+            if (elapsedMs >= branchWallCapMs) return `wall time ${(elapsedMs / 1000).toFixed(0)}s >= cap ${(branchWallCapMs / 1000).toFixed(0)}s at ${checkpoint}`;
         }
         if (MAX_BRANCH_COST_USD > 0) {
             const cost = estimateBranchCost();
@@ -413,15 +417,9 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
 
         // ── 1a. Post-development quality gates + repair ─────────────────
         let gateReport: GateReport | null = null;
+        let productVerifyReport: GateReport['productVerify'];
         try {
-            let productVerifyReport;
-            try {
-                const worktreeRoots = detectStackRoots(worktreeWorkspace);
-                productVerifyReport = await runProductVerification(worktreeWorkspace, worktreeRoots, 'artifacts+resolve');
-                log.info(`Product verification: artifacts=${productVerifyReport.artifacts.filter(a => a.passed).length}/${productVerifyReport.artifacts.length}, unresolved refs=${productVerifyReport.resolveIssues.length}`);
-            } catch (pvErr: any) { log.warn(`Product verification error (non-fatal): ${pvErr.message}`); }
-
-            gateReport = await runQualityGates(worktreeWorkspace, { timeoutMs: PR_TEST_TIMEOUT_MS, installTimeoutMs: PR_TEST_INSTALL_TIMEOUT_MS, productVerify: productVerifyReport });
+            gateReport = await runQualityGates(worktreeWorkspace, { timeoutMs: PR_TEST_TIMEOUT_MS, installTimeoutMs: PR_TEST_INSTALL_TIMEOUT_MS });
 
             if (gateReport && gateReport.results.length > 0 && !gateReport.passed) {
                 const failingSteps = gateReport.results.filter(r => !r.passed && !r.skipped).map(r => `${r.step}: ${r.output.slice(0, 200)}`);
@@ -468,6 +466,17 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                 log.info(`Quality gates passed on branch ${branchName}`);
                 allTranscript.push(msg('conductor', `Quality gates passed on branch ${branchName}`));
             }
+
+            // Plan 30-P: verify build artifacts AFTER the gates' build step. Run before it,
+            // a fresh worktree (dist/ is gitignored) always reported `artifacts=0/1`, and that
+            // stale result blocked an approved PR at merge (pacman-live-analysis-6 PR #2).
+            if (gateReport) {
+                try {
+                    productVerifyReport = await runProductVerification(worktreeWorkspace, detectStackRoots(worktreeWorkspace), 'artifacts+resolve');
+                    gateReport = { ...gateReport, productVerify: productVerifyReport };
+                    log.info(`Product verification: artifacts=${productVerifyReport.artifacts.filter(a => a.passed).length}/${productVerifyReport.artifacts.length}, unresolved refs=${productVerifyReport.resolveIssues.length}`);
+                } catch (pvErr: any) { log.warn(`Product verification error (non-fatal): ${pvErr.message}`); }
+            }
         } catch (testErr: any) { log.warn(`Post-dev quality gate error: ${testErr.message}`); }
 
         // ── 1b. Gate integrity: tamper detection ─────────────────────────
@@ -476,19 +485,23 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
             const result = await runIntegrityGate(worktreeWorkspace, branchBaseline, branchName, projectSlug, gateReport, outputPath, gitContext);
             integrityFindings = result.integrityFindings;
             gateReport = result.gateReport;
+            // A revert re-run rebuilds the report without product verification — keep it.
+            if (gateReport && productVerifyReport && !gateReport.productVerify) gateReport = { ...gateReport, productVerify: productVerifyReport };
             if (integrityFindings.length > 0) {
                 allTranscript.push(msg('conductor', `Gate integrity: ${integrityFindings.length} finding(s) detected\n${integrityFindings.map(f => `- [${f.severity}] ${f.kind}: ${f.detail}`).join('\n')}`));
             }
         }
 
-        // ── 1c. Plan 26, A4: Block PR when critical gates (typecheck/build) still fail ──
-        if (gateReport && !gateReport.passed) {
-            const criticalSteps = ['typecheck', 'build'];
-            const criticalFailures = gateReport.results
-                .filter(r => !r.passed && !r.skipped && criticalSteps.includes(r.step));
-            if (criticalFailures.length > 0) {
-                const failedSteps = criticalFailures.map(f => f.step).join(', ');
-                log.error(`Critical gates still failing on ${branchName}: ${failedSteps} — skipping PR`);
+        // ── 1c. Plan 26 A4 / Plan 30-L: no PR while gates still fail after repair ──
+        // decideMerge() treats a failed gate as a hard blocker under `strict` and
+        // `permissive`, so opening the PR only bought review, escalation and
+        // strong-fixer passes on a PR that could not merge (claudeopus5 PR #2:
+        // a failing `test` step, three development passes, then blocked).
+        if (gateReport && (!gateReport.passed || gateReport.productVerify?.passed === false)) {
+            const blockingSteps = blockingGateSteps(gateReport, REVIEW_MERGE_POLICY);
+            if (blockingSteps.length > 0) {
+                const failedSteps = blockingSteps.join(', ');
+                log.error(`Quality gates still failing on ${branchName} after repair: ${failedSteps} — skipping PR (merge policy '${REVIEW_MERGE_POLICY}' would block it)`);
                 allTranscript.push(msg('conductor', `BLOCKED: ${failedSteps} still failing after repair`));
                 emitRunEvent('branch:gates-blocked', { branchName, failedSteps });
                 if (outputPath) salvageWorktree(worktreeWorkspace, gitRoot, baseRef, branchName, 'critical-gates-failed', outputPath);
@@ -496,7 +509,7 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
                     pullRequest: {
                         id: `PR-GATES-FAILED-${branchName}`, prNumber: 0, prUrl: '',
                         title: `[GATES-FAILED] ${failedSteps} on ${branchName}`,
-                        description: `Critical quality gates (${failedSteps}) still failing after repair attempts.`,
+                        description: `Quality gates (${failedSteps}) still failing after repair attempts.`,
                         branchName, authorAgentId: assignments[0].devAgentId, reviewerAgentIds,
                         reviews: [], status: 'closed', assignmentIds: assignments.map(a => a.id), taskType, currentState,
                     },
@@ -652,7 +665,7 @@ export async function executePRWorkflow(input: PRWorkflowInput): Promise<PRWorkf
         }
 
         // ── 4. Merge PR ─────────────────────────────────────────────────
-        const allBlockingComments = allReviews.flatMap(r => r.comments).filter(c => !c.resolved && (c.severity === 'critical' || c.severity === 'major'));
+        const allBlockingComments = unresolvedBlockingComments(allReviews);
         const diffStatForMerge = gitExec(worktreeWorkspace, `diff --name-only ${baseRef}...HEAD`);
         const filesChangedCount = (diffStatForMerge && !diffStatForMerge.startsWith('Error:')) ? diffStatForMerge.split('\n').filter(f => f.trim()).length : 0;
         const { getEffectiveLimits: getEL } = require('../../utils/run-budget');

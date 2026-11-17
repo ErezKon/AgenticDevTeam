@@ -62,6 +62,19 @@ describe('getEffectiveLimits', () => {
         expect(limits.allowNewBranchWorkflows).toBe(true);
     });
 
+    it.each([[1, 1], [3, 3], [0, 1]])('PR_MAX_REVIEWERS=%s → maxReviewers %s at level=ok (Plan 30-N, min 1)', (configured, expected) => {
+        jest.doMock('../src/config', () => ({
+            ...jest.requireActual('../src/config'),
+            MAX_RUN_TOKENS: 0,
+            MAX_RUN_COST_USD: 0,
+            MAX_RUN_WALL_MS: 0,
+            PR_MAX_REVIEWERS: configured,
+        }));
+        const { getEffectiveLimits, _resetRunBudget } = require('../src/utils/run-budget');
+        _resetRunBudget();
+        expect(getEffectiveLimits().maxReviewers).toBe(expected);
+    });
+
     it('level=warn returns same limits as ok (with log)', () => {
         // To reach warn level, set a token limit and feed data
         jest.mock('../src/config', () => ({

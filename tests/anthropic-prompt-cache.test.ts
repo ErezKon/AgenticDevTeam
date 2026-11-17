@@ -158,6 +158,42 @@ describe('withMessageCacheBreakpoints (Plan 22 D1)', () => {
         const { breakpoints } = withMessageCacheBreakpoints(msgs);
         expect(breakpoints).toBe(0);
     });
+
+    // Plan 30-R: real ReAct turns are SHORT text + tool_calls. The minimum applies to the
+    // cumulative prefix, so the rolling breakpoint must still be placed. Before the fix it
+    // never was (every request logged `2 breakpoint(s)`, ~40 % cache reads).
+    describe('realistic ReAct history (Plan 30-R)', () => {
+        function reactHistory(aiText: (t: number) => string): BaseMessage[] {
+            const out: BaseMessage[] = [new HumanMessage(`## Task\n${big(8000)}`)];
+            for (let t = 1; t <= 6; t++) {
+                out.push(new AIMessage({
+                    content: aiText(t),
+                    tool_calls: [{ id: `t${t}`, name: 'read_file', args: { filePath: `f${t}.ts` }, type: 'tool_call' }],
+                }));
+                out.push(new ToolMessage({ content: big(2000), tool_call_id: `t${t}`, name: 'read_file' }));
+            }
+            return out;
+        }
+
+        it('places the rolling breakpoint on a short AI turn once the prefix is large enough', () => {
+            const { messages, breakpoints } = withMessageCacheBreakpoints(reactHistory(t => `Reading f${t}.ts`));
+            expect(breakpoints).toBe(2);
+            const rolling = messages.findIndex((m, i) => i > 0 && cacheControlBlocks(m.content).length > 0);
+            expect(messages[rolling]).toBeInstanceOf(AIMessage);
+            expect((messages[rolling] as AIMessage).tool_calls).toHaveLength(1);
+        });
+
+        it('skips AI turns with empty content (no block to carry cache_control)', () => {
+            const { messages, breakpoints } = withMessageCacheBreakpoints(reactHistory(t => (t === 3 ? '' : `step ${t}`)));
+            expect(breakpoints).toBe(2);
+            expect(cacheControlBlocks(messages[5].content)).toHaveLength(0); // turn 3's AI message
+        });
+
+        it('falls back to the task breakpoint only when no AI turn has content', () => {
+            const { breakpoints } = withMessageCacheBreakpoints(reactHistory(() => ''));
+            expect(breakpoints).toBe(1);
+        });
+    });
 });
 
 // ─── D2: cache-token accounting ─────────────────────────────────────────────

@@ -554,6 +554,14 @@ export function withLoopGuard(
             }
 
             if (SHELL_TOOL_NAMES.has(toolName) && !isShellRead) {
+                // Plan 30-H: a mutating command (npm install, a build, a codemod) can change
+                // any file, so earlier reads are no longer repeats — reset their counts like a
+                // file mutation does, keeping this command's own count so a looping command is
+                // still caught. Clearing only the caches made the next identical read return a
+                // "loop" error instead of running, and agents then edited blind (F12).
+                const ownCount = callCounts.get(key) ?? 0;
+                callCounts.clear();
+                if (ownCount > 0) callCounts.set(key, ownCount);
                 resultCache.clear();
                 shellReadCache.clear(); // Plan 24, C5: mutating shell clears read cache
                 branchReadCacheInvalidate(agentId); // Plan 24, C6: shell mutation clears branch cache

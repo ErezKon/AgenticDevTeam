@@ -95,6 +95,13 @@ function contentChars(content: unknown): number {
     return 0;
 }
 
+/** Characters of messages[0..end] — an estimate of the cached prefix size. */
+function prefixChars(messages: BaseMessage[], end: number): number {
+    let total = 0;
+    for (let i = 0; i <= end; i++) total += contentChars(messages[i].content);
+    return total;
+}
+
 function hasCacheControl(content: unknown): boolean {
     if (!Array.isArray(content)) return false;
     return content.some(b => b !== null && typeof b === 'object' && 'cache_control' in (b as object));
@@ -231,12 +238,17 @@ export function withMessageCacheBreakpoints(
 
     // 2. Rolling breakpoint: newest AI message strictly before the recent window.
     //    Everything up to it is a stable prefix that survives until the window slides.
+    //    Plan 30-R: Anthropic's minimum applies to the cumulative PREFIX up to the
+    //    breakpoint, not to the message carrying it. ReAct AI turns are short text +
+    //    tool_calls, so the old per-message `>= minChars` test never passed: every
+    //    request logged `2 breakpoint(s)` and the whole history (~60 % of input) was
+    //    re-billed at full price on every call (pacman-live-analysis-7: 40 % cache reads).
     if (targets.size < budget) {
         const boundary = findTurnBoundary(messages, HISTORY_KEEP_RECENT_TURNS);
         for (let i = Math.min(boundary, messages.length) - 1; i > firstHuman; i--) {
             const m = messages[i];
-            if (!isAIMessage(m)) continue;
-            if (contentChars(m.content) < minChars) continue;
+            if (!isAIMessage(m) || !blocksWithTrailingBreakpoint(m.content)) continue;
+            if (prefixChars(messages, i) < minChars) break;
             targets.add(i);
             break;
         }

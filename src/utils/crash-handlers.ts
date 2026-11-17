@@ -13,7 +13,7 @@ import { tokenTracker } from './token-tracker';
 import { refreshTokenReport } from './token-report';
 import { writeStateSnapshot } from './run-snapshot';
 import { appendLedger } from './run-ledger';
-import { getRunContext } from './run-context';
+import { getRunContext, runWithContextSync, type RunContext } from './run-context';
 import { trace, serializeError, writeDebugSummary } from './debug-trace';
 
 /**
@@ -37,22 +37,64 @@ export function flushTokenReportOnExit(
 
 // ─── Graceful shutdown hooks (Plan 27-G) ────────────────────────────────────
 
-/** Registered shutdown hooks — called on graceful shutdown (SIGINT/SIGTERM). */
-const _shutdownHooks: Array<() => void> = [];
+/**
+ * Runs registered for graceful shutdown, each with the RunContext it was
+ * registered from. Plan 30-F: signal handlers execute outside every
+ * AsyncLocalStorage scope, so `getRunContext()` is always `undefined` there —
+ * the context must be captured at registration and re-entered at shutdown.
+ * Before this, SIGINT saved no state, no ledger entry and no token report.
+ */
+const _shutdownHooks: Array<{ hook?: () => void; ctx: RunContext | undefined }> = [];
 
-/** Register a hook to run during graceful shutdown. */
+/** Register a hook to run (inside the caller's RunContext) during graceful shutdown. */
 export function onGracefulShutdown(hook: () => void): void {
-    _shutdownHooks.push(hook);
+    _shutdownHooks.push({ hook, ctx: getRunContext() });
+}
+
+/**
+ * Register the active run so a graceful shutdown saves its last known state
+ * (`cancelled` + `_stopReason`), a ledger entry and its token report.
+ *
+ * Returns a disposer — call it when the run ends. Plan 30-F left registrations in
+ * place, so a Ctrl+C at the CLI menu AFTER a run finished overwrote that run's final
+ * state with `manual-kill` (pacman-live-analysis-10, F27).
+ */
+export function registerRunShutdown(): () => void {
+    const entry = { ctx: getRunContext() };
+    _shutdownHooks.push(entry);
+    return () => {
+        const i = _shutdownHooks.indexOf(entry);
+        if (i >= 0) _shutdownHooks.splice(i, 1);
+    };
 }
 
 /** Flag to prevent double-shutdown. */
 let _shuttingDown = false;
 
+/** Persist one run's stop evidence. Must execute inside that run's context. */
+function saveStoppedRun(signal: string, logFn: (msg: string) => void): void {
+    const state = getRunContext()?.lastKnownState;
+    const outputPath = state?.outputPath as string | undefined;
+    if (state && outputPath) {
+        const stopReason = signal === 'SIGINT' || signal === 'SIGTERM' ? 'manual-kill' : 'crashed';
+        writeStateSnapshot(outputPath, { ...state, cancelled: true, _stopReason: stopReason });
+        logFn(`State snapshot saved on shutdown (${outputPath}).`);
+    }
+    appendLedger({
+        kind: 'invariant',
+        id: 'graceful-shutdown',
+        phase: (state?.phase ?? 'intake') as any,
+        detail: `Process terminated by ${signal}`,
+    });
+    flushTokenReportOnExit(signal, logFn);
+}
+
 /**
- * Graceful shutdown handler — runs all registered hooks, writes state snapshot
- * from RunContext, flushes ledger and token report, then exits.
+ * Graceful shutdown handler — for every registered run (inside its own
+ * RunContext) runs its hook, saves its state snapshot, ledger entry and token
+ * report; then writes the debug summary and exits.
  */
-function gracefulShutdown(signal: string, logFn: (msg: string) => void): void {
+export function gracefulShutdown(signal: string, logFn: (msg: string) => void): void {
     if (_shuttingDown) return;
     _shuttingDown = true;
 
@@ -61,40 +103,15 @@ function gracefulShutdown(signal: string, logFn: (msg: string) => void): void {
         trace({ kind: 'crash', event: 'signal', signal }, { processLevel: true });
     }
 
-    // 1. Run registered shutdown hooks (state snapshot, ledger flush, etc.)
-    for (const hook of _shutdownHooks) {
-        try { hook(); } catch { /* best-effort */ }
+    for (const { hook, ctx } of _shutdownHooks) {
+        const shutdownRun = () => {
+            try { hook?.(); } catch { /* best-effort */ }
+            try { saveStoppedRun(signal, logFn); } catch { /* best-effort */ }
+        };
+        if (ctx) runWithContextSync(ctx, shutdownRun);
+        else shutdownRun();
     }
-
-    // 2. Best-effort: save state from RunContext if available
-    try {
-        const ctx = getRunContext();
-        if (ctx?.lastKnownState) {
-            const outputPath = ctx.lastKnownState.outputPath as string | undefined;
-            if (outputPath) {
-                const stateWithStop = {
-                    ...ctx.lastKnownState,
-                    cancelled: true,
-                    _stopReason: 'manual-kill',
-                };
-                writeStateSnapshot(outputPath, stateWithStop);
-                logFn('State snapshot saved on shutdown.');
-            }
-        }
-    } catch { /* best-effort */ }
-
-    // 3. Write ledger entry recording the shutdown
-    try {
-        appendLedger({
-            kind: 'invariant',
-            id: 'graceful-shutdown',
-            phase: 'development' as any,
-            detail: `Process terminated by ${signal}`,
-        });
-    } catch { /* best-effort */ }
-
-    // 4. Flush token report
-    flushTokenReportOnExit(signal, logFn);
+    if (_shutdownHooks.length === 0) flushTokenReportOnExit(signal, logFn);
     writeDebugSummary({ processLevel: true });
 
     logFn(`Graceful shutdown complete. Use 'continue-run' to resume.`);

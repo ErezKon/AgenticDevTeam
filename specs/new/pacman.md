@@ -163,3 +163,10 @@ The game should have sound effects and background audio:
 - There should be a **colorblind-friendly option** that changes the ghost colors to a palette that's easier to distinguish for people with color vision differences.
 
 ---
+
+## User Additions
+
+- I want the frontend to be Angular
+- No CI/CD required, No Jenkins pipeline
+- No testing, no TDD
+- No Database, scores and additional data should be stored in local storage

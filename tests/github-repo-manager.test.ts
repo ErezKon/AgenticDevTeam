@@ -16,6 +16,8 @@ const mockCreateForAuthenticatedUser = jest.fn();
 const mockCreateInOrg = jest.fn();
 const mockReposGet = jest.fn();
 const mockGetAuthenticated = jest.fn();
+const mockListCommits = jest.fn();
+const mockListBranches = jest.fn();
 
 jest.mock('@octokit/rest', () => ({
     Octokit: jest.fn().mockImplementation(() => ({
@@ -24,6 +26,8 @@ jest.mock('@octokit/rest', () => ({
             createForAuthenticatedUser: mockCreateForAuthenticatedUser,
             createInOrg: mockCreateInOrg,
             get: mockReposGet,
+            listCommits: mockListCommits,
+            listBranches: mockListBranches,
         },
     })),
 }));
@@ -127,6 +131,85 @@ describe('createGitHubRepo', () => {
         expect(mockCreateForAuthenticatedUser).toHaveBeenCalledWith(
             expect.objectContaining({ private: true }),
         );
+    });
+
+    // Plan 30-B: a repo left behind by an interrupted intake made the rerun die on 422.
+    describe('when the name is already taken (422)', () => {
+        const nameTaken = {
+            status: 422,
+            message: 'Repository creation failed.',
+            response: { data: { errors: [{ field: 'name', message: 'name already exists on this account' }] } },
+        };
+        const existing = {
+            full_name: 'me/left-over',
+            html_url: 'https://github.com/me/left-over',
+            clone_url: 'https://github.com/me/left-over.git',
+            default_branch: 'main',
+            private: true,
+        };
+
+        beforeEach(() => {
+            mockGetAuthenticated.mockResolvedValue({ data: { login: 'me' } });
+            mockCreateForAuthenticatedUser.mockRejectedValue(nameTaken);
+            mockReposGet.mockResolvedValue({ data: existing });
+        });
+
+        it('reuses a repo that holds only the auto-init commit (system branch at the same tip)', async () => {
+            mockListCommits.mockResolvedValue({ data: [{ sha: 'abc' }] });
+            mockListBranches.mockResolvedValue({
+                data: [{ name: 'main', commit: { sha: 'abc' } }, { name: 'project/left-over', commit: { sha: 'abc' } }],
+            });
+
+            const result = await createGitHubRepo('tok', 'me', 'left-over', true);
+
+            expect(result).toEqual({
+                fullName: 'me/left-over',
+                htmlUrl: 'https://github.com/me/left-over',
+                cloneUrl: 'https://github.com/me/left-over.git',
+                defaultBranch: 'main',
+            });
+            expect(mockListCommits).toHaveBeenCalledWith(expect.objectContaining({ sha: 'main', per_page: 2 }));
+        });
+
+        it('reuses a completely empty repo (GitHub answers 409 for its commits)', async () => {
+            mockListCommits.mockRejectedValue({ status: 409, message: 'Git Repository is empty.' });
+            mockListBranches.mockResolvedValue({ data: [] });
+
+            await expect(createGitHubRepo('tok', 'me', 'left-over', true)).resolves.toEqual(
+                expect.objectContaining({ fullName: 'me/left-over' }),
+            );
+        });
+
+        it('refuses a repo whose default branch has real history', async () => {
+            mockListCommits.mockResolvedValue({ data: [{ sha: 'b' }, { sha: 'a' }] });
+
+            await expect(createGitHubRepo('tok', 'me', 'left-over', true)).rejects.toThrow(
+                /already exists and contains work — choose a different repository name/,
+            );
+            expect(mockListBranches).not.toHaveBeenCalled();
+        });
+
+        it('refuses a repo with work pushed to another branch', async () => {
+            mockListCommits.mockResolvedValue({ data: [{ sha: 'abc' }] });
+            mockListBranches.mockResolvedValue({
+                data: [{ name: 'main', commit: { sha: 'abc' } }, { name: 'feature', commit: { sha: 'def' } }],
+            });
+
+            await expect(createGitHubRepo('tok', 'me', 'left-over', true)).rejects.toThrow(/contains work on other branches/);
+        });
+
+        it('refuses a repo whose visibility differs from the request', async () => {
+            await expect(createGitHubRepo('tok', 'me', 'left-over', false)).rejects.toThrow(/already exists and is private/);
+            expect(mockListCommits).not.toHaveBeenCalled();
+        });
+
+        it('rethrows other creation errors unchanged', async () => {
+            const forbidden = { status: 403, message: 'Forbidden' };
+            mockCreateForAuthenticatedUser.mockRejectedValue(forbidden);
+
+            await expect(createGitHubRepo('tok', 'me', 'left-over', true)).rejects.toBe(forbidden);
+            expect(mockReposGet).not.toHaveBeenCalled();
+        });
     });
 });
 

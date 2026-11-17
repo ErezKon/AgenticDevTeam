@@ -166,6 +166,15 @@ export function runWithContext<T>(ctx: RunContext, fn: () => Promise<T>): Promis
 }
 
 /**
+ * Synchronous variant of `runWithContext` for code that must finish before the
+ * process exits (Plan 30-F: graceful-shutdown hooks run inside signal handlers,
+ * which execute outside every AsyncLocalStorage scope).
+ */
+export function runWithContextSync<T>(ctx: RunContext, fn: () => T): T {
+    return _store.run(ctx, fn);
+}
+
+/**
  * Update the last known state on the active RunContext (Plan 27-G).
  * Called by phaseNode at each phase entry so graceful shutdown can save it.
  */

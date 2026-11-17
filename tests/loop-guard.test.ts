@@ -69,6 +69,45 @@ describe('Tool Loop Guard', () => {
         expect(writeFile.getExecCount()).toBe(1);
     });
 
+    // Plan 30-H (F12): `npm install` between two reads of the same file made the second
+    // read return a "loop" error (cache cleared, count kept), so the agent edited blind.
+    it('re-runs a read after a mutating shell command instead of reporting a loop', async () => {
+        const readFile = makeMockTool('read_file', 'main.ts content');
+        const shell = tool(async () => 'installed', {
+            name: 'run_command',
+            description: 'Mock shell',
+            schema: z.object({ command: z.string() }),
+        });
+        const { tools: guarded } = withLoopGuard(
+            [readFile.tool, shell], 'test-agent',
+            { budgets: { reads: 30, writes: 25, shell: 10 } },
+        );
+        const guardedRead = guarded.find(t => t.name === 'read_file')!;
+        const guardedShell = guarded.find(t => t.name === 'run_command')!;
+
+        await guardedRead.invoke({ path: 'src/main.ts' });
+        await guardedShell.invoke({ command: 'npm install @angular/service-worker' });
+        const reRead = await guardedRead.invoke({ path: 'src/main.ts' });
+
+        expect(reRead).toBe('main.ts content');
+        expect(readFile.getExecCount()).toBe(2);
+    });
+
+    it('still catches a looping mutating shell command', async () => {
+        let runs = 0;
+        const shell = tool(async () => { runs++; return 'ok'; }, {
+            name: 'run_command',
+            description: 'Mock shell',
+            schema: z.object({ command: z.string() }),
+        });
+        const { tools: guarded } = withLoopGuard([shell], 'test-agent', { budgets: { reads: 30, writes: 25, shell: 10 } });
+        const guardedShell = guarded[0];
+        for (let i = 0; i < 3; i++) await guardedShell.invoke({ command: 'npm install' });
+        const blocked = await guardedShell.invoke({ command: 'npm install' });
+        expect(String(blocked)).toMatch(/BLOCKED|loop/);
+        expect(runs).toBeLessThan(4);
+    });
+
     it('a CACHED response does not increment the budget counter', async () => {
         const readFile = makeMockTool('read_file', 'content');
         const writeFile = makeMockTool('write_file', 'written');

@@ -22,6 +22,11 @@ import { awaitProviderRecovery, createProviderProbe } from '../../utils/llm-thro
 import { emitRunEvent } from '../../utils/event-bus';
 import { withTraceContext } from '../../utils/debug-trace';
 import { writePeriodicSnapshot } from '../../utils/run-snapshot';
+import { getRunContext, setLastKnownState } from '../../utils/run-context';
+import { mergeDispatchProgress } from './dispatch-progress';
+import { orderBranchLayers } from './dispatch-order';
+
+export { orderBranchLayers, topoSort } from './dispatch-order';
 import type { Assignment, FileChange, ArtifactRef, TranscriptMessage, PhaseName, PullRequest, GitContext, TechDecision, UserStory, Task } from '../_shared/base-schemas';
 import type { TokenCallRecord } from '../../utils/token-tracker';
 
@@ -43,53 +48,9 @@ export interface DispatchResult {
     /** Set when a provider-level failure (billing, auth, quota) could not be recovered.
      *  The run should stop gracefully and write a snapshot for continue-run. */
     providerFailureKind: string | null;
-}
-
-/**
- * Topological sort on assignments by dependsOn.
- * Returns assignments in execution order (groups of independent assignments).
- *
- * `preSatisfied` seeds the completed set so dependencies on already-merged
- * work are treated as resolved rather than triggering the "cyclic" fallback.
- */
-export function topoSort(
-    assignments: Assignment[],
-    preSatisfied: Set<string> = new Set(),
-): Assignment[][] {
-    const map = new Map<string, Assignment>();
-    for (const a of assignments) map.set(a.id, a);
-
-    // Detect and warn about dangling dependsOn ids (P10): treat them as pre-satisfied
-    // rather than collapsing all layers into one parallel batch.
-    const allIds = new Set([...map.keys(), ...preSatisfied]);
-    for (const a of assignments) {
-        for (const dep of a.dependsOn) {
-            if (!allIds.has(dep)) {
-                log.warn(`Assignment ${a.id} dependsOn non-existent id "${dep}" — treating as pre-satisfied`);
-                preSatisfied.add(dep);
-            }
-        }
-    }
-
-    const completed = new Set<string>(preSatisfied);
-    const layers: Assignment[][] = [];
-
-    while (assignments.filter(a => !completed.has(a.id)).length > 0) {
-        const ready = assignments.filter(
-            a => !completed.has(a.id) &&
-                a.dependsOn.every(dep => completed.has(dep))
-        );
-        if (ready.length === 0) {
-            // Remaining are cyclic — just push them all
-            const remaining = assignments.filter(a => !completed.has(a.id));
-            log.warn(`topoSort: ${remaining.length} assignment(s) have cyclic dependencies — dispatching in one parallel batch`);
-            layers.push(remaining);
-            break;
-        }
-        layers.push(ready);
-        for (const a of ready) completed.add(a.id);
-    }
-    return layers;
+    /** Set when DISPATCH_HALT_POLICY stopped dispatch because a branch did not merge
+     *  (Plan 30-K). developmentNode ends the run instead of routing on to QA. */
+    dispatchHalt: { branch: string; status: string } | null;
 }
 
 /**
@@ -108,7 +69,14 @@ export function canonicalBranchName(
 ): string {
     const storyKey = a.storyId ?? a.id;
     const existing = storyBranches.get(storyKey);
-    if (existing) return existing;
+    // Plan 30-U (F18/F25): the one-branch-per-story rule never moves work across the
+    // scaffold boundary. The TL reuses the first story id for scaffold work, so it pulled
+    // the maze feature — and its dependencies on later branches — into the scaffold and
+    // made the whole branch graph cyclic. An assignment that names its own branch on the
+    // other side of the boundary keeps it; the story's first mapping is left untouched.
+    const crossesScaffold = existing !== undefined && a.branchName !== undefined
+        && SCAFFOLD_BRANCH_RE.test(existing) !== SCAFFOLD_BRANCH_RE.test(a.branchName);
+    if (existing && !crossesScaffold) return existing;
 
     let branch = a.branchName ?? featureBranch(projectSlug, storyKey, a.description);
     if (!branch.startsWith(`${projectSlug}/`)) branch = `${projectSlug}/${branch}`;
@@ -116,7 +84,7 @@ export function canonicalBranchName(
     // branchName or storyId values (Plan 25-02, A4).
     branch = branch.replace(/[^a-zA-Z0-9/_.-]/g, '-').replace(/-{2,}/g, '-');
     assertValidRef(branch);
-    storyBranches.set(storyKey, branch);
+    if (!existing) storyBranches.set(storyKey, branch);
     return branch;
 }
 
@@ -154,9 +122,20 @@ function groupByBranch(
  */
 export const SCAFFOLD_BRANCH_RE = /(^|\/)chore\/scaffold$/i;
 
-/** Returns true when an assignment is part of the scaffold (chore/scaffold). */
-export function isScaffoldAssignment(a: Assignment): boolean {
-    return a.taskType === 'chore' || SCAFFOLD_BRANCH_RE.test(a.branchName ?? '');
+/**
+ * Returns true when an assignment is part of the scaffold (chore/scaffold).
+ *
+ * Plan 30-O: pass the full plan as `all`. Once the plan names a scaffold branch, a
+ * `chore` assignment on any OTHER branch is feature-branch housekeeping, not scaffold
+ * work (pacman-live-analysis-4: ASSIGN-019 on `us-015-audio-persistence`, depending on
+ * three feature assignments, became a dependency of every assignment → cycle, and its
+ * branch was promoted to a second "scaffold"). Without `all` (or with no named scaffold
+ * branch) the legacy rule applies: any `chore` counts.
+ */
+export function isScaffoldAssignment(a: Assignment, all?: Assignment[]): boolean {
+    if (SCAFFOLD_BRANCH_RE.test(a.branchName ?? '')) return true;
+    if (a.taskType !== 'chore') return false;
+    return !(all && all.some(x => SCAFFOLD_BRANCH_RE.test(x.branchName ?? '')));
 }
 
 /**
@@ -167,22 +146,41 @@ export function isScaffoldAssignment(a: Assignment): boolean {
  * match, so a single `refactor`-typed assignment sharing the scaffold branch
  * silently disabled the barrier for the whole run.
  */
-export function isScaffoldBranch(branch: string, assignments: Assignment[]): boolean {
+export function isScaffoldBranch(branch: string, assignments: Assignment[], all?: Assignment[]): boolean {
     if (SCAFFOLD_BRANCH_RE.test(branch)) return true;
-    return assignments.length > 0 && assignments.some(isScaffoldAssignment);
+    return assignments.length > 0 && assignments.some(a => isScaffoldAssignment(a, all));
+}
+
+/** Ids `roots` depend on, directly or transitively (within `all`). */
+function transitiveDependencies(roots: Assignment[], all: Assignment[]): Set<string> {
+    const byId = new Map(all.map(a => [a.id, a]));
+    const seen = new Set<string>();
+    const stack = roots.flatMap(r => r.dependsOn);
+    while (stack.length > 0) {
+        const id = stack.pop()!;
+        if (seen.has(id)) continue;
+        seen.add(id);
+        stack.push(...(byId.get(id)?.dependsOn ?? []));
+    }
+    return seen;
 }
 
 /**
  * Inject implicit scaffold dependencies: every non-scaffold assignment
  * depends on all scaffold assignment ids, regardless of what the TL wrote.
  * This guarantees the scaffold merges before feature branches are created.
+ * Plan 30-O: never into an assignment the scaffold itself (transitively) depends
+ * on — that edge would close a cycle.
  */
 export function injectScaffoldDependencies(assignments: Assignment[]): Assignment[] {
-    const scaffoldIds = assignments.filter(isScaffoldAssignment).map(a => a.id);
-    if (scaffoldIds.length === 0) return assignments;
+    const scaffold = assignments.filter(a => isScaffoldAssignment(a, assignments));
+    if (scaffold.length === 0) return assignments;
+    const scaffoldIds = scaffold.map(a => a.id);
+    const scaffoldIdSet = new Set(scaffoldIds);
+    const scaffoldAncestors = transitiveDependencies(scaffold, assignments);
 
     return assignments.map(a => {
-        if (isScaffoldAssignment(a)) return a;
+        if (scaffoldIdSet.has(a.id) || scaffoldAncestors.has(a.id)) return a;
         const existing = new Set(a.dependsOn);
         const newDeps = scaffoldIds.filter(id => !existing.has(id));
         if (newDeps.length === 0) return a;
@@ -201,13 +199,30 @@ const BOOTSTRAP_TEXT_PATTERNS = [
     /\bapp\s*initializ/i, /\bcomposition\s*root\b/i,
 ];
 
+/** True when `a` depends on any non-scaffold assignment in `all` (unknown ids are ignored). */
+function dependsOnNonScaffold(a: Assignment, all: Assignment[]): boolean {
+    if (!a.dependsOn?.length || all.length === 0) return false;
+    const byId = new Map(all.map(x => [x.id, x]));
+    return a.dependsOn.some(id => {
+        const dep = byId.get(id);
+        return dep !== undefined && !isScaffoldAssignment(dep, all);
+    });
+}
+
 /**
  * Returns true when an assignment looks like bootstrap/wiring work:
  * it either owns an entry-point module or its description mentions bootstrap keywords.
+ *
+ * Plan 30-J: bootstrap work runs right after the scaffold, so it can only depend on
+ * scaffold assignments. One that consumes feature work (`dependsOn` a non-scaffold
+ * assignment in `all`) is integration: classifying "only add … toggle wiring" (an
+ * a11y pass depending on an 18-dependency integration assignment) as bootstrap ran
+ * the final integration branch first and created cycles (pacman-live-analysis-3).
  */
-export function isBootstrapAssignment(a: Assignment): boolean {
+export function isBootstrapAssignment(a: Assignment, all: Assignment[] = []): boolean {
     // Don't classify scaffold assignments as bootstrap
-    if (isScaffoldAssignment(a)) return false;
+    if (isScaffoldAssignment(a, all)) return false;
+    if (dependsOnNonScaffold(a, all)) return false;
 
     // Check moduleIds for entry-point patterns
     for (const mod of a.moduleIds ?? []) {
@@ -225,9 +240,10 @@ export function isBootstrapAssignment(a: Assignment): boolean {
  * Returns true when a *dispatch branch* is a bootstrap/wiring branch.
  *
  * A branch is bootstrap if any of its assignments is a bootstrap assignment.
+ * `all` is the full plan, used to tell scaffold from feature dependencies.
  */
-export function isBootstrapBranch(_branch: string, assignments: Assignment[]): boolean {
-    return assignments.length > 0 && assignments.some(isBootstrapAssignment);
+export function isBootstrapBranch(_branch: string, assignments: Assignment[], all: Assignment[] = assignments): boolean {
+    return assignments.length > 0 && assignments.some(a => isBootstrapAssignment(a, all));
 }
 
 /**
@@ -237,13 +253,16 @@ export function isBootstrapBranch(_branch: string, assignments: Assignment[]): b
  * before other feature branches.
  */
 export function injectBootstrapDependencies(assignments: Assignment[]): Assignment[] {
-    const bootstrapIds = assignments.filter(isBootstrapAssignment).map(a => a.id);
+    // Bootstrap assignments depend on scaffold work only (Plan 30-J), so the injected
+    // edges can never close a cycle.
+    const bootstrapIds = assignments.filter(a => isBootstrapAssignment(a, assignments)).map(a => a.id);
     if (bootstrapIds.length === 0) return assignments;
+    const bootstrapIdSet = new Set(bootstrapIds);
 
-    log.info(`Bootstrap barrier: ${bootstrapIds.length} bootstrap assignment(s) detected — injecting dependencies`);
+    log.info(`Bootstrap barrier: ${bootstrapIds.length} bootstrap assignment(s) detected [${bootstrapIds.join(', ')}] — injecting dependencies`);
 
     return assignments.map(a => {
-        if (isScaffoldAssignment(a) || isBootstrapAssignment(a)) return a;
+        if (isScaffoldAssignment(a, assignments) || bootstrapIdSet.has(a.id)) return a;
         const existing = new Set(a.dependsOn);
         const newDeps = bootstrapIds.filter(id => !existing.has(id));
         if (newDeps.length === 0) return a;
@@ -392,6 +411,14 @@ export async function dispatchDevelopers(
     // Plan 25: set when a provider-level failure cannot be recovered
     let providerFailureKind: string | null = null;
 
+    // Plan 30-K: set when DISPATCH_HALT_POLICY stops dispatch on a non-merged branch
+    // (cast: assigned inside the runBranches closure, which TS flow analysis cannot see)
+    let dispatchHalt = null as { branch: string; status: string } | null;
+
+    // Plan 30-I: full run state at dispatch entry — progress snapshots merge into it
+    // instead of replacing state.json with a 4-key partial object.
+    const dispatchBaseState = getRunContext()?.lastKnownState ?? null;
+
     // Plan 24 D3: wall-clock-aware admission control
     let branchesDeferred = 0;
     const completedBranchDurationsMs: number[] = [];
@@ -415,10 +442,12 @@ export async function dispatchDevelopers(
     // Sub-Plan 06 §5b: Detect overlapping module ownership across branches
     const overlaps = findOverlappingBranches(branchGroups);
 
-    // ── Topological sort within each branch, then process branches ────────
-    // Branches with cross-branch dependencies are serialized via topoSort on assignments
+    // ── Branch-level topological order (Plan 30-O), then process branches ──
     const preSatisfied = new Set(completedAssignmentIds ?? []);
-    const allAssignmentsSorted = topoSort(augmentedAssignments, preSatisfied);
+    const allAssignmentsSorted = orderBranchLayers(
+        augmentedAssignments, a => canonicalBranchName(a, projectSlug, storyBranches), preSatisfied,
+        branch => isScaffoldBranch(branch, branchGroups.get(branch) ?? [], augmentedAssignments),
+    );
 
     // Track which branches have been processed
     const processedBranches = new Set<string>();
@@ -448,12 +477,12 @@ export async function dispatchDevelopers(
 
         // Sub-Plan 06 §5a / Plan 22 F1: Identify scaffold branches in this layer
         const scaffoldBranches = branchesToProcess.filter(branch =>
-            isScaffoldBranch(branch, branchGroups.get(branch) ?? []),
+            isScaffoldBranch(branch, branchGroups.get(branch) ?? [], augmentedAssignments),
         );
         // Plan 24, E4: Identify bootstrap/wiring branches (run right after scaffold)
         const bootstrapBranches = branchesToProcess.filter(branch =>
             !scaffoldBranches.includes(branch) &&
-            isBootstrapBranch(branch, branchGroups.get(branch) ?? []),
+            isBootstrapBranch(branch, branchGroups.get(branch) ?? [], augmentedAssignments),
         );
         const featureBranches = branchesToProcess.filter(b =>
             !scaffoldBranches.includes(b) && !bootstrapBranches.includes(b),
@@ -626,7 +655,7 @@ export async function dispatchDevelopers(
                             if (!isMerged) {
                                 const branchName = pr.branchName ?? '';
                                 const branchAssigns = branchGroups.get(branchName) ?? [];
-                                const isScaffold = isScaffoldBranch(branchName, branchAssigns);
+                                const isScaffold = isScaffoldBranch(branchName, branchAssigns, augmentedAssignments);
                                 const shouldHalt = DISPATCH_HALT_POLICY === 'strict'
                                     || (DISPATCH_HALT_POLICY === 'scaffold-only' && isScaffold);
 
@@ -637,6 +666,7 @@ export async function dispatchDevelopers(
                                         status: pr.status,
                                         policy: DISPATCH_HALT_POLICY,
                                     });
+                                    dispatchHalt = { branch: branchName, status: pr.status };
                                     prCreationFailed = true; // reuse existing stop flag
                                     break;
                                 }
@@ -683,14 +713,13 @@ export async function dispatchDevelopers(
                     }
                 }
 
-                // Plan 27-F: periodic state snapshot after each batch of branch results
-                if (outputPath) {
-                    writePeriodicSnapshot(outputPath, {
-                        phase: 'development',
-                        pullRequests,
-                        fileChanges,
-                        completedAssignmentIds: newlyCompletedIds,
-                    }, 'development');
+                // Plan 27-F / 30-I: periodic snapshot after each batch — the FULL run state
+                // with this dispatch's progress appended (same semantics as the append
+                // reducers), also kept as lastKnownState so a SIGINT persists the progress.
+                if (outputPath && dispatchBaseState) {
+                    const progressState = mergeDispatchProgress(dispatchBaseState, pullRequests, fileChanges, newlyCompletedIds);
+                    setLastKnownState(progressState);
+                    writePeriodicSnapshot(outputPath, progressState, 'development');
                 }
 
                 if (j + effectiveConcurrency < branches.length && INTER_BATCH_DELAY_MS > 0) {
@@ -783,12 +812,17 @@ export async function dispatchDevelopers(
     );
 
     if (prCreationFailed) {
-        log.error(`Run stopped early: PR creation failed — use continue-run to retry`);
+        // Plan 30-K: the shared stop flag also covers strict halts on PRs that WERE
+        // created (blocked / gates-failed); "PR creation failed" was wrong for those.
+        const stopMessage = dispatchHalt
+            ? `Run stopped early: branch "${dispatchHalt.branch}" did not merge (status: ${dispatchHalt.status}) — dispatch halted per DISPATCH_HALT_POLICY=${DISPATCH_HALT_POLICY}`
+            : `Run stopped early: PR creation failed for ${failedPrCreation} branch(es) — use continue-run to retry`;
+        log.error(stopMessage);
         transcript.push({
             timestamp: new Date().toISOString(),
             agentId: 'dispatcher',
             phase: 'development' as PhaseName,
-            message: `Run stopped early: PR creation failed for ${failedPrCreation} branch(es) — use continue-run to retry`,
+            message: stopMessage,
         });
     }
 
@@ -813,5 +847,6 @@ export async function dispatchDevelopers(
         salvageBranches: allSalvageBranches,
         branchesDeferred,
         providerFailureKind,
+        dispatchHalt,
     };
 }

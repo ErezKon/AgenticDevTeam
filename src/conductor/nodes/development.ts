@@ -25,6 +25,7 @@ import {
 import type { ContextSection } from '../context-builder';
 import { emitRunEvent } from '../../utils/event-bus';
 import { writePeriodicSnapshot } from '../../utils/run-snapshot';
+import { getBudgetStatus, shouldStopRun } from '../../utils/run-budget';
 import { projectSlugFromBranch } from '../../utils/branch-naming';
 import { phaseNode, msg, checkRerun } from './_guards';
 import type { ProjectStateType } from '../state';
@@ -129,10 +130,23 @@ export const developmentNode = phaseNode('development', devLog, { haltCheck: tru
         devLog.warn(`${result.salvageBranches.length} branch(es) salvaged (not merged): ${result.salvageBranches.join(', ')}`);
     }
 
-    // Plan 25: provider failure — stop gracefully so continue-run can pick up
-    if (result.providerFailureKind) {
-        const reason = `provider-${result.providerFailureKind}`;
-        devLog.error(`Provider failure (${result.providerFailureKind}) — routing to finalize for graceful shutdown`);
+    // Plan 25: provider failure — stop gracefully so continue-run can pick up.
+    // Plan 30-K: a strict dispatch halt ends the run the same way. Routing on to QA
+    // synthesised dozens of bugs whose bugfix rounds re-dispatched the same blocked
+    // branch (claudeopus5: three development passes on PR #2).
+    // Plan 30-V (F26): a halt while the run budget is at `stop` is a budget stop — the
+    // branch was cut short by the budget, not rejected — so it finalizes as
+    // `budget-exhausted` (continuable) instead of `failed`.
+    const budgetStopped = result.dispatchHalt !== null && shouldStopRun();
+    const stop = result.providerFailureKind
+        ? { reason: `provider-${result.providerFailureKind}`, detail: `provider failure (${result.providerFailureKind})` }
+        : result.dispatchHalt && budgetStopped
+            ? { reason: `budget-exhausted:${getBudgetStatus().binding}`, detail: `run budget exhausted while ${result.dispatchHalt.branch} was in progress` }
+            : result.dispatchHalt
+                ? { reason: `dispatch-halted:${result.dispatchHalt.branch}`, detail: `branch ${result.dispatchHalt.branch} did not merge (status: ${result.dispatchHalt.status})` }
+                : null;
+    if (stop) {
+        devLog.error(`Run stopped: ${stop.detail} — routing to finalize`);
         writePeriodicSnapshot(state.outputPath, state, 'development');
         return {
             ...rerunUpdate,
@@ -144,12 +158,12 @@ export const developmentNode = phaseNode('development', devLog, { haltCheck: tru
             salvageBranches: result.salvageBranches,
             transcript: [
                 ...result.transcript,
-                msg('conductor', 'development', `Run stopped: provider failure (${result.providerFailureKind})`),
+                msg('conductor', 'development', `Run stopped: ${stop.detail}`),
             ],
             phase: 'development' as PhaseName,
             tokenUsage: result.tokenUsage ?? [],
             cancelled: true,
-            _stopReason: reason,
+            _stopReason: stop.reason,
         };
     }
 

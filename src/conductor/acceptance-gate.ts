@@ -223,7 +223,20 @@ export function evaluateAcceptance(state: ProjectStateType): AcceptanceReport {
             inconclusive = true;
             detail = 'No user stories to evaluate';
         } else {
+            // Plan 30-Q: a story is covered when an assignment carrying it (storyId or
+            // additionalStoryIds) is part of a MERGED PR. Plan 25 removed the old
+            // branchAssignments-based loop that filled this set, so SCOPE failed for
+            // every story of every run and no run could ever be accepted.
+            const assignmentsById = new Map((state.assignments ?? []).map(a => [a.id, a]));
             const storyIdsWithMerge = new Set<string>();
+            for (const pr of state.pullRequests ?? []) {
+                if (pr.status !== 'merged') continue;
+                for (const id of pr.assignmentIds ?? []) {
+                    const a = assignmentsById.get(id);
+                    if (a?.storyId) storyIdsWithMerge.add(a.storyId);
+                    for (const sid of a?.additionalStoryIds ?? []) storyIdsWithMerge.add(sid);
+                }
+            }
             const orphanedStories = stories.filter(s => !storyIdsWithMerge.has(s.id));
             if (orphanedStories.length > 0) {
                 passed = false;

@@ -59,8 +59,11 @@ export async function finalizeNode(state: ProjectStateType): Promise<Partial<Pro
     type ManifestStatus = 'completed' | 'failed' | 'crashed' | 'cancelled' | 'partial' | 'inconclusive' | 'budget-exhausted';
     // Plan 25: use 'budget-exhausted' status when the run was stopped due to budget/provider failure
     const hasBudgetStop = state._stopReason?.startsWith('budget-exhausted') || state._stopReason?.startsWith('provider-');
+    // Plan 30-K: a dispatch halt is a failed delivery, not a HITL cancellation.
+    const hasDispatchHalt = state._stopReason?.startsWith('dispatch-halted:') ?? false;
     const finalStatus: ManifestStatus =
         hasBudgetStop                         ? 'budget-exhausted'
+      : hasDispatchHalt                      ? 'failed'
       : state.cancelled                      ? 'cancelled'
       : RUN_FAIL_POLICY === 'legacy'         ? 'completed'
       : acceptance.status === 'accepted'     ? 'completed'
@@ -69,7 +72,8 @@ export async function finalizeNode(state: ProjectStateType): Promise<Partial<Pro
       :                                        'failed';
     tokenTracker.setRunStatus(finalStatus as any);
     if (hasBudgetStop) finalLog.warn(`Run stopped: ${state._stopReason} — state saved for continue-run.`);
-    if (state.cancelled && !hasBudgetStop) finalLog.warn('Run was cancelled by HITL deny.');
+    if (hasDispatchHalt) finalLog.error(`Run stopped: ${state._stopReason} — a branch could not merge and DISPATCH_HALT_POLICY halted the run.`);
+    if (state.cancelled && !hasBudgetStop && !hasDispatchHalt) finalLog.warn('Run was cancelled by HITL deny.');
     if (finalStatus === 'failed') finalLog.error(`Run FAILED — ${acceptance.blockers.length} blocker(s)`);
     if (finalStatus === 'partial') finalLog.warn(`Run PARTIAL — all required criteria passed but optional criteria failed`);
     if (finalStatus === 'inconclusive') finalLog.warn(`Run INCONCLUSIVE — some verifications could not execute`);

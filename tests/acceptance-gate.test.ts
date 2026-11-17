@@ -117,16 +117,50 @@ describe('evaluateAcceptance', () => {
     it('returns "accepted" when all criteria pass', () => {
         const state = makeMinimalState({
             latestGateReport: makeGateReport(),
-            testReports: [{ type: 'unit', framework: 'jest', total: 5, passed: 5, failed: 0, skipped: 0, status: 'pass' as const, source: 'quality-gates' as const, iterationIndex: 0, runnerError: false, cases: [], failures: [], agentId: 'qa-unit' }],
+            testReports: [{ type: 'unit', framework: 'jest', total: 5, passed: 5, failed: 0, skipped: 0, status: 'pass' as const, source: 'executed' as const, iterationIndex: 0, runnerError: false, cases: [], failures: [], agentId: 'qa-unit' }],
             userStories: [{ id: 'US-1', epicId: 'E-1', asA: 'user', iWant: 'calc', soThat: 'math', acceptanceCriteria: ['AC-1'] }],
             assignments: [{ id: 'A-1', storyId: 'US-1', additionalStoryIds: [], taskIds: ['TASK-001'], acIndexes: [], devAgentId: 'dev-1', rank: 'senior' as const, priority: 'high' as const, complexity: 'moderate' as const, estimate: '2h', description: 'impl', dependsOn: [], taskType: 'feature' as const, moduleIds: [] }],
             pullRequests: [{ id: 'PR-1', prNumber: 1, prUrl: '', title: '', description: '', branchName: 'feature/us1', authorAgentId: 'dev-1', reviewerAgentIds: [], reviews: [], status: 'merged' as any, assignmentIds: ['A-1'], taskType: 'feature' as any }],
         });
 
         const report = evaluateAcceptance(state);
-        // SCOPE always fails (storyIdsWithMerge is always empty) so best status is 'rejected'
-        expect(report.status).toBe('rejected');
+        // Plan 30-Q: SCOPE counts stories of merged PRs again (Plan 25 had left the set empty)
+        expect(report.status).toBe('accepted');
+        // Optional inconclusive criteria (E2E, DEPLOY) are not blockers for 'accepted'
+        expect(report.criteria.filter(c => c.required && !c.passed).length).toBe(0);
         expect(report.unrecoverable).toBe(false);
+    });
+
+    describe('SCOPE (Plan 30-Q)', () => {
+        const story = (id: string) => ({ id, epicId: 'E-1', asA: 'user', iWant: 'x', soThat: 'y', acceptanceCriteria: ['AC-1'] });
+        const assignment = (id: string, storyId: string, additionalStoryIds: string[] = []) => ({
+            id, storyId, additionalStoryIds, taskIds: [], acIndexes: [], devAgentId: 'dev-1', rank: 'senior' as const,
+            priority: 'high' as const, complexity: 'moderate' as const, estimate: '1h', description: '', dependsOn: [],
+            taskType: 'feature' as const, moduleIds: [],
+        });
+        const pr = (id: string, status: string, assignmentIds: string[]) => ({
+            id, prNumber: 1, prUrl: '', title: '', description: '', branchName: `b-${id}`, authorAgentId: 'dev-1',
+            reviewerAgentIds: [], reviews: [], status: status as any, assignmentIds, taskType: 'feature' as any,
+        });
+        const scope = (s: ProjectStateType) => evaluateAcceptance(s).criteria.find(c => c.id === 'SCOPE')!;
+
+        it('covers stories through storyId and additionalStoryIds of merged PRs only', () => {
+            const s = scope(makeMinimalState({
+                userStories: [story('US-1'), story('US-2'), story('US-3')],
+                assignments: [assignment('A-1', 'US-1', ['US-2']), assignment('A-2', 'US-3')],
+                pullRequests: [pr('PR-1', 'merged', ['A-1']), pr('PR-2', 'blocked', ['A-2'])],
+            }));
+            expect(s.passed).toBe(false);
+            expect(s.detail).toContain('1 of 3 user stories have no merged assignment (US-3)');
+        });
+
+        it('passes when every story has a merged assignment', () => {
+            expect(scope(makeMinimalState({
+                userStories: [story('US-1')],
+                assignments: [assignment('A-1', 'US-1')],
+                pullRequests: [pr('PR-1', 'merged', ['A-1'])],
+            })).passed).toBe(true);
+        });
     });
 
     it('returns "rejected" when build fails', () => {
@@ -228,7 +262,7 @@ describe('evaluateAcceptance', () => {
     it('optional criteria failing yields "partial" status', () => {
         const state = makeMinimalState({
             latestGateReport: makeGateReport(),
-            testReports: [{ type: 'unit', framework: 'jest', total: 5, passed: 5, failed: 0, skipped: 0, status: 'pass' as const, source: 'quality-gates' as const, iterationIndex: 0, runnerError: false, cases: [], failures: [], agentId: 'qa-unit' }],
+            testReports: [{ type: 'unit', framework: 'jest', total: 5, passed: 5, failed: 0, skipped: 0, status: 'pass' as const, source: 'executed' as const, iterationIndex: 0, runnerError: false, cases: [], failures: [], agentId: 'qa-unit' }],
             // E2E failures (optional criterion) — Sub-Plan 11: e2eStatus drives the criterion
             e2eStatus: 'failed' as const,
             userStories: [{ id: 'US-1', epicId: 'E-1', asA: 'user', iWant: 'calc', soThat: 'math', acceptanceCriteria: ['AC-1'] }],
@@ -240,8 +274,7 @@ describe('evaluateAcceptance', () => {
         state.testReports.push({ type: 'e2e' as any, framework: 'playwright', total: 3, passed: 1, failed: 2, skipped: 0, status: 'fail' as any, source: 'quality-gates' as const, iterationIndex: 0, runnerError: false, cases: [], failures: [{ testName: 'e2e-1', error: 'timeout' }], agentId: 'qa-e2e' });
 
         const report = evaluateAcceptance(state);
-        // SCOPE always fails (storyIdsWithMerge is always empty) so status is 'rejected'
-        expect(report.status).toBe('rejected');
+        expect(report.status).toBe('partial');
     });
 });
 

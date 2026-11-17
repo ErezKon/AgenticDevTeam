@@ -15,7 +15,7 @@ import {
     MAX_RUN_TOKENS, MAX_RUN_COST_USD, MAX_RUN_WALL_MS,
     BUDGET_WARN_AT, BUDGET_DEGRADE_AT,
     MAX_REVIEW_ITERATIONS, MAX_BUGFIX_ITERATIONS,
-    PR_TEST_REPAIR_ATTEMPTS,
+    PR_TEST_REPAIR_ATTEMPTS, PR_MAX_REVIEWERS,
 } from '../config';
 import { tokenTracker } from './token-tracker';
 import { estimateRunCost } from './cost';
@@ -171,8 +171,8 @@ export function getBudgetStatus(): BudgetStatus {
  *
  * | level   | reviewIterations | reviewers | repairAttempts | bugfixIterations | new branch workflows |
  * |---------|------------------|-----------|----------------|------------------|----------------------|
- * | ok      | config           | 2         | config         | config           | yes                  |
- * | warn    | config           | 2         | config         | config           | yes (log WARN once)  |
+ * | ok      | config           | PR_MAX_REVIEWERS (≥1) | config | config         | yes                  |
+ * | warn    | config           | PR_MAX_REVIEWERS (≥1) | config | config         | yes (log WARN once)  |
  * | degrade | 1                | 1         | 0              | 0                | yes                  |
  * | stop    | 1                | 0         | 0              | 0                | no                   |
  */
@@ -190,7 +190,7 @@ export function getEffectiveLimits(): {
         case 'warn':
             return {
                 maxReviewIterations: MAX_REVIEW_ITERATIONS,
-                maxReviewers: 2,
+                maxReviewers: Math.max(1, PR_MAX_REVIEWERS),
                 prTestRepairAttempts: PR_TEST_REPAIR_ATTEMPTS,
                 maxBugfixIterations: MAX_BUGFIX_ITERATIONS,
                 allowNewBranchWorkflows: true,

@@ -17,6 +17,7 @@ import {
     execFileSync as cpExecFileSync,
     execFile as cpExecFile,
     exec as cpExec,
+    spawn as cpSpawn,
     type ExecOptions,
     type ExecFileOptions,
 } from 'child_process';
@@ -31,6 +32,9 @@ const SAFE_KEYS = [
     'PATH', 'HOME', 'USER', 'SHELL', 'LANG', 'LC_ALL', 'TERM',
     'TMPDIR', 'TMP', 'TEMP', 'HOSTNAME',
     'PROGRAMFILES', 'SYSTEMROOT', 'WINDIR',
+    // Plan 30-G: headless-browser locations (paths, not secrets). Without them a
+    // configured CHROME_BIN never reached Karma/Puppeteer/Playwright test runners.
+    'CHROME_BIN', 'CHROMIUM_BIN', 'PUPPETEER_EXECUTABLE_PATH', 'PLAYWRIGHT_BROWSERS_PATH',
 ];
 
 /**
@@ -151,23 +155,93 @@ export function execFileAsync(
     }, call);
 }
 
+type CaptureResult = { stdout: string; stderr: string; exitCode: number };
+
+/** Windows: plain exec() with its own timeout (no POSIX process groups). */
+function execCaptureLegacy(command: string, options: ExecOptions): Promise<CaptureResult> {
+    return new Promise((resolve) => {
+        cpExec(command, options, (error, stdout, stderr) => resolve({
+            stdout: stdout?.toString() ?? '',
+            stderr: stderr?.toString() ?? '',
+            exitCode: typeof error?.code === 'number' ? error.code : (error ? 1 : 0),
+        }));
+    });
+}
+
+/**
+ * POSIX: `/bin/sh -c` as the leader of a NEW process group (spawn `detached` —
+ * exec() silently drops that option), stdin closed, output captured up to
+ * `maxBuffer`. Timeout or overflow kills the whole group.
+ */
+function execCaptureGroup(command: string, options: ExecOptions): Promise<CaptureResult> {
+    return new Promise((resolve) => {
+        const maxBuffer = options.maxBuffer ?? 1024 * 1024;
+        const child = cpSpawn('/bin/sh', ['-c', command], {
+            cwd: options.cwd, env: options.env, detached: true, stdio: ['ignore', 'pipe', 'pipe'],
+        });
+        let stdout = '';
+        let stderr = '';
+        let note = '';
+        let settled = false;
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const stop = (why: string) => {
+            if (!note) note = `\n[${why} — process group killed]`;
+            if (child.pid !== undefined) killProcessGroup(child.pid);
+        };
+        const collect = (append: (s: string) => void) => (chunk: Buffer) => {
+            append(chunk.toString('utf-8'));
+            if (stdout.length + stderr.length > maxBuffer) stop(`output exceeded ${maxBuffer} bytes`);
+        };
+        child.stdout?.on('data', collect(s => { stdout += s; }));
+        child.stderr?.on('data', collect(s => { stderr += s; }));
+        const finish = (exitCode: number) => {
+            if (settled) return;
+            settled = true;
+            if (timer) clearTimeout(timer);
+            if (child.pid !== undefined) _liveProcessGroups.delete(child.pid);
+            resolve({ stdout, stderr: stderr + note, exitCode });
+        };
+        child.on('error', (err) => { stderr += String(err); finish(1); });
+        child.on('close', (code) => finish(code ?? 1));
+        if (child.pid === undefined) return;
+        _liveProcessGroups.add(child.pid);
+        if (!_exitHookInstalled) {
+            _exitHookInstalled = true;
+            process.on('exit', () => { for (const pid of _liveProcessGroups) killProcessGroup(pid); });
+        }
+        if (options.timeout && options.timeout > 0) {
+            timer = setTimeout(() => stop(
+                `timed out after ${Math.round(options.timeout! / 1000)}s. If this was a test runner or server in watch/serve mode, `
+                + 're-run it in single-run mode (e.g. `npm test -- --watch=false`)',
+            ), options.timeout);
+        }
+    });
+}
+
+/** Process groups started by execCapture that are still running (Plan 30-S). */
+const _liveProcessGroups = new Set<number>();
+let _exitHookInstalled = false;
+
+/** SIGKILL a whole process group (POSIX) — the shell AND everything it started. */
+function killProcessGroup(pid: number): void {
+    try { process.kill(-pid, 'SIGKILL'); } catch { /* already gone */ }
+}
+
 /**
  * Run a shell command via `child_process.exec` and resolve — never reject —
  * with its output and exit code (non-zero on failure or timeout). Traced.
+ *
+ * Plan 30-S: on POSIX the command runs in its own process group, and the timeout
+ * kills the GROUP. exec()'s built-in timeout signals only `/bin/sh`, so watch-mode
+ * runners (`npm test` → `ng test` → Karma → Chrome) survived as orphans, and
+ * pipelines that kept stdout open hung the agent past its timeout
+ * (pacman-live-analysis-8). Groups still alive at process exit are killed too.
  */
 export function execCapture(
     command: string,
     options: ExecOptions,
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-    const call = () => new Promise<{ stdout: string; stderr: string; exitCode: number }>((resolve) => {
-        cpExec(command, options, (error, stdout, stderr) => {
-            resolve({
-                stdout: stdout?.toString() ?? '',
-                stderr: stderr?.toString() ?? '',
-                exitCode: error?.code ?? (error ? 1 : 0),
-            });
-        });
-    });
+    const call = () => (process.platform === 'win32' ? execCaptureLegacy(command, options) : execCaptureGroup(command, options));
     if (!isDebugMode()) return call();
     return traceAsync({
         fields: execFields(firstToken(command), command, options),

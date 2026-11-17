@@ -137,6 +137,12 @@ export const MODEL_PRICING: Record<string, ModelPricingEntry> = {
     'claude-sonnet-4-6':                 { inputPer1k: 0.003,  outputPer1k: 0.015 },
     'claude-haiku-4-5':                  { inputPer1k: 0.001,  outputPer1k: 0.005 },
     'claude-sonnet-5':                   { inputPer1k: 0.002,  outputPer1k: 0.01 },
+    // Plan 30-C: list prices (rate card effective 2026-10-07). Unpriced models cost $0,
+    // which made MAX_RUN_COST_USD blind to every claude-opus-5-5 call.
+    'claude-opus-4-7':                   { inputPer1k: 0.005,  outputPer1k: 0.025 },
+    'claude-opus-5-5':                   { inputPer1k: 0.004,  outputPer1k: 0.02,  cacheReadMultiplier: 0.05 },
+    'claude-sonnet-5-5':                 { inputPer1k: 0.002,  outputPer1k: 0.01,  cacheReadMultiplier: 0.05 },
+    'claude-fable-5-2':                  { inputPer1k: 0.008,  outputPer1k: 0.04,  cacheReadMultiplier: 0.025 },
     // Google Gemini models (Sub-Plan 20)
     'gemini-2.5-pro':                    { inputPer1k: 0.00125, outputPer1k: 0.01 },
     'gemini-2.5-flash':                  { inputPer1k: 0.00015, outputPer1k: 0.0006 },
@@ -405,9 +411,16 @@ export const MAX_BRANCH_COST_USD =
     envFloat('MAX_BRANCH_COST_USD', 6);
 
 /** Max wall-clock time (ms) for a single branch workflow (Plan 24, D2).
- *  Default 15 minutes. 0 = unlimited. */
+ *  Default 15 minutes. 0 = unlimited. Plan 30-M: this is the cap for a branch of
+ *  up to two assignments; larger branches get `assignments / 2 ×` this value
+ *  (a 3-assignment scaffold took 14.5 min end-to-end in pacman-live-analysis-3). */
 export const MAX_BRANCH_WALL_MS =
     envInt('MAX_BRANCH_WALL_MS', 900000);
+
+/** Minimum free disk space (GB) on the generated-projects volume before the preflight
+ *  warns (Plan 30-G). An Angular run needs ~2 GB for worktrees + node_modules. 0 = off. */
+export const PREFLIGHT_MIN_FREE_DISK_GB =
+    envFloat('PREFLIGHT_MIN_FREE_DISK_GB', 5);
 
 /** Utilisation threshold for budget warning level (default: 0.70). */
 export const BUDGET_WARN_AT =
@@ -946,6 +959,12 @@ export const REVIEW_MERGE_POLICY =
 /** Genuine approvals required to merge (abstentions do not count). */
 export const REVIEW_QUORUM =
     envInt('REVIEW_QUORUM', 1);
+
+/** Reviewers invoked per PR at normal budget levels (Plan 30-N). Each reviewer is a full
+ *  principal/senior-model review plus a fix pass per iteration; with REVIEW_QUORUM=1 a single
+ *  reviewer yields the same merge rule at roughly half the review spend. Min 1. */
+export const PR_MAX_REVIEWERS =
+    envInt('PR_MAX_REVIEWERS', 2);
 
 /** Retries when every reviewer abstained (schema error / recursion limit / empty output). */
 export const REVIEW_ABSTAIN_RETRIES =

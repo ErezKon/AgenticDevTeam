@@ -363,6 +363,11 @@ flowchart LR
 - **Shared branches** — multiple agents on the same feature share one branch
 - **TDD enforcement** — developers write tests first (red), implement (green), then refactor
 - **PR creation resilience** — transient GitHub failures (5xx, network errors) are retried up to 3 times with exponential backoff. If all retries fail, the run stops gracefully with a `pr-creation-failed` PR entry persisted in state — continue-run retries just the PR creation without re-running dev agents
+- **No PR while gates fail (Plan 30-L)** — if quality gates still fail after the repair attempt, no PR is opened under the `strict`/`permissive` merge policies, which would refuse the merge anyway. The branch is salvaged as `PR-GATES-FAILED-*` instead of spending review, escalation and strong-fixer tokens
+- **Halt ends the run (Plan 30-K)** — when `DISPATCH_HALT_POLICY` halts dispatch on a branch that did not merge, the run stops with `_stopReason: dispatch-halted:<branch>` and finalizes as `failed`. It no longer continues into QA, whose bug-fix rounds re-dispatched the same blocked branch
+- **Branch budgets scale with size (Plan 30-M)** — the wall cap is `MAX_BRANCH_WALL_MS × max(1, assignments / 2)`, and the branch cost estimate is cache-aware
+- **Product verification after the build (Plan 30-P)** — the artifacts/resolve check runs after the gates' `build` step. Before, it ran on a fresh worktree where `dist/` never exists, and that stale result blocked approved PRs at merge
+- **Latest review decides (Plan 30-T)** — only each reviewer's most recent review can block the merge. A CRITICAL that was fixed and then approved no longer blocks forever
 
 ### Review Rules
 
@@ -478,7 +483,7 @@ flowchart TD
 | Provider billing / quota error | Dispatcher recovery probe (`/models` endpoint) | `awaitProviderRecovery()` retries with backoff; on failure, `developmentNode` sets `cancelled` + `_stopReason` |
 | Provider auth / model-not-found | Dispatcher error classification | Immediate stop, `run:provider-stop` emitted |
 | HITL deny | Graph HITL interrupt | `cancelled = true` (standard cancel, no `_stopReason`) |
-| Ctrl+C / `kill -INT` | `gracefulShutdown()` in `crash-handlers.ts` | Runs registered shutdown hooks, saves `state.json` with `_stopReason: 'manual-kill'`, flushes ledger + token report, exits with code 130 |
+| Ctrl+C / `kill -INT` | `gracefulShutdown()` in `crash-handlers.ts` | For every run registered via `registerRunShutdown()`, re-enters that run's `RunContext` (signal handlers run outside every AsyncLocalStorage scope — Plan 30-F), saves `state.json` with `_stopReason: 'manual-kill'` including the dispatcher's latest progress, writes a `graceful-shutdown` ledger entry, flushes the token report, exits with code 130 |
 | `kill -TERM` | `gracefulShutdown()` in `crash-handlers.ts` | Same as SIGINT but exits with code 143 |
 | `kill -9` | Not interceptable | **No graceful shutdown** -- use `Ctrl+C` or `kill -INT` instead |
 | Crash / uncaught exception | `gracefulShutdown()` in `crash-handlers.ts` | Best-effort state snapshot + token report, exits with code 1 |
@@ -896,11 +901,24 @@ AgenticDevTeam/
 
 ## Prerequisites
 
-- **Node.js** 20+
+- **Node.js** 20.10+. This is the highest `engines` floor among the dependencies (`@langchain/mcp-adapters`), and LangChain's agent middleware needs `AbortSignal.any`. The run preflight refuses older runtimes before any repo is created.
 - **npm** 9+
 - **Docker** & **Docker Compose** (for DevOps agent and containerized builds)
+- **A headless Chrome/Chromium** on `PATH` (`google-chrome`, `chromium`) or via `CHROME_BIN`, for browser-based test runners such as Karma's `ChromeHeadless` (the Angular CLI default). Without one, every test gate of such a stack fails; the preflight warns.
+- **~2 GB free disk per Node/Angular project** (worktrees + `node_modules`); the preflight warns below `PREFLIGHT_MIN_FREE_DISK_GB`
 - **An OpenAI-compatible LLM endpoint** (set via `LLM_BASE_URL`)
 - **OAuth2 client credentials** (if your LLM endpoint requires authentication)
+
+### Run Preflight (Plan 30)
+
+Every run (`runAutonomous`, `runHumanInTheLoop`, `continueRun`) starts with `runPreflight()` (`src/utils/preflight.ts`), **before** intake creates a GitHub repo or workspace:
+
+| Check | Severity | Why |
+|-------|----------|-----|
+| Node ≥ 20.10 and `AbortSignal.any` present | **error** (run refused) | On Node 19 the first LLM call crashed after the repo had already been created |
+| Every configured model has a `MODEL_PRICING` entry | warning | Unpriced models cost $0, so `MAX_RUN_COST_USD` cannot see their spend |
+| A headless browser is available | warning | Browser-based test runners cannot run, so every test gate fails |
+| Free disk ≥ `PREFLIGHT_MIN_FREE_DISK_GB` | warning | ENOSPC mid-development surfaces as random tool failures |
 
 ---
 
@@ -1157,6 +1175,8 @@ npm run build
 | `GITHUB_REPO` | — | GitHub repository name |
 | `GIT_DEFAULT_BRANCH` | `main` | Default branch name for merging PRs |
 | `MAX_REVIEW_ITERATIONS` | `3` | Max PR review rounds before escalation |
+| `PR_MAX_REVIEWERS` | `2` | Reviewers invoked per PR at normal budget levels (min 1). With `REVIEW_QUORUM=1`, `1` keeps the merge rule at about half the review spend (Plan 30-N) |
+| `PREFLIGHT_MIN_FREE_DISK_GB` | `5` | Run preflight warns when the generated-projects volume has less free space (GB). `0` = off (Plan 30-G) |
 | `GITHUB_PROJECT_TOKEN` | — | Separate PAT for project-specific repos (falls back to `GITHUB_TOKEN`) |
 | `GITHUB_PROJECT_OWNER` | — | Owner for project-specific repos (falls back to `GITHUB_OWNER`) |
 | `DASHBOARD_PORT` | `3000` | HTTP/WS server port |

@@ -35,6 +35,7 @@ export async function intakeNode(state: ProjectStateType): Promise<Partial<Proje
     }
 
     intakeLog.info('Starting intake phase...');
+    const intakeStartMs = Date.now();
     emitRunEvent('phase:start', { phase: 'intake' });
     tokenTracker.reset();
     startRunBudget();
@@ -275,6 +276,8 @@ export async function intakeNode(state: ProjectStateType): Promise<Partial<Proje
 
     const nextPhase = state.input.runType === 'maintain' ? 'codebase-analyzer' : 'architect';
 
+    // Plan 30-D: intake was the only node that ledgered `start` without `end`.
+    appendLedger({ kind: 'phase', phase: 'intake', event: 'end', durationMs: Date.now() - intakeStartMs });
     emitRunEvent('phase:end', { phase: 'intake', nextPhase });
     return {
         input: { ...state.input, requirementsText },

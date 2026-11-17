@@ -85,15 +85,11 @@ describe('timeout clamping', () => {
 
     beforeEach(() => {
         _resetHostWarning();
-        // Spy on child_process.exec to capture actual timeout values
-        const cp = require('child_process');
-        execSpy = jest.spyOn(cp, 'exec').mockImplementation(
-            ((...args: unknown[]) => {
-                const cb = args[args.length - 1] as Function;
-                cb(null, 'ok', '');
-                return { pid: 1 };
-            }) as any,
-        );
+        // Capture the timeout values the shell tool passes to its exec seam
+        // Plan 30-S: the shell tool's exec seam is execCapture (POSIX runs use spawn
+        // with a process group, so spying on child_process.exec no longer sees them).
+        const shellExec = require('../src/utils/shell-exec');
+        execSpy = jest.spyOn(shellExec, 'execCapture').mockResolvedValue({ stdout: 'ok', stderr: '', exitCode: 0 });
     });
 
     afterEach(() => {
@@ -137,14 +133,10 @@ describe('denied command never reaches exec', () => {
 
     beforeEach(() => {
         _resetHostWarning();
-        const cp = require('child_process');
-        execSpy = jest.spyOn(cp, 'exec').mockImplementation(
-            ((...args: unknown[]) => {
-                const cb = args[args.length - 1] as Function;
-                cb(null, 'ok', '');
-                return { pid: 1 };
-            }) as any,
-        );
+        // Plan 30-S: the shell tool's exec seam is execCapture (POSIX runs use spawn
+        // with a process group, so spying on child_process.exec no longer sees them).
+        const shellExec = require('../src/utils/shell-exec');
+        execSpy = jest.spyOn(shellExec, 'execCapture').mockResolvedValue({ stdout: 'ok', stderr: '', exitCode: 0 });
     });
 
     afterEach(() => {
