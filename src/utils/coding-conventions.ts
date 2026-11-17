@@ -152,7 +152,8 @@ ${fileList}
     }
 
     // Inline digest: inject extracted imperative rules directly into the prompt.
-    return `<coding_conventions>\n${buildConventionsDigest(fileNames)}\n` +
-        `Full references exist at .conventions/*.md - read one ONLY if you need ` +
-        `detail beyond the rules above.\n</coding_conventions>`;
+    // Plan 30-07: when the files have no rule lines, only the pointer remains.
+    const digest = buildConventionsDigest(fileNames);
+    const pointer = `Full references exist at .conventions/*.md - read one ONLY if you need detail${digest ? ' beyond the rules above' : ''}.`;
+    return `<coding_conventions>\n${digest ? `${digest}\n` : ''}${pointer}\n</coding_conventions>`;
 }

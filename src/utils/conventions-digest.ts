@@ -3,11 +3,15 @@
  *
  * Instead of making agents `read_file` each `.conventions/*.md` at runtime
  * (which lands in ReAct history and gets replayed on every subsequent step),
- * this module extracts the imperative rules and key headings from each
- * source file and produces a short digest that is injected directly into
- * the agent's system prompt.
+ * this module extracts the imperative rules from each source file and produces
+ * a short digest that is injected directly into the agent's system prompt.
  *
  * Part of Step 6 of the token-reduction plan.
+ *
+ * Plan 30-07: rule lines only. The digest used to copy every H2/H3 heading,
+ * which is a table of contents rather than a rule and filled most of its
+ * budget; lines inside code blocks are skipped too (a `// Don't …` comment in an
+ * example is not a rule). A file with no rule contributes nothing.
  */
 
 import { readFileSync } from 'fs';
@@ -33,15 +37,11 @@ const digestCache = new Map<string, string>();
 // ─── Extraction ─────────────────────────────────────────────────────────────
 
 /**
- * Extract imperative rules and key headings from a single convention file.
+ * Extract the imperative rules of a single convention file: lines (typically
+ * bullets or table rows) that contain MUST, NEVER, ALWAYS, SHOULD NOT, Do not
+ * or Don't — outside code blocks, headings and table-of-contents links.
  *
- * Extracts:
- *  - H2/H3 headings (## / ###)
- *  - Lines (typically bullets) that contain imperative keywords:
- *    MUST, NEVER, ALWAYS, SHOULD NOT, Do not, Don't
- *  - Bullet lines containing bold text (key guidelines)
- *
- * Returns deduplicated lines with the file name as a section header.
+ * Returns deduplicated `- rule` lines.
  */
 function extractFromFile(fileName: string): string[] {
     const filePath = join(CONVENTIONS_SOURCE_DIR, fileName);
@@ -52,44 +52,24 @@ function extractFromFile(fileName: string): string[] {
         return [];
     }
 
-    const lines = content.split('\n');
     const extracted: string[] = [];
     const seen = new Set<string>();
+    let inCodeBlock = false;
 
-    for (const rawLine of lines) {
-        const line = rawLine.trimEnd();
-        if (!line) continue;
-
-        // Skip table-of-contents links (lines that are just `[text](#anchor)`)
-        if (/^\d+\.\s*\[/.test(line.trim())) continue;
-        // Skip the title (H1)
-        if (line.startsWith('# ') && !line.startsWith('## ')) continue;
-        // Skip horizontal rules
-        if (/^---+$/.test(line.trim())) continue;
-        // Skip code block content
-        if (line.trim().startsWith('```')) continue;
-
-        const trimmed = line.trim();
-
-        // H2/H3 headings provide structure
-        if (/^#{2,3}\s/.test(trimmed)) {
-            // Clean heading: remove numbering like "1.1 " or "## 1. "
-            const heading = trimmed.replace(/^#{2,3}\s*(?:\d+\.?\d*\.?\s*)?/, '## ');
-            if (!seen.has(heading)) {
-                seen.add(heading);
-                extracted.push(heading);
-            }
+    for (const rawLine of content.split('\n')) {
+        const trimmed = rawLine.trim();
+        if (trimmed.startsWith('```')) {
+            inCodeBlock = !inCodeBlock;
             continue;
         }
+        if (inCodeBlock || !IMPERATIVE_RE.test(trimmed)) continue;
+        // Headings and table-of-contents links (`1. [text](#anchor)`) are not rules
+        if (/^#{1,6}\s/.test(trimmed) || /^\d+\.\s*\[/.test(trimmed)) continue;
 
-        // Lines with imperative keywords
-        if (IMPERATIVE_RE.test(trimmed)) {
-            const norm = trimmed.replace(/^\|?\s*/, '').replace(/\s*\|?\s*$/, '');
-            if (!seen.has(norm) && norm.length > 10) {
-                seen.add(norm);
-                extracted.push(`- ${norm.startsWith('- ') ? norm.slice(2) : norm}`);
-            }
-        }
+        const norm = trimmed.replace(/^\|?\s*/, '').replace(/\s*\|?\s*$/, '');
+        if (norm.length <= 10 || seen.has(norm)) continue;
+        seen.add(norm);
+        extracted.push(`- ${norm.startsWith('- ') ? norm.slice(2) : norm}`);
     }
 
     return extracted;
@@ -100,14 +80,15 @@ function extractFromFile(fileName: string): string[] {
 /**
  * Produce a compact, in-prompt digest of the conventions an agent must follow.
  *
- * Extracts H2/H3 headings and imperative lines (MUST / NEVER / ALWAYS /
- * Do not / Don't), then hard-caps at CONVENTIONS_DIGEST_MAX_CHARS.
+ * Extracts the imperative lines (MUST / NEVER / ALWAYS / SHOULD NOT / Do not /
+ * Don't) of each file under a `[File.md]` label, then hard-caps at
+ * CONVENTIONS_DIGEST_MAX_CHARS.
  *
  * Results are cached per file-name-set so the computation happens once
  * per process.
  *
  * @param fileNames - Convention file names (e.g. `['React.md', 'Universal.md']`)
- * @returns A compact string of imperative rules, or '' if no files matched.
+ * @returns A compact string of imperative rules, or '' if no file has one.
  */
 export function buildConventionsDigest(fileNames: string[]): string {
     if (fileNames.length === 0) return '';

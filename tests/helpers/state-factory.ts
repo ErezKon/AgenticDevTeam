@@ -66,6 +66,7 @@ export function makeState(overrides: Partial<ProjectStateType> = {}): ProjectSta
         unrecoverable: null,
         verificationErrors: [],
         dispatchRounds: [],
+        triageRounds: [],
         attemptedBugIds: [],
         bugAttempts: {},
         planViolations: [],

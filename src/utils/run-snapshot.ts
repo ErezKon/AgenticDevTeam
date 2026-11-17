@@ -235,7 +235,7 @@ export interface RunManifest {
     prsBlocked?: number;
     /** Branches salvaged (failed to merge but patches exported). */
     branchesSalvaged?: number;
-    /** Branches deferred (not attempted in this run). */
+    /** Branches whose latest PR record is `deferred` — branch budget ran out, resumes next round (Plan 30-02). */
     branchesDeferred?: number;
     /** Branches where no PR was attempted. */
     branchesNotAttempted?: number;
@@ -257,11 +257,14 @@ export interface PRCountsInput {
     prsReused: number;
     prsMerged: number;
     prsBlocked: number;
+    /** Branches whose latest record (placeholders included) is `deferred` (Plan 30-02). */
+    branchesDeferred: number;
 }
 
 /**
  * De-duplicate PRs by (prNumber, branchName) and count by status.
- * Entries with prNumber === 0 are internal placeholders (PR-SKIPPED-*) and are excluded.
+ * Entries with prNumber === 0 are internal placeholders (PR-SKIPPED-*, PR-DEFERRED-*) and
+ * are excluded from the PR counters; `branchesDeferred` reads each branch's latest record.
  */
 export function countPRsByStatus(pullRequests: Array<{
     prNumber: number;
@@ -271,11 +274,14 @@ export function countPRsByStatus(pullRequests: Array<{
 }>): PRCountsInput {
     // De-duplicate by (prNumber, branchName) — keep the last entry per pair
     const seen = new Map<string, { status: string; prNumber: number }>();
+    const latestByBranch = new Map<string, string>();
     for (const pr of pullRequests) {
+        latestByBranch.set(pr.branchName, pr.status);
         if (pr.prNumber === 0) continue; // skip internal placeholders
         const key = `${pr.prNumber}:${pr.branchName}`;
         seen.set(key, { status: pr.status, prNumber: pr.prNumber });
     }
+    const branchesDeferred = [...latestByBranch.values()].filter(s => s === 'deferred').length;
 
     let created = 0;
     let reused = 0;
@@ -295,7 +301,7 @@ export function countPRsByStatus(pullRequests: Array<{
         if (pr.status === 'blocked') blocked++;
     }
 
-    return { prsCreated: created, prsReused: reused, prsMerged: merged, prsBlocked: blocked };
+    return { prsCreated: created, prsReused: reused, prsMerged: merged, prsBlocked: blocked, branchesDeferred };
 }
 
 // ─── Phase timeline extraction (Sub-Plan G4) ────────────────────────────────

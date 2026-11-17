@@ -11,7 +11,7 @@
 import * as path from 'path';
 import { getLogger } from './logger';
 import { writeOutputFile } from './artifact-writer';
-import { estimateCost } from './cost';
+import { billedCost } from './cost';
 import type { RunUsageSummary } from './token-tracker';
 import { tokenTracker } from './token-tracker';
 import type { BudgetStatus } from './run-budget';
@@ -59,12 +59,11 @@ export function generateRunDiagnosis(
     lines.push('## Per-Agent Cost');
     lines.push('');
 
-    const totalCost = tokenSummary.byAgent.reduce(
-        (sum, a) => sum + estimateCost(a.model, a.inputTokens, a.outputTokens), 0,
-    );
+    // Plan 30-06: billed (cache-aware) cost, as in the token report
+    const totalCost = tokenSummary.byAgent.reduce((sum, a) => sum + billedCost(a), 0);
 
     const costRows: (string | number)[][] = tokenSummary.byAgent.map(a => {
-        const cost = estimateCost(a.model, a.inputTokens, a.outputTokens);
+        const cost = billedCost(a);
         const share = pct(cost, totalCost);
         return [a.agentId, a.model, a.callCount, a.inputTokens.toLocaleString(), a.outputTokens.toLocaleString(), usd(cost), `${share}%`];
     });

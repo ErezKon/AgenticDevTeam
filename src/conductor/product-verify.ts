@@ -24,6 +24,7 @@ import {
 } from '../config';
 import type { StackRoot } from './quality-gates';
 import type { GateOutcome, GateFinding, GateStatus } from './gate-types';
+import { ARTIFACT_DIRS, findWebRoot, explainMissingIndex } from './product-serve-dir';
 
 const log = getLogger('[ProductVerify]', 183);
 
@@ -87,9 +88,6 @@ const NODE_BUILTINS = new Set([
 ]);
 
 // ─── 5a. Artifact verification ──────────────────────────────────────────────
-
-/** Standard output dirs to probe per stack. */
-const ARTIFACT_DIRS = ['dist', 'build', 'out', '.next', 'public/build'];
 
 /**
  * Check each root's build output for real artifacts.
@@ -555,9 +553,9 @@ export async function runSmokeTest(
     roots: StackRoot[],
     artifactChecks: ArtifactCheck[],
 ): Promise<SmokeResult> {
-    // Find the web root: a root with an index.html and a bundler config,
-    // preferring one whose build produced artifacts
-    const webRoot = findWebRoot(workspacePath, roots, artifactChecks);
+    // Find the web root, preferring one whose build produced artifacts, and the
+    // directory inside its build output that holds index.html (product-serve-dir.ts)
+    const webRoot = findWebRoot(roots, artifactChecks);
     if (!webRoot) {
         return {
             ran: false,
@@ -615,9 +613,10 @@ export async function runSmokeTest(
                     return;
                 }
 
-                // Fetch the root page
+                // Fetch the root page — judged separately from readiness (Plan 30-03)
                 const rootFetch = await fetchUrl(url + '/');
                 if (!rootFetch.ok) {
+                    const why = rootFetch.status === 404 ? ` — ${explainMissingIndex(workspacePath, webRoot)}` : '';
                     resolve({
                         ran: true,
                         url,
@@ -626,7 +625,7 @@ export async function runSmokeTest(
                         rendered: false,
                         consoleErrors: [],
                         passed: false,
-                        reason: `GET / returned ${rootFetch.status}`,
+                        reason: `GET / returned ${rootFetch.status}${why}`,
                     });
                     return;
                 }
@@ -678,7 +677,7 @@ export async function runSmokeTest(
                     rendered,
                     consoleErrors: [],
                     passed: true,
-                    reason: `served OK: ${rootFetch.body.length} bytes HTML, ${subResources.length} sub-resources, ${totalAssetBytes} total bytes`,
+                    reason: `served OK from ${path.relative(workspacePath, serveDir) || '.'}: ${rootFetch.body.length} bytes HTML, ${subResources.length} sub-resources, ${totalAssetBytes} total bytes`,
                 });
             } catch (err: any) {
                 resolve({
@@ -714,35 +713,6 @@ export async function runSmokeTest(
             }
         }, PRODUCT_SMOKE_TIMEOUT_MS + 5000);
     });
-}
-
-function findWebRoot(
-    _workspacePath: string,
-    roots: StackRoot[],
-    artifactChecks: ArtifactCheck[],
-): { root: StackRoot; serveDir: string } | null {
-    // Prefer roots with artifacts and an index.html
-    for (const root of roots) {
-        if (root.stack !== 'node') continue;
-        const ac = artifactChecks.find(a => a.root === root.relDir && a.passed && a.foundDir);
-        if (ac && ac.foundDir) {
-            return { root, serveDir: path.join(root.dir, ac.foundDir) };
-        }
-    }
-    // Fallback: any root with an index.html
-    for (const root of roots) {
-        if (root.stack !== 'node') continue;
-        if (fs.existsSync(path.join(root.dir, 'index.html'))) {
-            // Check for built artifacts
-            for (const candidate of ARTIFACT_DIRS) {
-                const absCandidate = path.join(root.dir, candidate);
-                if (fs.existsSync(absCandidate) && fs.statSync(absCandidate).isDirectory()) {
-                    return { root, serveDir: absCandidate };
-                }
-            }
-        }
-    }
-    return null;
 }
 
 async function findFreePort(startPort: number): Promise<number> {
@@ -813,14 +783,15 @@ function createStaticServer(serveDir: string): http.Server {
     });
 }
 
+/** Plan 30-03: any HTTP response means the server is up — what `GET /` returns is judged separately. */
 async function pollForReady(url: string, timeoutMs: number): Promise<boolean> {
     const start = Date.now();
     while (Date.now() - start < timeoutMs) {
         try {
-            const result = await fetchUrl(url + '/');
-            if (result.ok) return true;
+            await fetchUrl(url + '/');
+            return true;
         } catch {
-            // not ready yet
+            // not listening yet
         }
         await sleep(500);
     }

@@ -24,5 +24,7 @@ export const AssignmentSchema = z.object({
     taskType: z.enum(['feature', 'bug', 'fix', 'refactor', 'chore']).default('feature').describe('Type of work'),
     /** Module ids from the repo contract that this assignment owns. Must come from the contract. */
     moduleIds: z.array(z.string()).default([]).describe('Module ids from the repo contract owned by this assignment'),
+    /** Plan 30-05: the triage bugs a bug-fix assignment works on — a bug's attempt count grows only when such an assignment ran. */
+    bugIds: z.array(z.string()).optional().describe('Bug-fix triage only: ids of the bugs (from the Open Bugs table) this assignment fixes'),
 });
 export type Assignment = z.infer<typeof AssignmentSchema>;

@@ -15,11 +15,11 @@ import {
     parseJunitXml,
     parseGoTestJson,
     parseCoverageSummary,
-    parseTraceTag,
     isRunnerError,
     executedToTestReports,
     compareClaimVsReality,
 } from '../src/conductor/test-runner';
+import { parseTraceTag, traceTagIndex } from '../src/conductor/test-runners/executed-report';
 
 const FIXTURES = path.join(__dirname, 'fixtures', 'test-reports');
 
@@ -48,6 +48,11 @@ describe('parseTraceTag', () => {
     it('returns null for malformed tags', () => {
         expect(parseTraceTag('[US003] missing dash')).toBeNull();
         expect(parseTraceTag('[US-003] missing hash')).toBeNull();
+    });
+
+    it('finds a tag inside a longer name (Karma prints "<suite> <description>")', () => {
+        expect(traceTagIndex('ScoreStorageService saveHighScore [US-027#1] should truncate')).toBe(34);
+        expect(traceTagIndex('no tag here')).toBe(-1);
     });
 });
 
@@ -277,6 +282,7 @@ describe('executedToTestReports', () => {
         const reports = executedToTestReports([{
             framework: 'jest',
             root: '',
+            command: 'npm test -- --ci --json',
             total: 5,
             passed: 4,
             failed: 1,
@@ -310,6 +316,7 @@ describe('executedToTestReports', () => {
         const reports = executedToTestReports([{
             framework: 'jest',
             root: '',
+            command: 'npm test -- --ci --json',
             total: 0,
             passed: 0,
             failed: 0,
@@ -330,6 +337,7 @@ describe('executedToTestReports', () => {
         const reports = executedToTestReports([{
             framework: 'jest',
             root: '',
+            command: 'npm test -- --ci --json',
             total: 0,
             passed: 0,
             failed: 0,

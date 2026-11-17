@@ -18,22 +18,18 @@ import {
 import { REVIEW_QUORUM } from '../../config';
 import { invokeDevAgent, invokeReviewerAgent, getModelForRank } from './agent-invoke';
 import { commitWorktree } from './commit';
-import { getReviewDiff, DIFF_EXCLUDE_SPECS, MAX_DIFF_CHARS } from './diff';
+import { getReviewDiff, DIFF_EXCLUDE_SPECS } from './diff';
 import { buildFixMessage } from './dev-prompts';
+import { msg } from './transcript';
 import type {
     Assignment, FileChange, TranscriptMessage,
-    PhaseName, PRReview, GitContext, TechDecision,
+    PRReview, GitContext, TechDecision,
 } from '../../agents/_shared/base-schemas';
 import type { ReviewOutput } from '../../agents/developers/schemas/review-output.schema';
 import type { TokenCallRecord } from '../../utils/token-tracker';
 import type { DevRank } from '../../agents/_shared/persona';
 
 const log = getLogger('[PR-Workflow]', 135);
-
-function ts(): string { return new Date().toISOString(); }
-function msg(agentId: string, message: string): TranscriptMessage {
-    return { timestamp: ts(), agentId, phase: 'development' as PhaseName, message };
-}
 
 export interface ReviewLoopInput {
     worktreeWorkspace: string;
@@ -65,6 +61,8 @@ export interface ReviewLoopResult {
     allPhantomFileChanges: FileChange[];
     allTranscript: TranscriptMessage[];
     allTokenUsage: TokenCallRecord[];
+    /** Review iterations that actually ran (Plan 30-02) — not the configured maximum. */
+    iterationsRun: number;
 }
 
 /**
@@ -78,9 +76,6 @@ export async function runReviewLoop(input: ReviewLoopInput): Promise<ReviewLoopR
         prNumber, prTitle, prBody, respawnCtx,
         checkBranchBudget, reconcileClaims,
     } = input;
-
-    const ghOwner = gitContext?.owner ?? '';
-    const ghRepo = gitContext?.repo ?? '';
 
     const allReviews: PRReview[] = [];
     const allOutcomes: ReviewOutcome[] = [];
@@ -97,7 +92,7 @@ export async function runReviewLoop(input: ReviewLoopInput): Promise<ReviewLoopR
     let noProgressCount = 0;
     /** Rate-limit retries of the fix step (bounded; replaces the old `iteration--`). */
     let fixRateLimitRetries = 0;
-    const MAX_FIX_RATE_LIMIT_RETRIES = 2;
+    let iterationsRun = 0;
 
     for (let iteration = 1; iteration <= getEffectiveLimits().maxReviewIterations; iteration++) {
         // Plan 24 D2: check branch budget before each review iteration
@@ -113,6 +108,7 @@ export async function runReviewLoop(input: ReviewLoopInput): Promise<ReviewLoopR
             log.warn(`Branch ${branchName} budget exceeded: ${reviewBudgetReason} — proceeding with mandatory first review`);
             allTranscript.push(msg('conductor', `Budget exceeded but proceeding with mandatory first review iteration`));
         }
+        iterationsRun = iteration;
 
         const effectiveReviewLimit = getEffectiveLimits().maxReviewIterations;
         log.info(`Review iteration ${iteration}/${effectiveReviewLimit}`);
@@ -370,6 +366,7 @@ export async function runReviewLoop(input: ReviewLoopInput): Promise<ReviewLoopR
         allPhantomFileChanges,
         allTranscript,
         allTokenUsage,
+        iterationsRun,
     };
 }
 

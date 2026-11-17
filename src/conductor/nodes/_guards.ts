@@ -16,7 +16,7 @@ import { shouldStopRun, getBudgetStatus } from '../../utils/run-budget';
 import { writePeriodicSnapshot } from '../../utils/run-snapshot';
 import { appendLedger } from '../../utils/run-ledger';
 import { setLastKnownState } from '../../utils/run-context';
-import { haltIfUnrecoverable } from '../acceptance-gate';
+import { haltIfUnrecoverable } from '../unrecoverable';
 import { RUN_FAIL_POLICY } from '../../config';
 import type { ProjectStateType } from '../state';
 import type { PhaseName, TranscriptMessage } from '../../agents/_shared/base-schemas';

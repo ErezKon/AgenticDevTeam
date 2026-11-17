@@ -2,9 +2,10 @@
  * Tests for plan-coverage.ts — validates that the coverage gate correctly
  * detects silent scope loss between PM and TL planning phases.
  */
-import { validateStoryPlan, validateAssignmentPlan, buildCoverageGapPrompt } from '../src/conductor/plan-coverage';
-import type { GapRepairContext } from '../src/conductor/plan-coverage';
+import { validateStoryPlan, validateAssignmentPlan, buildCoverageGapPrompt, mergeGapRepair } from '../src/conductor/plan-coverage';
+import type { GapRepairContext, CoverageViolation } from '../src/conductor/plan-coverage';
 import type { ProjectStateType } from '../src/conductor/state';
+import type { Assignment } from '../src/agents/_shared/base-schemas';
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -440,5 +441,134 @@ describe('validateAssignmentPlan — off-stack agent detection (Plan 27-E)', () 
         const v = validateAssignmentPlan(state);
         const offStack = v.filter(vi => vi.kind === 'off-stack-agent');
         expect(offStack).toHaveLength(0);
+    });
+});
+
+// ─── Plan 30-01: dispatch-plan findings ─────────────────────────────────────
+
+/** A plan for project slug "calc"; each entry overrides a well-formed default assignment. */
+function planWith(assignments: Array<Record<string, unknown>>): ProjectStateType {
+    return makeState({
+        systemBranch: 'project/calc',
+        assignments: assignments.map(a => ({
+            storyId: 'US-001', additionalStoryIds: [], taskIds: ['TASK-001'], acIndexes: [],
+            devAgentId: 'senior-frontend', rank: 'senior', priority: 'high', complexity: 'moderate',
+            estimate: '4h', description: 'Build it', dependsOn: [], taskType: 'feature', moduleIds: [],
+            ...a,
+        })) as any,
+    });
+}
+
+describe('validateAssignmentPlan — dispatch-plan findings (Plan 30-01)', () => {
+    it('reports a dependency cycle as critical and names its members for repair', () => {
+        const v = validateAssignmentPlan(planWith([
+            { id: 'ASSIGN-001', branchName: 'calc/feature/us-001-auth', dependsOn: ['ASSIGN-002'] },
+            { id: 'ASSIGN-002', storyId: 'US-002', taskIds: ['TASK-002'], branchName: 'calc/feature/us-002-admin', dependsOn: ['ASSIGN-001'] },
+        ]));
+        const cycles = v.filter(vi => vi.kind === 'dependency-cycle');
+        expect(cycles).toHaveLength(1);
+        expect(cycles[0].severity).toBe('critical');
+        expect(cycles[0].assignmentIds).toEqual(['ASSIGN-001', 'ASSIGN-002']);
+        expect(cycles[0].detail).toContain('ASSIGN-001 dependsOn ASSIGN-002');
+    });
+
+    it('reports a branch-level cycle with the assignment edges that cause it', () => {
+        const v = validateAssignmentPlan(planWith([
+            { id: 'ASSIGN-001', branchName: 'calc/feature/x' },
+            { id: 'ASSIGN-002', branchName: 'calc/feature/y', dependsOn: ['ASSIGN-001'] },
+            { id: 'ASSIGN-003', branchName: 'calc/feature/x', dependsOn: ['ASSIGN-002'] },
+        ]));
+        const cycles = v.filter(vi => vi.kind === 'dependency-cycle');
+        expect(cycles).toHaveLength(1);
+        expect(cycles[0].detail).toContain('Branch cycle');
+        expect(cycles[0].detail).toContain('ASSIGN-003 dependsOn ASSIGN-002');
+        expect([...(cycles[0].assignmentIds ?? [])].sort()).toEqual(['ASSIGN-002', 'ASSIGN-003']);
+    });
+
+    it('reports scaffold work that depends on feature work (major)', () => {
+        const v = validateAssignmentPlan(planWith([
+            { id: 'ASSIGN-001', branchName: 'calc/chore/scaffold', taskType: 'chore', dependsOn: ['ASSIGN-002'] },
+            { id: 'ASSIGN-002', storyId: 'US-002', taskIds: ['TASK-002'], branchName: 'calc/feature/us-002-admin' },
+        ]));
+        expect(v.filter(vi => vi.kind === 'scaffold-depends-on-feature')).toEqual([
+            expect.objectContaining({ severity: 'major', id: 'ASSIGN-001' }),
+        ]);
+        expect(v.some(vi => vi.kind === 'dependency-cycle')).toBe(false);
+    });
+
+    it('flags a finalizer that shares its branch, and finds no cycle', () => {
+        const v = validateAssignmentPlan(planWith([
+            { id: 'ASSIGN-001', branchName: 'calc/chore/scaffold', taskType: 'chore', description: 'Scaffold the app' },
+            { id: 'ASSIGN-002', branchName: 'calc/feature/us-001-auth', dependsOn: ['ASSIGN-001'] },
+            { id: 'ASSIGN-003', storyId: 'US-002', taskIds: ['TASK-002'], branchName: 'calc/feature/us-002-admin' },
+            {
+                id: 'ASSIGN-004', storyId: 'US-002', branchName: 'calc/feature/us-002-admin',
+                description: 'FINAL INTEGRATION: wiring every screen into the app shell', dependsOn: ['ASSIGN-002', 'ASSIGN-003'],
+            },
+        ]));
+        const shared = v.filter(vi => vi.kind === 'finalizer-on-shared-branch');
+        expect(shared).toEqual([expect.objectContaining({ severity: 'major', id: 'ASSIGN-004' })]);
+        expect(shared[0].detail).toContain('calc/feature/integration');
+        expect(v.some(vi => vi.kind === 'dependency-cycle')).toBe(false);
+    });
+
+    it('reports a story spread over several branches as info only', () => {
+        const v = validateAssignmentPlan(planWith([
+            { id: 'ASSIGN-001', branchName: 'calc/feature/us-001-auth' },
+            { id: 'ASSIGN-002', branchName: 'calc/feature/us-001-login' },
+            { id: 'ASSIGN-003', storyId: 'US-002', taskIds: ['TASK-002'], branchName: 'calc/feature/us-002-admin' },
+        ]));
+        expect(v.filter(vi => vi.kind === 'story-branch-split')).toEqual([
+            expect.objectContaining({ severity: 'info', id: 'US-001' }),
+        ]);
+    });
+});
+
+describe('buildCoverageGapPrompt — dependency cycles (Plan 30-01)', () => {
+    it('shows the cycle and asks for corrected copies with the same id', () => {
+        const cycle: CoverageViolation = {
+            kind: 'dependency-cycle', severity: 'critical', id: 'ASSIGN-001',
+            detail: 'Dependency cycle among [ASSIGN-001, ASSIGN-002]: dropped "ASSIGN-001 dependsOn ASSIGN-002"',
+            assignmentIds: ['ASSIGN-001', 'ASSIGN-002'],
+        };
+        const prompt = buildCoverageGapPrompt([cycle], 3);
+        expect(prompt).toContain('## Dependency cycles (1):');
+        expect(prompt).toContain('ASSIGN-001 dependsOn ASSIGN-002');
+        expect(prompt).toContain('SAME id');
+        expect(prompt).toContain('except the corrected copies requested above');
+    });
+
+    it('keeps the plain "do not restate" rule when there is no cycle', () => {
+        const gap: CoverageViolation = { kind: 'story-without-assignment', severity: 'critical', id: 'US-003', detail: 'Story US-003: not assigned' };
+        const prompt = buildCoverageGapPrompt([gap], 3);
+        expect(prompt).not.toContain('Dependency cycles');
+        expect(prompt).toContain('Do not restate assignments you already produced.');
+    });
+});
+
+describe('mergeGapRepair (Plan 30-01)', () => {
+    const assignment = (id: string, dependsOn: string[]): Assignment => ({
+        id, storyId: 'US-001', additionalStoryIds: [], taskIds: ['TASK-001'], acIndexes: [],
+        devAgentId: 'senior-frontend', rank: 'senior', priority: 'high', complexity: 'moderate',
+        estimate: '4h', description: 'Build it', dependsOn, taskType: 'feature', moduleIds: [],
+    });
+    const cycle: CoverageViolation = {
+        kind: 'dependency-cycle', severity: 'critical', id: 'ASSIGN-001', detail: '', assignmentIds: ['ASSIGN-001', 'ASSIGN-002'],
+    };
+
+    it('replaces cycle members with their corrected copies and appends new assignments', () => {
+        const merged = mergeGapRepair(
+            [assignment('ASSIGN-001', ['ASSIGN-002']), assignment('ASSIGN-002', ['ASSIGN-001'])],
+            [assignment('ASSIGN-001', []), assignment('ASSIGN-003', ['ASSIGN-001'])],
+            [cycle],
+        );
+        expect(merged.map(a => a.id)).toEqual(['ASSIGN-001', 'ASSIGN-002', 'ASSIGN-003']);
+        expect(merged[0].dependsOn).toEqual([]);
+    });
+
+    it('still appends a restated assignment that no violation named', () => {
+        const merged = mergeGapRepair([assignment('ASSIGN-001', [])], [assignment('ASSIGN-001', ['X'])], []);
+        expect(merged.map(a => a.id)).toEqual(['ASSIGN-001', 'ASSIGN-001']);
+        expect(merged[0].dependsOn).toEqual([]);
     });
 });

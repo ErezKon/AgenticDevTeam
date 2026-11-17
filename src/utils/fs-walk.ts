@@ -9,10 +9,15 @@ import * as path from 'path';
 
 // ─── Canonical prune / filter constants ──────────────────────────────────────
 
-/** Directories to skip when walking project source trees. */
+/**
+ * Directories to skip when walking project source trees. Plan 30-03: `.worktrees-failed`
+ * holds salvaged worktrees — QA scanned one as a second product root, which produced
+ * `PRODUCT-ARTIFACTS-root` and a `GATE-node-test-.worktrees-failed-…` bug. Salvage under
+ * `.worktrees/` (Plan 30-04's location) is covered by `.worktrees`.
+ */
 export const PRUNE_DIRS = new Set([
-    'node_modules', '.git', '.worktrees', 'dist', 'build', '.next', 'out',
-    'coverage', '.venv', 'venv', 'vendor', 'target', '.conventions',
+    'node_modules', '.git', '.worktrees', '.worktrees-failed', 'dist', 'build', '.next', 'out',
+    'coverage', '.venv', 'venv', 'vendor', 'target', '.conventions', '__pycache__',
 ]);
 
 /** Narrow source extensions (code files only). */

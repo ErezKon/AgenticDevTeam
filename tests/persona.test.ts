@@ -22,11 +22,24 @@ const baseCfg = {
 
 // ─── buildDevPersonaCompact ──────────────────────────────────────────────────
 
+/** Plan 30-07 added the read-batching, pre-installed-deps and finish-now instructions (~140 chars net). */
+const COMPACT_MAX_CHARS = 4200;
+
 describe('buildDevPersonaCompact', () => {
-    test('compact persona is under 4100 chars without conventions', () => {
+    test('compact persona stays under its budget without conventions', () => {
         const persona = buildDevPersonaCompact(baseCfg);
         // Sub-Plan 10 added the [storyId#acIndex] test naming convention (~250 chars).
-        expect(persona.length).toBeLessThan(4100);
+        expect(persona.length).toBeLessThan(COMPACT_MAX_CHARS);
+    });
+
+    test('tells the agent to batch reads, that deps are installed, and to finish once done (Plan 30-07)', () => {
+        const persona = buildDevPersonaCompact(baseCfg);
+        expect(persona).toContain('Batch independent read_file/search_code calls into one turn');
+        expect(persona).toContain("don't run npm install unless you add a package");
+        expect(persona).toContain('return the final JSON immediately');
+        expect(persona).not.toContain('Install deps first');
+        // The layout linter it threatened does not exist
+        expect(persona).not.toContain('layout linter');
     });
 
     test('compact persona is under 5100 chars with conventions', () => {
@@ -104,7 +117,7 @@ describe('buildDevPersonaCompact', () => {
         for (const rank of ['principal', 'senior', 'junior'] as const) {
             const persona = buildDevPersonaCompact({ ...baseCfg, rank });
             expect(persona.length).toBeGreaterThan(500);
-            expect(persona.length).toBeLessThan(4100);
+            expect(persona.length).toBeLessThan(COMPACT_MAX_CHARS);
         }
     });
 });
@@ -117,7 +130,7 @@ describe('buildDevPersona with PERSONA_COMPACT=true', () => {
         // Compact persona does NOT have <git_workflow> or <tdd_rules>
         expect(persona).not.toContain('<git_workflow>');
         expect(persona).not.toContain('<tdd_rules>');
-        expect(persona.length).toBeLessThan(4100);
+        expect(persona.length).toBeLessThan(COMPACT_MAX_CHARS);
     });
 });
 

@@ -10,25 +10,27 @@ import { getAccessToken } from '../../utils/oauth-auth.util';
 import { createQaLeadAgent, createQaUnitAgent } from '../../agents/qa/qa.agents';
 import { writeArtifact } from '../../agents/_shared/artifact';
 import { deployConventionsToWorkspace, resolveConventionFiles } from '../../utils/coding-conventions';
-import { gitExec, findGitRoot } from '../../utils/git-exec';
+import { findGitRoot } from '../../utils/git-exec';
 import { syncWorkspaceToBranch } from '../workspace-sync';
 import { detectStackRoots, runQualityGates, gateReportToTestReport, synthesiseGateBugs } from '../quality-gates';
-import { runTests, type ExecutedTestReport, executedToTestReports, compareClaimVsReality, type ClaimDiscrepancy } from '../test-runner';
+import { runTests, executedToTestReports, compareClaimVsReality, type ClaimDiscrepancy } from '../test-runner';
+import type { ExecutedTestReport } from '../test-runners/executed-report';
 import { detectTrivialTests } from '../gate-integrity';
 import { checkTestSufficiency, sufficiencyViolationsToBugs } from '../test-sufficiency';
 import { runSecurityGates, synthesiseSecurityBugs, securityReportToMarkdown } from '../security-gates';
 import { runProductVerification } from '../product-verify';
 import { buildTraceabilityReport } from '../../utils/traceability';
+import { evaluateAcCoverageGate } from '../ac-coverage-gate';
+import { storyIdsOfAssignments } from '../assignment-policy';
 import { makeGateBug } from '../bug-factory';
 import {
     CONTEXT_MAX_CHARS, QA_MODEL, QA_TEST_TIMEOUT_MS,
-    TOOL_PIPELINE_RECURSION_LIMIT, SECURITY_GATE_BLOCKING,
-    MIN_AC_COVERAGE_PCT, MIN_AC_IMPLEMENTED_PCT, MIN_AC_COVERAGE_MAX_BUGS,
+    TOOL_PIPELINE_RECURSION_LIMIT, MIN_AC_COVERAGE_PCT,
 } from '../../config';
 import { QaLeadOutputSchema, QaUnitOutputSchema } from '../../agents/qa/schemas/qa-output.schema';
 import {
     summariseArchitecture, summariseTechStack, summariseDbDesign,
-    summariseCodebaseAnalysis, buildContext, recordContextChars,
+    buildContext, recordContextChars,
 } from '../context-builder';
 import type { ContextSection } from '../context-builder';
 import { storiesForIds } from '../context-builder';
@@ -224,8 +226,13 @@ export const qaNode = phaseNode('qa', qaLog, { haltCheck: true }, async (state, 
         }
     }
 
+    // Plan 30-05: every report of this round carries its bug-fix iteration. Executed and gate
+    // reports used to say 0, so from the first bug-fix round on afterQaRouter ignored their
+    // failures, and traceability (latest iteration only) stopped counting executed tests.
+    const iterationIndex = state.iteration?.bugfix ?? 0;
+
     // Convert executed reports to TestReport format (source: 'executed')
-    const authoritativeReports = executedToTestReports(executedReports);
+    const authoritativeReports = executedToTestReports(executedReports).map(r => ({ ...r, iterationIndex }));
 
     // Compare claim vs reality and record discrepancies
     const claimDiscrepancies: ClaimDiscrepancy[] = [];
@@ -241,6 +248,7 @@ export const qaNode = phaseNode('qa', qaLog, { haltCheck: true }, async (state, 
             ...unitOutput.testReport,
             source: 'claimed' as const,
             cases: unitOutput.testReport.cases ?? [],
+            iterationIndex,
         }] : []),
     ];
 
@@ -271,7 +279,8 @@ export const qaNode = phaseNode('qa', qaLog, { haltCheck: true }, async (state, 
         executed: executedReports,
         userStories: state.userStories,
         trivialTestFiles,
-        completedStoryIds: state.completedAssignmentIds,
+        // Plan 30-03: story ids with merged work — it was handed assignment ids.
+        completedStoryIds: storyIdsOfAssignments(state.assignments, state.completedAssignmentIds),
     });
     if (sufficiencyViolations.length > 0) {
         const suffBugs = sufficiencyViolationsToBugs(sufficiencyViolations);
@@ -303,21 +312,19 @@ export const qaNode = phaseNode('qa', qaLog, { haltCheck: true }, async (state, 
     let latestGateReport: import('../quality-gates').GateReport | null = null;
     const verificationErrors: Array<{ stage: string; message: string }> = [];
     try {
-        let productVerifyReport;
+        const gateReport = await runQualityGates(state.workspacePath);
+        // Plan 30-03: verify the tree the gates just built, as runBranchGates does (Plan 30-02). Run before
+        // the build, it reported "Build produced no artifacts: ." for the unbuilt claudeopus5 checkout.
         try {
-            productVerifyReport = await runProductVerification(state.workspacePath, roots, 'full');
-            const artOk = productVerifyReport.artifacts.filter(a => a.passed).length;
-            qaLog.info(`Product verification: artifacts=${artOk}/${productVerifyReport.artifacts.length}, unresolved refs=${productVerifyReport.resolveIssues.length}, smoke=${productVerifyReport.smoke?.passed ? 'pass' : productVerifyReport.smoke?.ran ? 'fail' : 'skipped'}`);
+            const pv = await runProductVerification(state.workspacePath, roots, 'full');
+            gateReport.productVerify = pv;
+            qaLog.info(`Product verification: artifacts=${pv.artifacts.filter(a => a.passed).length}/${pv.artifacts.length}, unresolved refs=${pv.resolveIssues.length}, smoke=${pv.smoke?.passed ? 'pass' : pv.smoke?.ran ? 'fail' : 'skipped'} (${pv.smoke?.reason ?? 'no smoke test'})`);
         } catch (pvErr: any) {
             qaLog.warn(`Product verification error (non-fatal): ${pvErr.message}`);
             verificationErrors.push({ stage: 'product-verify', message: pvErr.message });
         }
-
-        const gateReport = await runQualityGates(state.workspacePath, {
-            productVerify: productVerifyReport,
-        });
         latestGateReport = gateReport;
-        const gateTestReport = gateReportToTestReport(gateReport, 'quality-gates');
+        const gateTestReport = { ...gateReportToTestReport(gateReport, 'quality-gates'), iterationIndex };
         testReports.push(gateTestReport);
 
         const agentClaimedPass = unitOutput?.testReport?.status === 'pass';
@@ -375,7 +382,7 @@ export const qaNode = phaseNode('qa', qaLog, { haltCheck: true }, async (state, 
         verificationErrors.push({ stage: 'security-gates', message: secErr.message });
     }
 
-    // ── AC coverage gate (Sub-Plan 10)
+    // ── AC coverage gate (Sub-Plan 10; Plan 30-03 rules in ac-coverage-gate.ts)
     try {
         if (MIN_AC_COVERAGE_PCT > 0) {
             const traceReport = buildTraceabilityReport({
@@ -384,57 +391,11 @@ export const qaNode = phaseNode('qa', qaLog, { haltCheck: true }, async (state, 
                 testReports,
             } as ProjectStateType);
             const t = traceReport.totals;
-            const vPct = t.verifiedPct * 100;
-            const iPct = t.implementedPct * 100;
-            const coverageOk = vPct >= MIN_AC_COVERAGE_PCT
-                && (MIN_AC_IMPLEMENTED_PCT <= 0 || iPct >= MIN_AC_IMPLEMENTED_PCT);
-
-            testReports.push({
-                type: 'unit' as const,
-                framework: 'ac-coverage',
-                source: 'quality-gates' as const,
-                total: t.criteria,
-                passed: t.verified,
-                failed: t.criteria - t.verified,
-                skipped: 0,
-                status: coverageOk ? 'pass' as const : 'fail' as const,
-                iterationIndex: state.iteration?.bugfix ?? 0,
-                runnerError: false,
-                failures: [],
-                agentId: 'ac-coverage-gate',
-                cases: [],
-            });
-
-            if (!coverageOk) {
-                const missingGaps = traceReport.rows.filter(r => r.status === 'missing');
-                const failingGaps = traceReport.rows.filter(r => r.status === 'tested-failing');
-                const untestedGaps = traceReport.rows.filter(r => r.status === 'implemented-untested');
-                const blockedGaps = traceReport.rows.filter(r => r.status === 'blocked');
-                const prioritised = [...missingGaps, ...failingGaps, ...blockedGaps, ...untestedGaps];
-
-                const acBugs: Bug[] = prioritised.slice(0, MIN_AC_COVERAGE_MAX_BUGS).map(row => makeGateBug(
-                    `AC-${row.storyId}-${row.acIndex}`,
-                    `Acceptance criterion not verified: ${row.storyId} AC#${row.acIndex}`,
-                    'critical',
-                    'ac-coverage-gate',
-                    `Story ${row.storyId}, AC#${row.acIndex}: "${row.acText}"`,
-                    `A test named "[${row.storyId}#${row.acIndex}] ..." exists, is executed, and passes`,
-                    `Status "${row.status}" — ${
-                        row.status === 'missing' ? 'no assignment references this story'
-                        : row.status === 'tested-failing' ? 'test exists but fails'
-                        : row.status === 'blocked' ? 'PR blocked/conflicted'
-                        : 'code merged but no tagged test executed'}`,
-                    row.assignmentIds[0] ? `Assignment ${row.assignmentIds[0]}` : `Story ${row.storyId}`,
-                ));
-                if (acBugs.length > 0) {
-                    allBugs.push(...acBugs);
-                    qaLog.info(`AC coverage gate: verified ${vPct.toFixed(0)}% < ${MIN_AC_COVERAGE_PCT}%, implemented ${iPct.toFixed(0)}% — synthesised ${acBugs.length} bug(s)`);
-                    transcript.push(msg('quality-gates', 'qa',
-                        `AC coverage gate FAILED: verified ${vPct.toFixed(0)}%, implemented ${iPct.toFixed(0)}%, delivery ${t.deliveryScore.toFixed(2)} — ${acBugs.length} bugs for ${prioritised.length} gaps`));
-                }
-            } else {
-                qaLog.info(`AC coverage gate: verified ${vPct.toFixed(0)}% >= ${MIN_AC_COVERAGE_PCT}%, implemented ${iPct.toFixed(0)}% — passed (delivery ${t.deliveryScore.toFixed(2)})`);
-            }
+            const acGate = evaluateAcCoverageGate(traceReport, executedReports, iterationIndex);
+            testReports.push(acGate.testReport);
+            allBugs.push(...acGate.bugs);
+            qaLog.info(acGate.summary);
+            if (acGate.status !== 'pass') transcript.push(msg('quality-gates', 'qa', acGate.summary));
             emitRunEvent('traceability:update', {
                 verifiedPct: t.verifiedPct, implementedPct: t.implementedPct,
                 deliveryScore: t.deliveryScore, criteria: t.criteria,
@@ -463,7 +424,7 @@ export const qaNode = phaseNode('qa', qaLog, { haltCheck: true }, async (state, 
             skipped: 0,
             status: 'inconclusive' as const,
             source: 'executed' as const,
-            iterationIndex: 0,
+            iterationIndex,
             runnerError: true,
             failures: [],
             agentId: 'qa-node',

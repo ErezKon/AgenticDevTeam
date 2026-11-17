@@ -318,6 +318,41 @@ export async function retryFailedPRCreation(
 }
 
 /**
+ * Plan 30-02 merge guard: the commit GitHub would merge must be the local HEAD
+ * that was gated and reviewed. In the claudeopus5 run every round-2/3 push was
+ * rejected, so approving PR #2 would have merged the stale round-1 head.
+ *
+ * `pulls.get` is polled because GitHub moves a PR's head asynchronously after
+ * a push (the local stand-in answers from the bare repo, so once is enough).
+ * Returns null when the head matches, otherwise the merge blocker — including
+ * when the head cannot be read (fail closed).
+ */
+export async function checkPrHeadCurrent(
+    octokit: any,
+    ghOwner: string,
+    ghRepo: string,
+    prNumber: number,
+    localHeadSha: string,
+    poll: { attempts: number; delayMs: number } = GITHUB_MODE === 'local'
+        ? { attempts: 1, delayMs: 0 }
+        : { attempts: 3, delayMs: 2_000 },
+): Promise<string | null> {
+    let remoteHead = 'unknown';
+    for (let attempt = 1; attempt <= poll.attempts; attempt++) {
+        try {
+            const { data } = await octokit.pulls.get({ owner: ghOwner, repo: ghRepo, pull_number: prNumber });
+            remoteHead = data?.head?.sha || 'unknown';
+            if (localHeadSha && remoteHead === localHeadSha) return null;
+        } catch (err: any) {
+            remoteHead = `unavailable (${err.message})`;
+        }
+        if (attempt < poll.attempts) await new Promise(r => setTimeout(r, poll.delayMs * attempt));
+    }
+    const shown = /^[0-9a-f]{40}$/.test(remoteHead) ? remoteHead.slice(0, 8) : remoteHead.slice(0, 120);
+    return `remote head stale: PR #${prNumber} head is ${shown}, local HEAD is ${localHeadSha.slice(0, 8) || 'unknown'}`;
+}
+
+/**
  * Merge a PR via squash, delete the remote branch, and return success status.
  */
 export async function mergePr(

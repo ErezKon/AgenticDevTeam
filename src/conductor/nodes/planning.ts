@@ -33,7 +33,7 @@ import {
 import type { ContextSection } from '../context-builder';
 import { emitRunEvent } from '../../utils/event-bus';
 import { appendLedger } from '../../utils/run-ledger';
-import { validateAssignmentPlan, buildCoverageGapPrompt, logPlanFunnel } from '../plan-coverage';
+import { validateAssignmentPlan, buildCoverageGapPrompt, mergeGapRepair, logPlanFunnel } from '../plan-coverage';
 import type { GapRepairContext } from '../plan-coverage';
 import { consolidateBranches } from '../branch-consolidation';
 import { projectSlugFromBranch } from '../../utils/branch-naming';
@@ -408,8 +408,8 @@ export const teamLeaderNode = phaseNode('team-leader', tlLog, {}, async (state, 
                 const { output: gapOutput } = await invokeAgent(agent, gapPrompt, `tl-gap-${attempt}`, 'team-leader', 'team-leader', { schema: TeamLeaderOutputSchema });
                 const additions = gapOutput.assignments ?? [];
                 if (additions.length > 0) {
-                    tlLog.info(`Gap repair produced ${additions.length} additional assignment(s)`);
-                    assignments = assignments.concat(additions);
+                    tlLog.info(`Gap repair produced ${additions.length} additional or corrected assignment(s)`);
+                    assignments = mergeGapRepair(assignments, additions, violations);
                     const revalidateState = { ...state, assignments: [...state.assignments, ...assignments] };
                     violations = validateAssignmentPlan(revalidateState);
                 }

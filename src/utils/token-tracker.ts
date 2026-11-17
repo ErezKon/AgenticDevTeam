@@ -8,10 +8,31 @@
  */
 import * as fs from 'fs';
 import * as path from 'path';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { getLogger } from './logger';
 import { emitRunEvent } from './event-bus';
+import { effectiveInputTokens } from './cost';
 
 const log = getLogger('[TokenTracker]', 220);
+
+// ─── Attribution (Plan 30-06) ───────────────────────────────────────────────
+
+/** The dispatch round and branch an agent invocation works for; the report groups tokens by them. */
+export interface TokenAttribution {
+    round?: number;
+    branch?: string;
+}
+
+const _attribution = new AsyncLocalStorage<TokenAttribution>();
+
+/**
+ * Run `fn` with every agent invocation it starts attributed to a dispatch round
+ * and/or a branch (nested scopes merge). Read when the invocation starts, so it
+ * follows the async call chain of the work rather than the callback queue.
+ */
+export function withTokenAttribution<T>(attribution: TokenAttribution, fn: () => T): T {
+    return _attribution.run({ ..._attribution.getStore(), ...attribution }, fn);
+}
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -74,6 +95,18 @@ export interface InvocationRecord {
     startedAt: number;
     endedAt?: number;
     respawns?: number;
+    /** Plan 30-06: the development round (1-based) and branch the invocation worked for. */
+    round?: number;
+    branch?: string;
+    /** Plan 30-06: the invocation hit its token budget and its valid output was kept. */
+    budgetCapped?: boolean;
+}
+
+/** The PR status a branch workflow ended with, in a development round (Plan 30-06). */
+export interface BranchOutcome {
+    branch: string;
+    status: string;
+    round?: number;
 }
 
 /** Per-invocation efficiency summary for the report. */
@@ -94,6 +127,14 @@ export class TokenTracker {
     private ledger: TokenCallRecord[] = [];
     private _invocations: Map<string, InvocationRecord> = new Map();
     private _nextInvocationId = 0;
+    /**
+     * Running raw and effective input per invocation of this session (Plan 30-06): the
+     * per-call budget checks read it in O(1), and it never counts records imported from
+     * a previous run, whose invocation ids repeat.
+     */
+    private _invocationTotals: Map<string, { input: number; effective: number }> = new Map();
+    /** Branch workflow outcomes in the order they finished (Plan 30-06). */
+    private _branchOutcomes: BranchOutcome[] = [];
 
     // ── Persistence fields ──────────────────────────────────────────────
     private _outputPath: string | null = null;
@@ -211,6 +252,12 @@ export class TokenTracker {
     /** Record a single LLM call's token usage. */
     recordCall(record: TokenCallRecord): void {
         this.ledger.push(record);
+        if (record.invocationId) {
+            const totals = this._invocationTotals.get(record.invocationId) ?? { input: 0, effective: 0 };
+            totals.input += record.inputTokens;
+            totals.effective += effectiveInputTokens(record);
+            this._invocationTotals.set(record.invocationId, totals);
+        }
         log.debug(
             `${record.agentId} [${record.model}] ${record.phase}: `
             + `in=${record.inputTokens} out=${record.outputTokens} total=${record.totalTokens}`,
@@ -232,15 +279,16 @@ export class TokenTracker {
             const cacheRead = r.cacheReadTokens ?? 0;
             const cacheWrite = r.cacheCreationTokens ?? 0;
 
-            // By agent
-            const agent = byAgentMap.get(r.agentId) ?? { agentId: r.agentId, model: r.model, callCount: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 };
+            // By agent — one row per agent and model, so each row prices exactly (Plan 30-06)
+            const agentKey = `${r.agentId}::${r.model}`;
+            const agent = byAgentMap.get(agentKey) ?? { agentId: r.agentId, model: r.model, callCount: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 };
             agent.callCount++;
             agent.inputTokens += r.inputTokens;
             agent.outputTokens += r.outputTokens;
             agent.totalTokens += r.totalTokens;
             agent.cacheReadTokens += cacheRead;
             agent.cacheCreationTokens += cacheWrite;
-            byAgentMap.set(r.agentId, agent);
+            byAgentMap.set(agentKey, agent);
 
             // By phase
             const phase = byPhaseMap.get(r.phase) ?? { phase: r.phase, inputTokens: 0, outputTokens: 0, totalTokens: 0, callCount: 0, cacheReadTokens: 0, cacheCreationTokens: 0 };
@@ -289,8 +337,34 @@ export class TokenTracker {
      */
     startInvocation(agentId: string, phase: string): string {
         const id = `inv-${agentId}-${this._nextInvocationId++}`;
-        this._invocations.set(id, { id, agentId, phase, startedAt: Date.now() });
+        const { round, branch } = _attribution.getStore() ?? {};
+        this._invocations.set(id, {
+            id, agentId, phase, startedAt: Date.now(),
+            ...(round !== undefined && { round }), ...(branch && { branch }),
+        });
         return id;
+    }
+
+    /** Mark an invocation that hit its token budget and kept its valid output (Plan 30-06). */
+    markBudgetCapped(id: string): void {
+        const inv = this._invocations.get(id);
+        if (inv) inv.budgetCapped = true;
+    }
+
+    /** Every invocation of this session, with its attribution (Plan 30-06). */
+    getInvocations(): InvocationRecord[] {
+        return [...this._invocations.values()];
+    }
+
+    /** Record the PR status a branch workflow ended with; the round comes from the attribution scope (Plan 30-06). */
+    recordBranchOutcome(branch: string, status: string): void {
+        const { round } = _attribution.getStore() ?? {};
+        this._branchOutcomes.push({ branch, status, ...(round !== undefined && { round }) });
+    }
+
+    /** Branch outcomes in the order the workflows finished (Plan 30-06). */
+    getBranchOutcomes(): BranchOutcome[] {
+        return [...this._branchOutcomes];
     }
 
     /** Mark an invocation as ended. */
@@ -366,13 +440,14 @@ export class TokenTracker {
         return rows.sort((a, b) => b.invocations - a.invocations);
     }
 
-    /** Sum of input tokens for all calls tagged with a given invocation ID (Plan 24, D1). */
+    /** Raw input tokens of all calls tagged with a given invocation ID (Plan 24, D1). */
     getInvocationInputTokens(invocationId: string): number {
-        let total = 0;
-        for (const r of this.ledger) {
-            if (r.invocationId === invocationId) total += r.inputTokens;
-        }
-        return total;
+        return this._invocationTotals.get(invocationId)?.input ?? 0;
+    }
+
+    /** Effective (price-weighted) input tokens of an invocation — see `effectiveInputTokens()` (Plan 30-06). */
+    getInvocationEffectiveTokens(invocationId: string): number {
+        return this._invocationTotals.get(invocationId)?.effective ?? 0;
     }
 
     /** Return the raw ledger as a serializable snapshot for state storage. */
@@ -400,7 +475,9 @@ export class TokenTracker {
                 cacheReadTokens: record.cacheReadTokens,
                 cacheCreationTokens: record.cacheCreationTokens,
                 timestamp: record.timestamp ?? '',
-                invocationId: record.invocationId,
+                // Invocation ids restart at 0 in every session: namespaced, an earlier run's records
+                // are never joined to this session's invocations (Plan 30-06 report attribution).
+                invocationId: record.invocationId ? `prev:${record.invocationId}` : undefined,
             });
         }
     }
@@ -413,6 +490,8 @@ export class TokenTracker {
         this.ledger = [];
         this._invocations.clear();
         this._nextInvocationId = 0;
+        this._invocationTotals.clear();
+        this._branchOutcomes = [];
         this._outputPath = null;
         this._systemName = '';
         this._runStatus = 'in-progress';

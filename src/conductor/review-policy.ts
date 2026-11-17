@@ -268,18 +268,20 @@ export function reviewCommentsToBugs(
 
 /**
  * Synthesise a critical Bug for a blocked PR so the bugfix loop retries the branch.
+ * `prNumber` 0: the branch never got a PR (e.g. its critical gates failed).
  */
 export function blockedPrBug(
     branchName: string,
     prNumber: number,
     blockers: string[],
 ): Bug {
+    const subject = prNumber ? `PR #${prNumber}` : 'the branch (no PR)';
     return makeGateBug(
         `PR-BLOCKED-${branchName}`,
-        `PR #${prNumber} blocked on ${branchName}`,
+        prNumber ? `PR #${prNumber} blocked on ${branchName}` : `Branch ${branchName} blocked before a PR`,
         'critical',
         'review-policy',
-        `Merge PR #${prNumber} on branch ${branchName}`,
+        `Merge ${subject} on branch ${branchName}`,
         'PR should merge cleanly with all gates passing',
         `Blocked: ${blockers.join('; ')}`,
         branchName,

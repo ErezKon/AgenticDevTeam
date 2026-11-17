@@ -13,11 +13,13 @@ import { CONTEXT_MAX_DESC_CHARS, CONTRACT_PROMPT_MAX_CHARS } from '../config';
 import { getLogger } from '../utils/logger';
 import type {
     ArchitectureDoc, TechDecision, DbDesign, UserStory, Task,
-    FileChange, CodebaseAnalysis,
+    FileChange, CodebaseAnalysis, Bug, PullRequest,
 } from '../agents/_shared/base-schemas';
 import type { Epic } from '../agents/_shared/schemas/epic.schema';
 import type { RepoContract } from '../agents/_shared/schemas/repo-contract.schema';
 import { renderContractForPrompt } from '../utils/repo-contract-writer';
+import { mdTable } from '../utils/markdown-table';
+import { bugStoryId, prBlockers } from './triage-selection';
 
 const log = getLogger('[context-builder]', 183);
 
@@ -261,6 +263,66 @@ export function summariseCodebaseAnalysis(a: CodebaseAnalysis | null): string {
     return lines.join('\n');
 }
 
+// ─── Bug-fix triage (Plan 30-05) ────────────────────────────────────────────
+
+/**
+ * One row per bug: id, severity, title, story and a one-line detail. It
+ * replaces `JSON.stringify(openBugs, null, 2)`, which was 38 kB for the 63 bugs
+ * of claudeopus5's first triage.
+ */
+export function summariseBugs(bugs: Bug[], detailChars: number = 200): string {
+    if (bugs.length === 0) return '(no open bugs)';
+    return mdTable(['Bug', 'Severity', 'Title', 'Story', 'Detail'], bugs.map(b => [
+        b.id, b.severity, oneLine(b.title), bugStoryId(b) ?? '-',
+        clip(oneLine(b.actualBehavior || b.stepsToReproduce || ''), detailChars),
+    ]));
+}
+
+/**
+ * Every branch whose latest PR record did not merge: its status, its real
+ * blockers, the final review round's unresolved critical/major comments
+ * (`file:line — body`) and its first failing gate step. claudeopus5's triage saw
+ * none of this, and the Team Leader invented merge conflicts for a PR that was
+ * blocked by review findings.
+ */
+export function summariseUndeliveredBranches(
+    prs: PullRequest[],
+    abandoned: ReadonlySet<string>,
+    opts: { maxComments?: number; commentChars?: number } = {},
+): string {
+    const latest = new Map(prs.map(pr => [pr.branchName, pr] as const));
+    const undelivered = [...latest.values()].filter(pr => pr.status !== 'merged' && pr.status !== 'pr-creation-failed');
+    if (undelivered.length === 0) return '(every dispatched branch merged)';
+    const maxComments = opts.maxComments ?? 6;
+    const commentChars = opts.commentChars ?? 240;
+    return undelivered.map(pr => {
+        const lines = [`### ${pr.branchName} — ${pr.prNumber ? `PR #${pr.prNumber}, ` : ''}${pr.status}`];
+        if (abandoned.has(pr.branchName)) {
+            lines.push('ABANDONED: unmerged in consecutive rounds, so it is not dispatched again. Create no assignment for this branch.');
+        }
+        if (pr.status === 'deferred') {
+            lines.push('Deferred: a branch budget stopped it; its remaining assignments resume next round. No fix needed.');
+            return lines.join('\n');
+        }
+        lines.push(`Blockers: ${prBlockers(pr).join('; ')}`);
+        const reviews = pr.reviews ?? [];
+        const finalRound = Math.max(0, ...reviews.map(r => r.iteration ?? 0));
+        const comments = reviews.filter(r => (r.iteration ?? 0) === finalRound).flatMap(r => r.comments ?? [])
+            .filter(c => !c.resolved && (c.severity === 'critical' || c.severity === 'major'));
+        if (comments.length > 0) {
+            lines.push(`Unresolved review comments (final review round, ${comments.length}):`);
+            for (const c of comments.slice(0, maxComments)) {
+                lines.push(`- ${c.filePath ?? '(no file)'}${c.line ? `:${c.line}` : ''} — [${c.severity}] ${clip(oneLine(c.body), commentChars)}`);
+            }
+            if (comments.length > maxComments) lines.push(`- … ${comments.length - maxComments} more`);
+        }
+        if (pr.failedGate) {
+            lines.push(`Failing gate: ${pr.failedGate.step} (\`${pr.failedGate.command}\`)`, '```text', pr.failedGate.summary, '```');
+        }
+        return lines.join('\n');
+    }).join('\n\n');
+}
+
 // ─── Repo Contract ──────────────────────────────────────────────────────────
 
 /**
@@ -371,6 +433,11 @@ export function buildContext(
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
+
+/** Collapse whitespace (newlines included) to single spaces. */
+function oneLine(s: string): string {
+    return s.replace(/\s+/g, ' ').trim();
+}
 
 /** Clip a string to `max` characters, appending `...` if truncated. */
 function clip(s: string, max: number): string {

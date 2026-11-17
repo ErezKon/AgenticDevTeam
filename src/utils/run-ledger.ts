@@ -21,10 +21,33 @@ const log = getLogger('[Ledger]', 178);
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
+/** Dispatch-plan evidence (Plan 30-01): one entry per development round. */
+export type DispatchPlanRecord = {
+    branches: Array<{ name: string; kind: string; reason: string; assignments: string[]; dependsOn: string[] }>;
+    order: string[];
+    layers: string[][];
+    skippedEdges: Array<{ from: string; to: string; reason: string }>;
+    brokenEdges: Array<{ from: string; to: string; level: string; cycle: string[]; via?: Array<{ from: string; to: string }> }>;
+    warnings: string[];
+};
+
+/**
+ * One dev-agent invocation (Plan 30-02: real numbers). `toolCalls` sums the loop-guard
+ * usage of every respawn generation; `filesWritten` are the files in the invocation's
+ * durable commit; `ok-budget-capped` = crossed MAX_INVOCATION_INPUT_TOKENS with valid
+ * output, which was kept; `budget-exhausted` = crossed it without valid output.
+ */
+type AgentLedgerRecord = {
+    agentId: string; phase: PhaseName; invocation: number; assignmentId?: string; branch?: string;
+    toolCalls: { read: number; write: number; shell: number; turns?: number }; respawns: number; budgetCapped?: boolean;
+    poisoned: boolean; filesWritten: string[]; filesClaimed: string[]; phantoms: string[];
+    outcome: 'ok' | 'ok-budget-capped' | 'failed' | 'budget-exhausted'; error?: string;
+};
+
 export type LedgerEntry =
     | { t: string; kind: 'phase';          phase: PhaseName; event: 'start' | 'end'; durationMs?: number }
     | { t: string; kind: 'plan-funnel';    epics: number; stories: number; criteria: number; tasks: number; assignments: number; unassignedStories: string[]; unassignedTasks: string[] }
-    | { t: string; kind: 'agent';          agentId: string; phase: PhaseName; invocation: number; toolCalls: { read: number; write: number; shell: number }; respawns: number; poisoned: boolean; filesWritten: string[]; filesClaimed: string[]; phantoms: string[]; outcome: 'ok' | 'failed' | 'budget-exhausted'; error?: string }
+    | ({ t: string; kind: 'agent' } & AgentLedgerRecord)
     | { t: string; kind: 'gate';           branch: string | null; stacks: string[]; steps: Array<{ step: string; mode: string; passed: boolean; skipped: boolean; ms: number }>; passed: boolean; inconclusive: boolean }
     | { t: string; kind: 'integrity';      branch: string; findings: TamperFinding[] }
     | { t: string; kind: 'product-verify'; artifacts: number; artifactsFailed: number; unresolvedRefs: number; smoke: string }
@@ -34,7 +57,8 @@ export type LedgerEntry =
     | { t: string; kind: 'coverage';       verifiedPct: number; implementedPct: number; deliveryScore: number; missing: number; blocked: number }
     | { t: string; kind: 'acceptance';     status: AcceptanceStatus; blockers: string[]; unrecoverable: boolean }
     | { t: string; kind: 'salvage';        branch: string; patchPath: string; reason: string }
-    | { t: string; kind: 'invariant';      id: string; phase: PhaseName; detail: string };
+    | { t: string; kind: 'invariant';      id: string; phase: PhaseName; detail: string }
+    | ({ t: string; kind: 'dispatch-plan' } & DispatchPlanRecord);
 
 /** Distributive Omit — preserves union discrimination. */
 type DistributiveOmit<T, K extends keyof any> = T extends any ? Omit<T, K> : never;

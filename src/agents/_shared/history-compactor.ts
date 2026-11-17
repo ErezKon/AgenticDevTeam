@@ -32,6 +32,13 @@ export interface CompactionStats {
     writeArgsStubbed: number;
 }
 
+/** A compacted history. `stubbedToolCallIds`: the tool calls whose results the model no longer sees (Plan 30-07). */
+export interface CompactionResult {
+    messages: BaseMessage[];
+    stats: CompactionStats;
+    stubbedToolCallIds: string[];
+}
+
 /** Cumulative compaction stats across all invocations in a run. */
 export interface CumulativeCompactionStats {
     invocations: number;
@@ -47,7 +54,7 @@ export interface CumulativeCompactionStats {
 
 import { getRunContext, type CompactionStatsAccumulator } from '../../utils/run-context';
 
-let _cumulative = { invocations: 0, totalOriginal: 0, totalCompacted: 0, toolStubs: 0, writeStubs: 0 };
+const _cumulative = { invocations: 0, totalOriginal: 0, totalCompacted: 0, toolStubs: 0, writeStubs: 0 };
 
 /** Get the active stats accumulator — per-run scoped or module default. */
 function _activeStats(): CompactionStatsAccumulator {
@@ -80,11 +87,6 @@ export function getCumulativeCompactionStats(): CumulativeCompactionStats {
     };
 }
 
-/** Reset cumulative stats (for testing / run start). */
-export function _resetCompactionStats(): void {
-    _cumulative = { invocations: 0, totalOriginal: 0, totalCompacted: 0, toolStubs: 0, writeStubs: 0 };
-}
-
 // ─── Compaction memoisation (Plan 24, C1) ───────────────────────────────────
 //
 // Once a message has been rendered as an elision marker, the marker bytes must
@@ -93,7 +95,7 @@ export function _resetCompactionStats(): void {
 // module-level Map keyed by message id (or a synthetic key) stores the first
 // rendering and reuses it verbatim.
 
-let _compactionMemo: Map<string, string> = new Map();
+const _compactionMemo: Map<string, string> = new Map();
 let _memoThreadId: string = '';
 
 /** Get the active compaction memo — per-run scoped or module default. */
@@ -102,16 +104,10 @@ function _activeMemo(): Map<string, string> {
     return ctx?.compactionMemo ?? _compactionMemo;
 }
 
-/** Clear the memoisation cache (exposed for testing). */
-export function _resetCompactionMemo(): void {
-    _compactionMemo = new Map();
-    _memoThreadId = '';
-}
-
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 /** Measure the character length of a message's serialisable content. */
-function messageChars(m: BaseMessage): number {
+export function messageChars(m: BaseMessage): number {
     const contentLen = typeof m.content === 'string'
         ? m.content.length
         : JSON.stringify(m.content).length;
@@ -335,16 +331,20 @@ export function normaliseAIMessageForState<T>(message: T): T {
  *     edit_file tool calls with `[<n> chars elided - file already written]`.
  *     The tool NAME and PATH stay, so the model still knows what it did.
  *  4. If still over `maxChars`, drop the oldest stubbed pairs
- *     (never the first message, never the last `keepRecent`).
+ *     (never the first message, never the recent window).
  *
  * **Critical invariant:** every `AIMessage` with `tool_calls` must always
  * be followed by its matching `ToolMessage`s. We stub, never delete,
  * unless we drop the whole AI/Tool group together in rule 4.
+ *
+ * Plan 30-07: `stubbedToolCallIds` lists every result rule 2 stubbed (rule 4
+ * only drops stubbed ones), so the loop guard knows which reads the model can
+ * no longer see.
  */
 export function compactHistory(
     messages: BaseMessage[],
     opts?: { keepRecent?: number; maxChars?: number; keepRecentTurns?: number; keepRecentWriteArgs?: number; threadId?: string },
-): { messages: BaseMessage[]; stats: CompactionStats } {
+): CompactionResult {
     const keepRecent = opts?.keepRecent ?? HISTORY_KEEP_RECENT_TOOL_RESULTS;
     const keepRecentTurns = opts?.keepRecentTurns ?? HISTORY_KEEP_RECENT_TURNS;
     const keepRecentWriteArgs = opts?.keepRecentWriteArgs ?? HISTORY_KEEP_RECENT_WRITE_ARGS;
@@ -362,16 +362,16 @@ export function compactHistory(
     }
 
     const originalChars = messages.reduce((sum, m) => sum + messageChars(m), 0);
-    let toolResultsStubbed = 0;
+    const stubbedToolCallIds: string[] = [];
     let writeArgsStubbed = 0;
+    const unchanged: CompactionResult = {
+        messages,
+        stats: { originalChars, compactedChars: originalChars, toolResultsStubbed: 0, writeArgsStubbed: 0 },
+        stubbedToolCallIds: [],
+    };
 
     // Short-circuit: nothing to compact (single message or empty)
-    if (messages.length <= 1) {
-        return {
-            messages,
-            stats: { originalChars, compactedChars: originalChars, toolResultsStubbed: 0, writeArgsStubbed: 0 },
-        };
-    }
+    if (messages.length <= 1) return unchanged;
 
     // ── Identify the "recent" window ────────────────────────────────────
     // Plan 22 B4: the boundary is measured in *model turns*, not tool results.
@@ -410,7 +410,7 @@ export function compactHistory(
                 tool_call_id: tm.tool_call_id,
                 name: tm.name,
             }));
-            toolResultsStubbed++;
+            stubbedToolCallIds.push(tm.tool_call_id);
             continue;
         }
 
@@ -455,21 +455,17 @@ export function compactHistory(
     }
 
     // If nothing was stubbed or elided, return the original array unchanged
-    if (toolResultsStubbed === 0 && writeArgsStubbed === 0) {
-        return {
-            messages,
-            stats: { originalChars, compactedChars: originalChars, toolResultsStubbed: 0, writeArgsStubbed: 0 },
-        };
-    }
+    if (stubbedToolCallIds.length === 0 && writeArgsStubbed === 0) return unchanged;
 
     // ── Rule 4: hard ceiling — drop oldest stubbed groups ────────────────
     let currentChars = compacted.reduce((sum, m) => sum + messageChars(m), 0);
+    let result = compacted;
 
     if (currentChars > maxChars) {
         // Identify droppable groups: contiguous AI(tool_calls)+ToolMessage
         // groups in the middle section (between index 1 and the recent boundary).
         // We must drop entire groups to maintain the tool_call_id pairing.
-        const droppableGroups = identifyDroppableGroups(compacted, keepRecent);
+        const droppableGroups = identifyDroppableGroups(compacted, recentBoundary);
 
         // Drop from oldest first
         const dropIndices = new Set<number>();
@@ -480,21 +476,14 @@ export function compactHistory(
                 dropIndices.add(idx);
             }
         }
-
-        if (dropIndices.size > 0) {
-            const filtered = compacted.filter((_, i) => !dropIndices.has(i));
-            const compactedChars = filtered.reduce((sum, m) => sum + messageChars(m), 0);
-            return {
-                messages: filtered,
-                stats: { originalChars, compactedChars, toolResultsStubbed, writeArgsStubbed },
-            };
-        }
+        if (dropIndices.size > 0) result = compacted.filter((_, i) => !dropIndices.has(i));
     }
 
-    const compactedChars = compacted.reduce((sum, m) => sum + messageChars(m), 0);
+    const compactedChars = result.reduce((sum, m) => sum + messageChars(m), 0);
     return {
-        messages: compacted,
-        stats: { originalChars, compactedChars, toolResultsStubbed, writeArgsStubbed },
+        messages: result,
+        stats: { originalChars, compactedChars, toolResultsStubbed: stubbedToolCallIds.length, writeArgsStubbed },
+        stubbedToolCallIds,
     };
 }
 
@@ -566,45 +555,26 @@ export function findRecentWriteTurnIndexes(messages: BaseMessage[], keepWriteTur
 /**
  * Identify groups of messages that can be dropped together.
  * A group is an AIMessage with tool_calls followed by its matching ToolMessages.
- * Returns arrays of indices, oldest first, excluding the first message and
- * the last `keepRecent` tool results.
+ * Returns arrays of indices, oldest first, between the first message and
+ * `recentBoundary`. Plan 30-07: the boundary is the compactor's recent window —
+ * re-measuring it in tool results put it inside batched turns, so a hard-ceiling
+ * drop could remove turns the window had kept verbatim.
  */
 function identifyDroppableGroups(
     messages: BaseMessage[],
-    keepRecent: number,
+    recentBoundary: number,
 ): number[][] {
     const groups: number[][] = [];
 
-    // Find the recent boundary (last keepRecent ToolMessages)
-    let recentStart = messages.length;
-    let seen = 0;
-    for (let i = messages.length - 1; i >= 1; i--) {
-        if (isToolMessage(messages[i])) {
-            seen++;
-            if (seen >= keepRecent) {
-                // Walk back to find the parent AIMessage
-                for (let j = i - 1; j >= 1; j--) {
-                    const candidate = messages[j];
-                    if (isAIMessage(candidate) && candidate.tool_calls?.length) {
-                        recentStart = j;
-                        break;
-                    }
-                }
-                if (recentStart === messages.length) recentStart = i;
-                break;
-            }
-        }
-    }
-
-    // Scan the droppable region (index 1..recentStart-1)
+    // Scan the droppable region (index 1..recentBoundary-1)
     let i = 1;
-    while (i < recentStart) {
+    while (i < recentBoundary) {
         const m = messages[i];
         if (isAIMessage(m) && m.tool_calls?.length) {
             const group = [i];
             // Collect the following ToolMessages that match
             let j = i + 1;
-            while (j < recentStart && isToolMessage(messages[j])) {
+            while (j < recentBoundary && isToolMessage(messages[j])) {
                 group.push(j);
                 j++;
             }

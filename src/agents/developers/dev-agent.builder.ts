@@ -10,7 +10,7 @@ import { DeveloperOutputSchema } from './schemas/dev-output.schema';
 import { createWorkspaceTools } from '../../tools/fs/workspace-tools';
 import { createGitTools } from '../../tools/git/git-tools';
 import { createShellTool } from '../../tools/shell/shell-tools';
-import { PRINCIPAL_DEV_MODEL, SENIOR_DEV_MODEL, JUNIOR_DEV_MODEL, DEV_GIT_TOOLS_ENABLED, STRONG_FIXER_MODEL, STRONG_FIXER_MAX_TOOL_CALLS, TOOL_BUDGETS_JSON } from '../../config';
+import { PRINCIPAL_DEV_MODEL, SENIOR_DEV_MODEL, JUNIOR_DEV_MODEL, DEV_GIT_TOOLS_ENABLED, STRONG_FIXER_MODEL, STRONG_FIXER_MAX_TOOL_CALLS, STRONG_FIXER_MAX_INPUT_TOKENS, TOOL_BUDGETS_JSON } from '../../config';
 import { resolveToolBudgets } from '../_shared/tool-loop-guard';
 import type { GitContext } from '../_shared/base-schemas';
 import type { DevAgentEntry } from './registry';
@@ -144,6 +144,8 @@ export function buildStrongFixerAgent(
         model: fixerModel,
         phase: 'development',
         toolBudgets,
+        // Plan 30-06: was only logged; now the fixer lands softly at this effective-token spend
+        softLandingEffectiveTokens: STRONG_FIXER_MAX_INPUT_TOKENS,
         topK: undefined,
         topP: undefined
     });

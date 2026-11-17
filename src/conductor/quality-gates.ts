@@ -25,6 +25,7 @@ import {
 } from '../config';
 import { PRUNE_DIRS as SHARED_PRUNE_DIRS } from '../utils/fs-walk';
 import { type AsyncExecFn, defaultExecAsync as sharedDefaultExecAsync, isToolAvailableAsync } from '../utils/shell-exec';
+import { renderTerminalOutput, summariseTestOutput } from '../utils/terminal-output';
 import type { TestReport } from '../agents/_shared/schemas/testing.schema';
 import type { Bug } from '../agents/_shared/schemas/bug.schema';
 import { makeGateBug } from './bug-factory';
@@ -32,6 +33,12 @@ import type { ProductVerifyReport } from './product-verify';
 import type { GateOutcome, GateFinding, GateStatus } from './gate-types';
 
 const log = getLogger('[QualityGates]', 220);
+
+/**
+ * A step's output as stored in its GateResult (Plan 30-07): rendered, then cut to its
+ * failures and verdict. The raw last 2,000 chars of a Karma run were progress redraws.
+ */
+const stepOutput = (raw: string): string => summariseTestOutput(renderTerminalOutput(raw), 2000);
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -367,9 +374,9 @@ function getPythonInstallCommand(workspacePath: string): string {
 /**
  * Check whether the installed dependency directory is fresh enough to skip
  * install. For node: skip only when node_modules/.package-lock.json exists
- * AND its mtime is newer than both package-lock.json and package.json.
+ * AND its mtime is newer than both package-lock.json and package.json. (Plan 30-03: test-runner too.)
  */
-function shouldSkipInstall(stack: StackKind, dir: string): boolean {
+export function shouldSkipInstall(stack: StackKind, dir: string): boolean {
     const marker = INSTALL_SKIP_MARKERS[stack];
     if (!marker) return false;
     const markerPath = path.join(dir, marker);
@@ -409,7 +416,6 @@ export async function runQualityGates(
         timeoutMs?: number;
         installTimeoutMs?: number;
         exec?: AsyncExecFn;
-        productVerify?: ProductVerifyReport;
     },
 ): Promise<GateReport> {
     if (!QUALITY_GATES_ENABLED) {
@@ -560,7 +566,7 @@ export async function runQualityGates(
                     command,
                     passed: true,
                     skipped: false,
-                    output: (output ?? '').slice(-2000),
+                    output: stepOutput(output ?? ''),
                     durationMs: Date.now() - start,
                     relDir,
                     mode,
@@ -575,7 +581,7 @@ export async function runQualityGates(
                     command,
                     passed: false,
                     skipped: false,
-                    output: output.slice(-2000),
+                    output: stepOutput(output),
                     durationMs: Date.now() - start,
                     relDir,
                     mode,
@@ -594,10 +600,8 @@ export async function runQualityGates(
     const inconclusive = executed.length === 0 ||
         results.some(r => r.mode === 'absent' && REQUIRED_STEPS.has(r.step));
 
-    const report: GateReport = {
-        stacks, roots, results, passed, inconclusive,
-        productVerify: opts?.productVerify,
-    };
+    // Product verification is attached by the caller, after the build (runBranchGates, qaNode — Plans 30-02/30-03).
+    const report: GateReport = { stacks, roots, results, passed, inconclusive };
     log.info(`Quality gates ${passed ? 'PASSED' : 'FAILED'}: ${executed.length} executed, ${results.filter(r => !r.passed && !r.skipped).length} failed, inconclusive=${inconclusive}`);
     emitRunEvent('gate:result', { gate: 'quality-gates', passed, inconclusive, stacks, roots: roots.length, executed: executed.length, failed: results.filter(r => !r.passed && !r.skipped).length });
     return report;
@@ -644,7 +648,7 @@ export function gateReportToTestReport(report: GateReport, agentId: string): Tes
         runnerError: false,
         failures: failed.map(r => ({
             testName: `${r.step} (${r.command})${r.relDir ? ` [${r.relDir}]` : ''}`,
-            error: r.output.slice(0, 500),
+            error: summariseTestOutput(r.output, 500),
         })),
         agentId,
         cases: [],
@@ -668,25 +672,7 @@ export function synthesiseGateBugs(report: GateReport): Bug[] {
         if (r.passed || r.skipped) continue;
         if (r.mode === 'absent') continue; // absent steps are inconclusive, not bugs
 
-        // Determine which stack this result belongs to
-        let stackLabel = 'unknown';
-        for (const root of report.roots) {
-            if (root.relDir === r.relDir) {
-                stackLabel = root.stack;
-                break;
-            }
-        }
-        // Fallback: try old command-matching approach
-        if (stackLabel === 'unknown') {
-            for (const stack of report.stacks) {
-                const commands = GATE_COMMANDS[stack];
-                if (commands[r.step] === r.command) {
-                    stackLabel = stack;
-                    break;
-                }
-            }
-        }
-
+        const stackLabel = stackOf(report, r) ?? 'unknown';
         const dirSuffix = r.relDir ? ` [${r.relDir}]` : '';
         const severity = (r.step === 'build' || r.step === 'test' || r.step === 'typecheck') ? 'critical' : 'major';
         bugs.push(makeGateBug(
@@ -696,7 +682,7 @@ export function synthesiseGateBugs(report: GateReport): Bug[] {
             'quality-gates',
             `Run: ${r.command} in ${r.relDir || '.'}`,
             `The ${r.step} step should pass`,
-            r.output.slice(0, 500),
+            summariseTestOutput(r.output, 500),
             `${stackLabel} ${r.step} configuration or source code`,
         ));
     }
@@ -758,6 +744,13 @@ export function synthesiseGateBugs(report: GateReport): Bug[] {
 
 // ─── GateReport → PR description summary ────────────────────────────────────
 
+/** The stack a gate result belongs to: its root's, else the stack whose command it ran (older reports); null when neither. */
+function stackOf(report: GateReport, r: GateResult): StackKind | null {
+    return report.roots.find(root => root.relDir === r.relDir)?.stack
+        ?? report.stacks.find(stack => GATE_COMMANDS[stack][r.step] === r.command)
+        ?? null;
+}
+
 /**
  * Format a GateReport as a markdown table suitable for a PR description.
  */
@@ -776,24 +769,7 @@ export function gateReportToMarkdown(report: GateReport): string {
     }
     const tableRows: (string | number)[][] = [];
     for (const r of report.results) {
-        // Derive the stack from the roots
-        let stackLabel = '—';
-        for (const root of report.roots) {
-            if (root.relDir === r.relDir) {
-                stackLabel = root.stack;
-                break;
-            }
-        }
-        // Fallback: try old command-matching approach
-        if (stackLabel === '—') {
-            for (const stack of report.stacks) {
-                const commands = GATE_COMMANDS[stack];
-                if (commands[r.step] === r.command) {
-                    stackLabel = stack;
-                    break;
-                }
-            }
-        }
+        const stackLabel = stackOf(report, r) ?? '—';
         const icon = r.skipped ? ':fast_forward:' : r.mode === 'absent' ? ':grey_question:' : r.passed ? ':white_check_mark:' : ':x:';
         const status = r.skipped ? 'Skipped' : r.mode === 'absent' ? 'Absent' : r.passed ? 'Passed' : 'Failed';
         const dur = r.durationMs > 0 ? `${(r.durationMs / 1000).toFixed(1)}s` : '—';
@@ -808,7 +784,8 @@ export function gateReportToMarkdown(report: GateReport): string {
         lines.push('');
         lines.push('<details><summary>Failure details</summary>\n');
         for (const f of failures) {
-            lines.push(`**${f.step}** (\`${f.command}\`)${f.relDir ? ` [${f.relDir}]` : ''}:\n\`\`\`\n${f.output.slice(0, 1000)}\n\`\`\`\n`);
+            // Plan 30-07: the failures and verdict, not the first 1,000 chars of progress output
+            lines.push(`**${f.step}** (\`${f.command}\`)${f.relDir ? ` [${f.relDir}]` : ''}:\n\`\`\`\n${summariseTestOutput(f.output, 1000)}\n\`\`\`\n`);
         }
         lines.push('</details>');
     }

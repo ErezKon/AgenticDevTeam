@@ -86,6 +86,11 @@ export class TokenUsageCallbackHandler extends BaseCallbackHandler {
         this._invocationId = id;
     }
 
+    /** The invocation the next LLM call belongs to — the agent factory's soft landing reads its spend (Plan 30-06). */
+    getInvocationId(): string | undefined {
+        return this._invocationId;
+    }
+
     /**
      * Called at the end of every LLM call. Extracts token usage from
      * the provider response and records it in the global tracker.

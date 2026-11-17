@@ -11,6 +11,8 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { getLogger } from '../utils/logger';
 import { execSync } from '../utils/shell-exec';
+import { PIPELINE_DIRS } from '../utils/workspace';
+import { shouldSkipInstall } from './quality-gates';
 
 const log = getLogger('[workspace-snapshot]', 178);
 
@@ -23,9 +25,9 @@ export interface SnapshotOptions {
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
-/** Directories excluded from the file tree to save tokens. */
+/** Directories excluded from the file tree to save tokens; never the pipeline's own (Plan 30-04). */
 const EXCLUDED_DIRS = new Set([
-    'node_modules', '.git', '.agent', 'docs', '.conventions',
+    ...PIPELINE_DIRS, 'node_modules', '.git', 'docs',
     'dist', 'build', '.next', 'coverage', '.nyc_output',
     '__pycache__', '.mypy_cache', '.pytest_cache',
 ]);
@@ -139,16 +141,20 @@ function detectTestInfo(worktree: string): string {
 }
 
 /**
- * Read dependency names (no versions) from package.json.
+ * Whether the dependencies are installed, then their names (no versions) from
+ * package.json. Plan 30-07: the conductor pre-installs them when it creates a
+ * worktree (`pr/worktree-deps.ts`), so the agent is told not to.
  */
 function readDependencyNames(worktree: string): string {
     try {
         const pkg = JSON.parse(fs.readFileSync(path.join(worktree, 'package.json'), 'utf-8'));
         const deps = Object.keys(pkg.dependencies ?? {});
         const devDeps = Object.keys(pkg.devDependencies ?? {});
-        const lines: string[] = [];
-        if (deps.length) lines.push(`Dependencies: ${deps.join(', ')}`);
-        if (devDeps.length) lines.push(`DevDependencies: ${devDeps.join(', ')}`);
+        const lines: string[] = [shouldSkipInstall('node', worktree)
+            ? 'Dependencies: installed — node_modules is up to date. Do not run npm install unless you add a package.'
+            : 'Dependencies: not installed — install them before you run the tests.'];
+        if (deps.length) lines.push(`Packages: ${deps.join(', ')}`);
+        if (devDeps.length) lines.push(`Dev packages: ${devDeps.join(', ')}`);
         return lines.join('\n');
     } catch {
         return '';

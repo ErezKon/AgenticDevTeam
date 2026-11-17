@@ -97,9 +97,23 @@ export interface AcceptanceReport {
 }
 
 export interface DispatchRound {
+    /** File changes claimed this round, merged or not — not a progress signal (Plan 30-05). */
     fileChanges: number;
-    /** **Merged** PRs only. `PR-SKIPPED-*` placeholders (status `closed`, prNumber 0)
-     *  are recorded for every no-commit branch and must never count as progress. */
-    prs: number;
+    /** PRs merged this round — the progress signal. `PR-SKIPPED-*` placeholders (status `closed`,
+     *  prNumber 0) are recorded for every no-commit branch and never count. Plan 30-05: was `prs`. */
+    merged: number;
+    /** Assignments whose agent ran for the first time this round (Plan 30-05). */
+    executed: number;
+    /** Assignments a branch budget left for the next round (Plan 30-05): work in flight, not a stall. */
+    deferred: number;
     completed: number;
+}
+
+/** One bug-fix triage round (Plan 30-05). */
+export interface TriageRound {
+    iteration: number;
+    /** `state.bugs.length` when triage ran: the bugs after it are what the next evaluation raised. */
+    bugCursor: number;
+    /** The bugs handed to the Team Leader (`selectTriageBugs`). */
+    bugIds: string[];
 }

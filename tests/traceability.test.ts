@@ -459,6 +459,27 @@ describe('buildTraceabilityReport', () => {
         expect(report.blockedDeliveries[0].branchName).toBe('feat/x');
     });
 
+    it('gives a blocked delivery its real blockers and reads each branch\'s latest record (Plan 30-03)', () => {
+        const blockers = ['Quality gates not passed (1 failures)', 'Quorum not met: 0/1 approvals (0 abstention(s))'];
+        const state = makeMinimalState({
+            userStories: [makeStory('US-001', 'EPIC-001', ['AC-A'])],
+            assignments: [makeAssignment('ASSIGN-001', 'US-001'), makeAssignment('ASSIGN-002', 'US-001'), makeAssignment('ASSIGN-003', 'US-001')],
+            pullRequests: [
+                makePR('PR-001', 101, 'feat/x', ['ASSIGN-001'], 'blocked'),                    // round 1 …
+                { ...makePR('PR-002', 102, 'feat/y', ['ASSIGN-002'], 'blocked'), blockers },
+                makePR('PR-003', 103, 'feat/z', ['ASSIGN-003'], 'blocked'),
+                makePR('PR-001', 101, 'feat/x', ['ASSIGN-001'], 'merged'),                     // … round 2: merged
+            ],
+        });
+
+        const report = buildTraceabilityReport(state);
+        expect(report.blockedDeliveries).toEqual([
+            { branchName: 'feat/y', prNumber: 102, status: 'blocked', reason: blockers.join('; ') },
+            { branchName: 'feat/z', prNumber: 103, status: 'blocked', reason: 'PR blocked (no blockers recorded)' },
+        ]);
+        expect(renderTraceabilityMarkdown(report)).toContain('Quality gates not passed (1 failures); Quorum not met');
+    });
+
     it('computes claimed vs executed discrepancies', () => {
         const state = makeMinimalState({
             userStories: [makeStory('US-001', 'EPIC-001', ['AC-A'])],

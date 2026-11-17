@@ -4,7 +4,27 @@
  * Validates that blocksWithTrailingBreakpoint correctly skips thinking blocks
  * and places cache_control on the appropriate non-thinking block.
  */
-import { blocksWithTrailingBreakpoint } from '../src/agents/_shared/prompt-cache';
+import { blocksWithTrailingBreakpoint, getMinCacheableTokens } from '../src/agents/_shared/prompt-cache';
+
+// ─── Plan 30-06: minimum cacheable prefix (diagnostics only) ────────────────
+
+describe('getMinCacheableTokens (Plan 30-06)', () => {
+    it.each([
+        ['claude-opus-5', 512], ['claude-opus-5-5', 512], ['claude-fable-5-1', 512], ['claude-mythos-5', 512],
+        ['claude-opus-4-8', 1024], ['claude-sonnet-5', 1024], ['claude-sonnet-4-5-20250929', 1024],
+        ['claude-sonnet-4-20250514', 1024], ['claude-opus-4-1-20250805', 1024], ['claude-opus-4-20250514', 1024],
+        ['claude-opus-4-7', 2048], ['claude-mythos-preview', 2048], ['claude-3-5-haiku-20241022', 2048],
+        // The pre-Plan-30 table was wrong for Haiku 4.5, Opus 4.6 and Opus 5
+        ['claude-haiku-4-5', 4096], ['claude-haiku-4-5-20251001', 4096], ['claude-opus-4-6', 4096], ['claude-opus-4-5', 4096],
+    ])('%s → %i tokens', (model, tokens) => {
+        expect(getMinCacheableTokens(model)).toBe(tokens);
+    });
+
+    it('defaults to 1024 for an unknown model and never matches inside a version number', () => {
+        expect(getMinCacheableTokens('gpt-oss-120b')).toBe(1024);
+        expect(getMinCacheableTokens('claude-opus-50')).toBe(1024);
+    });
+});
 
 describe('blocksWithTrailingBreakpoint', () => {
     it('returns null for empty string content', () => {

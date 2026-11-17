@@ -13,6 +13,7 @@
  */
 import { getLogger } from '../utils/logger';
 import { gitExec, gitExecVerbose } from '../utils/git-exec';
+import { stageWorkspaceChanges } from '../utils/repo-hygiene';
 import { WORKSPACE_SYNC_ALLOW_RESET } from '../config';
 import type { GitContext } from '../agents/_shared/base-schemas';
 
@@ -117,12 +118,20 @@ export async function syncWorkspaceToBranch(
     // 1. Prune stale worktree tracking entries
     gitExec(gitRoot, 'worktree prune');
 
-    // 2. Commit uncommitted changes so nothing is lost
+    // 2. Commit uncommitted changes so nothing is lost. Plan 30-04: never a pipeline
+    //    directory or a nested repository — this auto-commit pushed a salvaged worktree
+    //    to the claudeopus5 system branch as a gitlink.
     const porcelain = gitExec(gitRoot, 'status --porcelain');
     if (!porcelain.startsWith('Error:') && isDirty(porcelain)) {
-        log.info('Uncommitted changes detected — committing before sync');
-        gitExec(gitRoot, 'add .');
-        gitExec(gitRoot, 'commit -m "chore: pipeline artifacts (pre-sync auto-commit)"');
+        const stage = stageWorkspaceChanges(gitRoot);
+        if (stage.error) {
+            log.error(`Cannot stage the uncommitted changes before sync: ${stage.error}`);
+        } else if (stage.staged.length > 0) {
+            const shown = stage.staged.slice(0, 20).join(', ') + (stage.staged.length > 20 ? `, … ${stage.staged.length - 20} more` : '');
+            log.info(`Uncommitted changes detected — committing ${stage.staged.length} file(s) before sync: ${shown}`);
+            const commit = gitExec(gitRoot, 'commit -m "chore: pipeline artifacts (pre-sync auto-commit)"');
+            if (commit.startsWith('Error:')) log.error(`Pre-sync auto-commit failed: ${commit}`);
+        }
     }
 
     // 3. Fetch origin/<branch> — network op, so use the verbose variant with

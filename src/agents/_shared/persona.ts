@@ -99,21 +99,23 @@ export function buildDevPersonaCompact(cfg: DevPersonaConfig): string {
     The repo contract is authoritative. Create files ONLY at the paths declared for your modules.
     Import other modules ONLY via their declared paths and exports — those files may not exist yet;
     code against the signatures. Never create a second implementation of a module that already has
-    a declared path. A layout linter checks this and blocks your PR.
+    a declared path.
 </repo_contract>`);
 
+    // Plan 30-07: batch reads, dependencies are pre-installed, finish as soon as the work is done
     parts.push(`<workflow>
     Steps 1–2 are already answered in the \`## Workspace Snapshot\` section of your
     prompt. Do NOT call \`list_dir\` on the project root or read \`package.json\` —
     that information is above. Spend your tool budget on reading the specific files
     you will modify, writing code, and running tests.
+    Batch independent read_file/search_code calls into one turn.
     1. READ your assigned stories, architecture, tech stack, and DB design.
     2. REVIEW the Workspace Snapshot to understand what files exist and what's built.
     3. PLAN your approach: files to create/modify, in what order.
     4. WRITE TESTS FIRST — unit + integration. Tests define expected behaviour.
     5. IMPLEMENT production code to make tests pass. Batch your work: write a complete file in one write_file call rather than many edit_file calls.
-    6. RUN tests via run_command, confirm exit 0. Install deps first if needed.
-    7. REPORT: record all FileChange entries.
+    6. RUN tests via run_command, confirm exit 0. Deps are installed: don't run npm install unless you add a package.
+    7. REPORT: record all FileChange entries. When tests pass and every AC has a tagged test, return the final JSON immediately.
     Do not run git commands — the conductor commits and pushes your work.
 </workflow>`);
 
@@ -184,6 +186,7 @@ ${cfg.conventionFiles?.length ? getConventionReadInstructions(cfg.conventionFile
     2.5. READ the coding convention files listed in <coding_conventions> using read_file.
          Apply these standards to ALL code you write.
     3. READ existing files (fileChanges log + actual workspace) to understand what's already been built.
+       Batch independent read_file/search_code calls into one turn.
     4. PLAN your approach: which files to create/modify, in what order.
     5. WRITE TESTS FIRST (TDD):
        a. Write unit tests that define the expected behavior for your assignment.
@@ -191,11 +194,12 @@ ${cfg.conventionFiles?.length ? getConventionReadInstructions(cfg.conventionFile
        c. Tests should initially FAIL (red phase) — they define what you need to build.
     6. IMPLEMENT: write production code file by file to make the tests pass (green phase).
     7. REFACTOR: clean up the code while keeping tests green.
-    8. RUN tests via run_command and confirm exit code 0. If dependencies are missing,
-       install them first (e.g. \`npm install --no-audit --no-fund\`). Re-run until green
-       or until you have documented the real blocker in your notes.
+    8. RUN tests via run_command and confirm exit code 0. Dependencies are already installed
+       (see the Workspace Snapshot) — run \`npm install\` only after adding a package. Re-run
+       until green or until you have documented the real blocker in your notes.
     9. VERIFY: list the workspace to confirm files are in place; re-read key files to check for issues.
     10. REPORT: record all FileChange entries and write your mission markdown artifact.
+        When tests pass and every AC has a tagged test, return the final JSON immediately.
 </workflow>
 
 <tdd_rules>

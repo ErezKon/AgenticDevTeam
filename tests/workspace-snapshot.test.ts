@@ -106,5 +106,26 @@ describe('Workspace Snapshot', () => {
 
         expect(snap).toContain('## Workspace Snapshot');
         expect(snap).toContain('main.py');
+        expect(snap).not.toContain('Dependencies:');
+    });
+
+    it('says the dependencies are installed when node_modules is current (Plan 30-07)', () => {
+        fs.writeFileSync(path.join(tmpDir, 'package.json'), JSON.stringify({ dependencies: { rxjs: '7.8.0' } }));
+        fs.mkdirSync(path.join(tmpDir, 'node_modules'));
+        const hiddenLock = path.join(tmpDir, 'node_modules', '.package-lock.json');
+        fs.writeFileSync(hiddenLock, '{}');
+        const later = new Date(Date.now() + 5_000);
+        fs.utimesSync(hiddenLock, later, later);
+
+        const snap = buildWorkspaceSnapshot(tmpDir, { maxFiles: 100, maxChars: 4000 });
+
+        expect(snap).toContain('Dependencies: installed');
+        expect(snap).toContain('Do not run npm install unless you add a package');
+        expect(snap).toContain('Packages: rxjs');
+    });
+
+    it('says they are not installed without node_modules (Plan 30-07)', () => {
+        fs.writeFileSync(path.join(tmpDir, 'package.json'), JSON.stringify({ dependencies: { rxjs: '7.8.0' } }));
+        expect(buildWorkspaceSnapshot(tmpDir, { maxFiles: 100, maxChars: 4000 })).toContain('Dependencies: not installed');
     });
 });

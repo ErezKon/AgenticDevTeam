@@ -6,40 +6,26 @@
  * along with estimated cost breakdowns.
  *
  * Also saves the raw token-usage data as JSON alongside the HTML.
+ *
+ * Plan 30-06: the cost model, the new measures and the round / branch tables
+ * live in token-report-sections.ts.
  */
 import * as path from 'path';
 import { getLogger } from './logger';
 import { writeOutputFile } from './artifact-writer';
-import { MODEL_PRICING } from '../config';
 import type { TokenCallRecord, RunUsageSummary, RunStatus } from './token-tracker';
 import { tokenTracker } from './token-tracker';
 import { getCumulativeCompactionStats } from '../agents/_shared/history-compactor';
 import { getTruncationStats } from '../tools/_shared/truncate';
-import { estimateCost, estimateRunCost } from './cost';
+import { billedCost } from './cost';
+import {
+    buildAgentCostRows, computeReportTotals, escapeHtml, formatCost, formatNumber,
+    renderAttributionTables, renderPricingRows, renderTotalsCards, renderUnpricedWarning,
+} from './token-report-sections';
 
 const log = getLogger('[TokenReport]', 220);
 
-// ─── Cost helpers ───────────────────────────────────────────────────────────
-
-const DEFAULT_CACHE_READ_MULTIPLIER = 0.1;
-const DEFAULT_CACHE_WRITE_MULTIPLIER = 1.25;
-
 // ─── Aggregation ────────────────────────────────────────────────────────────
-
-interface AgentCostRow {
-    agentId: string;
-    model: string;
-    callCount: number;
-    inputTokens: number;
-    outputTokens: number;
-    totalTokens: number;
-    cacheReadTokens: number;
-    cacheCreationTokens: number;
-    inputCost: number;
-    outputCost: number;
-    cacheCost: number;
-    totalCost: number;
-}
 
 interface PhaseCostRow {
     phase: string;
@@ -49,17 +35,6 @@ interface PhaseCostRow {
     totalTokens: number;
     cacheReadTokens: number;
     cacheCreationTokens: number;
-}
-
-function buildAgentCostRows(summary: RunUsageSummary): AgentCostRow[] {
-    return summary.byAgent.map(a => {
-        const pricing = MODEL_PRICING[a.model];
-        const listInputCost = pricing ? (a.inputTokens / 1000) * pricing.inputPer1k : 0;
-        const outputCost = pricing ? (a.outputTokens / 1000) * pricing.outputPer1k : 0;
-        const billedCost = estimateCost(a.model, a.inputTokens, a.outputTokens, a.cacheReadTokens, a.cacheCreationTokens);
-        const cacheCost = listInputCost + outputCost - billedCost; // savings from cache (positive = saved)
-        return { ...a, inputCost: listInputCost, outputCost, cacheCost, totalCost: billedCost };
-    });
 }
 
 // ─── Chart.js CDN (minified, SRI-pinned) ────────────────────────────────────
@@ -81,18 +56,6 @@ function pickColor(index: number): string {
 
 // ─── HTML generation ────────────────────────────────────────────────────────
 
-function escapeHtml(s: string): string {
-    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-}
-
-function formatNumber(n: number): string {
-    return n.toLocaleString('en-US');
-}
-
-function formatCost(n: number): string {
-    return `$${n.toFixed(4)}`;
-}
-
 function generateHtml(
     summary: RunUsageSummary,
     records: TokenCallRecord[],
@@ -100,11 +63,14 @@ function generateHtml(
     runStatus: RunStatus = 'completed',
 ): string {
     const agentRows = buildAgentCostRows(summary);
-    const totalListCost = agentRows.reduce((s, r) => s + r.totalCost, 0);
-    // Plan 24, C3: cache-aware billed cost
-    const totalBilledCost = estimateRunCost(summary);
+    // Plan 24 C3 / Plan 30-06: billed cost per call record; list price at full input rates
+    const invocations = tokenTracker.getInvocations();
+    const outcomes = tokenTracker.getBranchOutcomes();
+    const totals = computeReportTotals(records, invocations, outcomes);
+    const totalListCost = totals.listCost;
+    const totalBilledCost = totals.billedCost;
     const totalCost = totalBilledCost;
-    const cacheSavings = totalListCost - totalBilledCost;
+    const cacheSavings = totals.savings;
     const runDate = new Date().toISOString();
 
     // Prepare chart data as JSON for inline script
@@ -126,25 +92,10 @@ function generateHtml(
 
     // Cost by agent bar chart — cache-aware breakdown
     const costLabels = JSON.stringify(agentRows.map(r => r.agentId));
-    const costCacheReadData = JSON.stringify(agentRows.map(r => {
-        const pricing = MODEL_PRICING[r.model];
-        if (!pricing) return 0;
-        const mul = pricing.cacheReadMultiplier ?? DEFAULT_CACHE_READ_MULTIPLIER;
-        return (r.cacheReadTokens * mul * pricing.inputPer1k) / 1000;
-    }));
-    const costCacheWriteData = JSON.stringify(agentRows.map(r => {
-        const pricing = MODEL_PRICING[r.model];
-        if (!pricing) return 0;
-        const mul = pricing.cacheWriteMultiplier ?? DEFAULT_CACHE_WRITE_MULTIPLIER;
-        return (r.cacheCreationTokens * mul * pricing.inputPer1k) / 1000;
-    }));
-    const costUncachedData = JSON.stringify(agentRows.map(r => {
-        const pricing = MODEL_PRICING[r.model];
-        if (!pricing) return 0;
-        const uncached = Math.max(0, r.inputTokens - r.cacheReadTokens - r.cacheCreationTokens);
-        return (uncached * pricing.inputPer1k) / 1000;
-    }));
-    const costOutputData = JSON.stringify(agentRows.map(r => r.outputCost));
+    const costCacheReadData = JSON.stringify(agentRows.map(r => r.costs.cacheRead));
+    const costCacheWriteData = JSON.stringify(agentRows.map(r => r.costs.cacheWrite));
+    const costUncachedData = JSON.stringify(agentRows.map(r => r.costs.uncached));
+    const costOutputData = JSON.stringify(agentRows.map(r => r.costs.output));
 
     // Cache efficiency by agent chart
     const cacheEffLabels = JSON.stringify(agentRows.map(r => r.agentId));
@@ -152,7 +103,7 @@ function generateHtml(
 
     // Build detail table rows
     const detailRows = records.map(r => {
-        const cost = estimateCost(r.model, r.inputTokens, r.outputTokens, r.cacheReadTokens, r.cacheCreationTokens);
+        const cost = billedCost(r);
         return `<tr>
             <td>${escapeHtml(r.agentId)}</td>
             <td>${escapeHtml(r.phase)}</td>
@@ -198,7 +149,7 @@ function generateHtml(
 
     // Model table rows
     const modelTableRows = summary.byModel.map(r => {
-        const cost = estimateCost(r.model, r.inputTokens, r.outputTokens, r.cacheReadTokens, r.cacheCreationTokens);
+        const cost = billedCost(r);
         return `<tr>
             <td>${escapeHtml(r.model)}</td>
             <td class="num">${r.callCount}</td>
@@ -212,17 +163,7 @@ function generateHtml(
     }).join('\n');
 
     // Pricing rates table — include effective cache rates
-    const pricingRows = Object.entries(MODEL_PRICING).map(([model, pricing]) => {
-        const readMul = pricing.cacheReadMultiplier ?? DEFAULT_CACHE_READ_MULTIPLIER;
-        const writeMul = pricing.cacheWriteMultiplier ?? DEFAULT_CACHE_WRITE_MULTIPLIER;
-        return `<tr>
-            <td>${escapeHtml(model)}</td>
-            <td class="num">${formatCost(pricing.inputPer1k)}</td>
-            <td class="num">${formatCost(pricing.outputPer1k)}</td>
-            <td class="num">${formatCost(pricing.inputPer1k * readMul)}</td>
-            <td class="num">${formatCost(pricing.inputPer1k * writeMul)}</td>
-        </tr>`;
-    }).join('\n');
+    const pricingRows = renderPricingRows();
 
     // Invocation efficiency table
     const invocationRows = tokenTracker.getInvocationSummaries();
@@ -422,6 +363,7 @@ ${runStatus === 'in-progress'
     : runStatus === 'failed'
     ? '<div class="status-banner failed">&#10060; Run failed &mdash; this report contains partial data collected before the failure.</div>'
     : '<div class="status-banner completed">&#9989; Run completed successfully.</div>'}
+${renderUnpricedWarning(totals.unpriced)}
 
 <!-- Summary cards -->
 <div class="summary-grid">
@@ -467,6 +409,8 @@ ${runStatus === 'in-progress'
         <div class="value">${formatCost(totalCost)}</div>
         <div class="label">Estimated Cost</div>
     </div>
+    <!-- Plan 30-06: cache-weighted input, the uncached share of a call, and waste -->
+    ${renderTotalsCards(totals)}
 </div>
 
 <!-- Charts -->
@@ -540,6 +484,9 @@ ${runStatus === 'in-progress'
     </thead>
     <tbody>${modelTableRows}</tbody>
 </table>
+
+<!-- By development round / by branch (Plan 30-06) -->
+${renderAttributionTables(records, invocations, outcomes)}
 
 <!-- Invocation Efficiency -->
 ${invocationRows.length > 0 ? `<h2>Invocation Efficiency</h2>

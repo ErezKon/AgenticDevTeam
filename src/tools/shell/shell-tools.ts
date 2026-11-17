@@ -1,24 +1,31 @@
 /**
  * Host-mode command-execution tool.
  *
- * Commands run directly on the host via `child_process.exec`, scoped to
- * the generated project workspace directory.  There is NO Docker sandbox
- * — the process inherits the full host environment.
+ * Commands run directly on the host — `bash -o pipefail -c <command>`, or
+ * `child_process.exec` where there is no bash — scoped to the generated project
+ * workspace directory.  There is NO Docker sandbox; the environment is the safe
+ * allowlist plus non-interactive settings, never API keys.
  *
  * Guards:
  *  - A denylist rejects obviously destructive or dangerous patterns before
- *    `exec` is called (see `isDeniedCommand`).
+ *    anything runs (see `isDeniedCommand`).
  *  - Timeout is clamped to SHELL_MAX_TIMEOUT_S (default 900 s / 15 min).
  *  - Gated on SHELL_ALLOW_HOST=true (default true).
+ *
+ * Plan 30-07: output is rendered the way a terminal shows it, long test/build
+ * output is cut to its failures and summary lines, and pipelines keep the exit
+ * code of the command that failed.
  *
  * Future work (Option B): run commands inside a throw-away Docker container
  * with the workspace bind-mounted and no network by default.
  */
+import * as fs from 'fs';
 import { tool } from '@langchain/core/tools';
 import { z } from 'zod';
 import { LogColors, color256 } from '../../utils/log-colors.util';
 import { logToolAction } from '../../utils/logger';
-import { execCapture } from '../../utils/shell-exec';
+import { execCapture, execFileCapture, safeChildEnv, NON_INTERACTIVE_ENV, type CaptureResult } from '../../utils/shell-exec';
+import { renderTerminalOutput, summariseTestOutput } from '../../utils/terminal-output';
 import {
     GIT_USER_NAME, GIT_USER_EMAIL,
     SHELL_ALLOW_HOST, SHELL_DEFAULT_TIMEOUT_S, SHELL_MAX_TIMEOUT_S,
@@ -79,36 +86,59 @@ export function isDeniedCommand(cmd: string): DenyResult {
 
 // ─── Shell execution ─────────────────────────────────────────────────────────
 
-interface ShellResult {
-    stdout: string;
-    stderr: string;
-    exitCode: number;
-}
-
-/** Build a child-process env from a safe allowlist — never leaks API keys to LLM-authored scripts. */
-function safeShellEnv(): NodeJS.ProcessEnv {
-    const SAFE_KEYS = [
-        'PATH', 'HOME', 'USER', 'SHELL', 'LANG', 'LC_ALL', 'TERM',
-        'TMPDIR', 'TMP', 'TEMP', 'HOSTNAME',
-        'PROGRAMFILES', 'SYSTEMROOT', 'WINDIR', // Windows
-        'NODE_ENV', 'CI', 'FORCE_COLOR', 'NO_COLOR',
-    ];
-    const env: Record<string, string | undefined> = {};
-    for (const key of SAFE_KEYS) {
-        if (process.env[key]) env[key] = process.env[key];
-    }
-    return {
-        ...env,
+/**
+ * Environment of an agent command: the safe allowlist (never API keys — the scripts
+ * are LLM-authored), CI / no-colour / no-prompt settings (Plan 30-07; the host's
+ * NODE_ENV is no longer passed through, so a production host cannot make
+ * `npm install` skip devDependencies), and the commit identity.
+ */
+function shellEnv(): NodeJS.ProcessEnv {
+    return safeChildEnv({
+        ...NON_INTERACTIVE_ENV,
         GIT_AUTHOR_NAME: GIT_USER_NAME, GIT_AUTHOR_EMAIL: GIT_USER_EMAIL,
         GIT_COMMITTER_NAME: GIT_USER_NAME, GIT_COMMITTER_EMAIL: GIT_USER_EMAIL,
-    };
+    });
 }
 
-function runShell(command: string, cwd: string, timeoutMs: number): Promise<ShellResult> {
-    return execCapture(command, {
-        cwd, timeout: timeoutMs, maxBuffer: 1024 * 1024 * 5,
-        env: safeShellEnv(),
-    });
+const BASH_PATHS = ['/bin/bash', '/usr/bin/bash'];
+let resolvedBash: string | null | undefined;
+
+/** The host's bash (commands run with pipefail), or null on Windows / a bash-less image (then `/bin/sh`). */
+function bashPath(): string | null {
+    if (resolvedBash === undefined) {
+        resolvedBash = process.platform === 'win32' ? null : (BASH_PATHS.find(p => fs.existsSync(p)) ?? null);
+    }
+    return resolvedBash;
+}
+
+function runShell(command: string, cwd: string, timeoutMs: number): Promise<CaptureResult> {
+    const options = { cwd, timeout: timeoutMs, maxBuffer: 1024 * 1024 * 5, env: shellEnv() };
+    // Plan 30-07: with pipefail `npm test | tail -20` reports the tests' exit code, not tail's 0
+    const bash = bashPath();
+    return bash ? execFileCapture(bash, ['-o', 'pipefail', '-c', command], options) : execCapture(command, options);
+}
+
+/** Test, build and lint runs: long output is cut to failures and summary lines (Plan 30-07). */
+const TEST_RUN_RE = /\b(?:test|tests|jest|vitest|mocha|karma|pytest|playwright|e2e|tsc|build|lint)\b/;
+/** …unless the command only reads files (`cat src/app.test.ts` is a file, not a test run). */
+const READ_COMMAND_RE = /^\s*(?:cat|head|tail|sed|less|more|grep|rg|find|ls|tree|wc|git)\b/;
+
+/**
+ * What the model sees of a finished command (Plan 30-07): the exit code, then each
+ * stream rendered as a terminal shows it — the 16 kB of Karma progress redraws of the
+ * claudeopus5 run render to ~1.3 kB. A long test/build stream is cut to its failure
+ * blocks and summary lines; anything still too long keeps its head and (mostly) tail.
+ */
+function formatShellResult(command: string, result: CaptureResult): string {
+    const header = `Exit code: ${result.exitCode}`;
+    const streams = ([['stdout', result.stdout], ['stderr', result.stderr]] as const)
+        .map(([label, text]) => ({ label, text: renderTerminalOutput(text) }))
+        .filter(s => s.text.length > 0);
+    const summarise = TEST_RUN_RE.test(command) && !READ_COMMAND_RE.test(command);
+    const budget = Math.floor((MAX_TOOL_RESULT_CHARS - header.length) / Math.max(1, streams.length)) - 20;
+    const body = streams.map(s => `${s.label}:\n${summarise ? summariseTestOutput(s.text, budget) : s.text}`);
+    // Tail-weighted split (headRatio=0.2): build/test failures print at the end
+    return truncateToolResult([header, ...body].join('\n\n'), 'run_command', MAX_TOOL_RESULT_CHARS, 0.2);
 }
 
 // One-time startup warning so the risk is visible in logs
@@ -147,18 +177,16 @@ export function createShellTool(workspaceRoot: string) {
 
             logToolAction(`${TAG} Executing: ${command} (timeout=${effectiveTimeout}s)`);
             const result = await runShell(command, workspaceRoot, timeoutMs);
-            const raw = [
-                `Exit code: ${result.exitCode}`,
-                result.stdout ? `stdout:\n${result.stdout}` : '',
-                result.stderr ? `stderr:\n${result.stderr}` : '',
-            ].filter(Boolean).join('\n\n');
             logToolAction(`${TAG} Completed with exit code ${result.exitCode}`);
-            // Tail-weighted split (headRatio=0.2): build/test failures print at the end
-            return truncateToolResult(raw, 'run_command', MAX_TOOL_RESULT_CHARS, 0.2);
+            return formatShellResult(command, result);
         },
         {
             name: 'run_command',
-            description: 'Execute a shell command in the project workspace. Use for running builds, tests, installs, etc. Commands are executed in the workspace root directory.',
+            description: 'Execute a shell command in the project workspace root (builds, tests, installs). '
+                + (bashPath()
+                    ? 'Commands run in bash with pipefail: a pipeline fails when any command in it fails, so `npm test | tail -20` reports the tests\' exit code. '
+                    : 'Commands run in /bin/sh: a pipeline reports the exit code of its last command. ')
+                + 'Output is shown as a terminal would show it; long test or build output is cut to its failures and summary lines.',
             schema: z.object({
                 command: z.string().describe('Shell command to execute'),
                 timeoutSeconds: z.number().optional().describe('Timeout in seconds (default: 60, max: 900)'),
